@@ -1,0 +1,248 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import re
+from net_complexity.outputs import ClassifModelOutput
+from net_complexity.models import ResNet, Bottleneck
+
+
+class ClassificationFeatureSelectionWrapper(nn.Module):
+    def __init__(self,
+                 backbone: nn.Module,
+                 lambda_coef: float = 0.01,
+                 criterion=nn.CrossEntropyLoss(),
+                 regularization_loss=lambda x: 0):
+        super().__init__()
+        self.backbone = backbone
+        self.criterion = criterion
+        self.lambda_coef = lambda_coef
+        self.regularization_loss = regularization_loss
+
+    def forward(self, X, y) -> ClassifModelOutput:
+        logits = self.backbone(X)
+        ce_loss = self.criterion(logits, y)
+        reg_loss = self.regularization_loss(self.backbone)
+
+        return ClassifModelOutput(
+            ce_loss=ce_loss,
+            regularization_loss=reg_loss,
+            loss=ce_loss + self.lambda_coef*reg_loss,
+            logits=logits
+        )
+
+
+class GumbleSoftmax(torch.nn.Module):
+    def __init__(self, hard=False):
+        super(GumbleSoftmax, self).__init__()
+        self.hard = hard
+        self.gpu = False
+
+    def cuda(self):
+        self.gpu = True
+
+    def cpu(self):
+        self.gpu = False
+
+    def sample_gumbel(self, shape, eps=1e-10):
+        """Sample from Gumbel(0, 1)"""
+        noise = torch.rand(shape)
+        noise.add_(eps).log_().neg_()
+        noise.add_(eps).log_().neg_()
+        if self.gpu:
+            return torch.autograd.Variable(noise).cuda()
+        else:
+            return torch.autograd.Variable(noise)
+
+    def sample_gumbel_like(self, template_tensor, eps=1e-10):
+        uniform_samples_tensor = template_tensor.clone().uniform_()
+        gumble_samples_tensor = - \
+            torch.log(eps - torch.log(uniform_samples_tensor + eps))
+        return gumble_samples_tensor
+
+    def gumbel_softmax_sample(self, logits, temperature):
+        """ Draw a sample from the Gumbel-Softmax distribution"""
+        dim = logits.size(-1)
+        gumble_samples_tensor = self.sample_gumbel_like(logits.data)
+        gumble_trick_log_prob_samples = logits + \
+            torch.autograd.Variable(gumble_samples_tensor)
+        soft_samples = F.softmax(
+            gumble_trick_log_prob_samples / temperature, dim)
+        return soft_samples
+
+    def gumbel_softmax(self, logits, temperature, hard=False):
+        """Sample from the Gumbel-Softmax distribution and optionally discretize.
+        Args:
+        logits: [batch_size, n_class] unnormalized log-probs
+        temperature: non-negative scalar
+        hard: if True, take argmax, but differentiate w.r.t. soft sample y
+        Returns:
+        [batch_size, n_class] sample from the Gumbel-Softmax distribution.
+        If hard=True, then the returned sample will be one-hot, otherwise it will
+        be a probabilitiy distribution that sums to 1 across classes
+        """
+        y = self.gumbel_softmax_sample(logits, temperature)
+        if hard:
+            _, max_value_indexes = y.data.max(1, keepdim=True)
+            y_hard = logits.data.clone().zero_().scatter_(1, max_value_indexes, 1)
+            y = torch.autograd.Variable(y_hard - y.data) + y
+        return y
+
+    def forward(self, logits, temp=1, force_hard=False):
+        samplesize = logits.size()
+
+        if self.training and not force_hard:
+            return self.gumbel_softmax(logits, temperature=temp, hard=False)
+        else:
+            return self.gumbel_softmax(logits, temperature=temp, hard=True)
+
+
+# class AIGConvWrapper(nn.Module):
+#     def __init__(self,
+#                  module: nn.Module,
+#                  in_channels: int,
+#                  hidden_channels: int = 16,
+#                  temperature: float = 1,
+#                  hard: bool = False):
+#         super().__init__()
+#         self.gumbel = GumbleSoftmax(hard=hard)
+#         self.module = module
+#         self.temperature = temperature
+#         self.adapter = nn.Sequential(
+#             nn.Conv2d(in_channels=in_channels,
+#                       out_channels=hidden_channels, kernel_size=1),
+#             nn.BatchNorm2d(hidden_channels),
+#             nn.ReLU(),
+#             nn.Conv2d(hidden_channels, 2, kernel_size=1)
+#         )
+#         # initial opening rate of the gate of about 85%
+#         self.adapter[3].bias.data[0] = 0.1
+#         self.adapter[3].bias.data[1] = 2
+
+#     def to(self, device, *args, **kwargs):
+#         super().to(device, *args, **kwargs)
+#         if device != 'cpu':
+#             self.gumbel.cuda()
+#         return self
+
+#     def forward(self, x) -> torch.Tensor:
+#         w = self.adapter(F.avg_pool2d(x, x.size(2)))
+#         w = self.gumbel(w, temp=self.temperature, force_hard=True)
+#         # todo: mb to register buffer?
+#         self.activations = w
+#         return self.module(x)*w[:, 1].unsqueeze(1)
+
+
+class AIGBottleneckLayer(Bottleneck):
+    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1, hard: bool = False):
+        super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
+        self.gumbel = GumbleSoftmax(hard=hard)
+        self.temperature = temperature
+        self.adapter = nn.Sequential(
+            nn.Conv2d(in_channels=in_planes,
+                      out_channels=16, kernel_size=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.Conv2d(16, 2, kernel_size=1)
+        )
+        # initial opening rate of the gate of about 85%
+        self.adapter[3].bias.data[0] = 0.1
+        self.adapter[3].bias.data[1] = 2
+
+    def to(self, device, *args, **kwargs):
+        super().to(device, *args, **kwargs)
+        if device != 'cpu':
+            self.gumbel.cuda()
+        return self
+
+    def forward(self, x):
+        w = self.adapter(F.avg_pool2d(x, x.size(2)))
+        w = self.gumbel(w, temp=self.temperature, force_hard=True)
+        # todo: mb to register buffer?
+        self.activations = w[:, 1].unsqueeze(1)
+
+        identity = x.clone()
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+
+        x = self.conv3(x)
+        x = self.batch_norm3(x)
+
+        # downsample if needed
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+        # add identity
+        x = identity + x*w[:, 1].unsqueeze(1)
+        x = self.relu(x)
+
+        return x
+
+
+def parse_AIG_activations(model: nn.Module, buff=None, prefix: str = None):
+    if buff is None:
+        buff = {}
+    for name, module in model.named_modules():
+        if module is model:
+            continue
+        name = f'{prefix}.{name}' if prefix is not None else name
+        if isinstance(module, AIGBottleneckLayer):
+            buff[f'g_prob_{name}'] = (module.activations)
+        if module is not model:
+            parse_AIG_activations(module, buff, name)
+    return buff
+
+
+def get_AIG_regularization_loss(model: nn.Module):
+    activations_dict = parse_AIG_activations(model)
+    reg_loss = 0
+    for name, act in activations_dict.items():
+        reg_loss += act.mean()**2
+    reg_loss /= len(activations_dict)
+    return reg_loss
+
+
+def replace_layers_by_regex(model, pattern, new_layer_factory):
+    """
+    Replace layers whose prefix matches a regex pattern with new layers.
+
+    Args:
+        model (nn.Module): The PyTorch model
+        pattern (str): Regular expression pattern to match layer prefixes
+        new_layer_factory (callable or nn.Module): Factory function that returns a new layer,
+                                                    or a layer instance to use for all matches
+    Returns:
+        nn.Module: Modified model
+    """
+    regex = re.compile(pattern)
+
+    def _replace_module(module, prefix=""):
+        for name, child in list(module.named_children()):
+            child_prefix = f"{prefix}.{name}" if prefix else name
+
+            if regex.match(child_prefix):
+                if callable(new_layer_factory):
+                    new_layer = new_layer_factory(child)
+                else:
+                    new_layer = new_layer_factory
+
+                setattr(module, name, new_layer)
+                print(
+                    f"Replaced layer '{child_prefix}' with {type(new_layer).__name__}")
+            else:
+                _replace_module(child, child_prefix)
+
+    _replace_module(model)
+    return model
+
+
+def ResNet50(num_classes, in_channels=3, resnet_block=Bottleneck):
+    return ResNet(resnet_block, [3, 4, 6, 3], num_classes, in_channels)
+
+
+def ResNet101(num_classes, in_channels=3, resnet_block=Bottleneck):
+    return ResNet(resnet_block, [3, 4, 23, 3], num_classes, in_channels)
+
+
+def ResNet152(num_classes, in_channels=3, resnet_block=Bottleneck):
+    return ResNet(resnet_block, [3, 8, 36, 3], num_classes, in_channels)
