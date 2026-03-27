@@ -35,3 +35,17 @@ In learning theory, sample complexity determines how much data is required for g
 ## Datasets
 
 *To be added.*
+
+### Installation
+
+1. Clone the repository:
+```bash
+    git clone (TODO)
+    cd sample_complexity_of_feature_selection_in_deep_tabular_models
+    pip install -e .
+```
+
+2. Run trianing example script:
+```bash
+    python3 src/net_complexity/train.py --config-dir=configs/test_configs --config-name=test
+```
