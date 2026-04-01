@@ -5,7 +5,7 @@ dataloaders:
     path_to_data: /home/machenike/IAD/sample_complexity_of_feature_selection_in_deep_tabular_models/data
     train_val_ratio: [0.8, 0.2]
     batch_size: 512
-    taskname: MNIST
+    taskname: CIFAR10
     
 model:
   _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
@@ -14,13 +14,13 @@ model:
     num_classes: 10
     in_channels: 3
     resnet_block: 
-     _target_: net_complexity.wrappers.AIGBottleneckLayer
+     _target_: net_complexity.wrappers.GumbelBottleneckLayer
      _partial_: True
-  lambda_coef: 0.05
+  lambda_coef: 0.0003
   criterion: 
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:
-    _target_: net_complexity.wrappers.get_AIG_regularization_loss
+    _target_: net_complexity.wrappers.get_gumbel_loss
     _partial_: True
 
 training_arguments:
@@ -31,24 +31,24 @@ metrics:
   train_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
   valid_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
     
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 0.01
+  lr: 0.001
   #_partial_: True
 
 mlflow:
   tracking_uri: null  # or set to your MLflow server URI, e.g., "http://localhost:5000"
   experiment_name: "feature_selection_experiment"
-  run_name: debug  # will auto-generate if not set
+  run_name: gumbel_${model.lambda_coef}  # will auto-generate if not set
   log_model: true
   log_artifacts: true
   artifacts_dir: "./mlruns"
   tags:
     project: "net_complexity"
-    model_type: "ResNet50_AIG"
+    model_type: "ResNet20_Gumbel"

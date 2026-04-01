@@ -87,6 +87,7 @@ def train(model: nn.Module,
 def main(config: DictConfig):
     device = config.device
     model = instantiate(config.model).to(device)
+    print(model)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
     metrics = instantiate(config.metrics)

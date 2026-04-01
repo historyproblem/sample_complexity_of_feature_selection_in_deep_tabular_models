@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from collections import defaultdict
+import numpy as np
+import torch
 
 
 class BaseMetric(ABC):
@@ -36,3 +39,25 @@ class Multimetric(BaseMetric):
     def reset(self):
         for metric in self.metrics:
             metric.reset()
+
+
+class MultiLossMetric(BaseMetric):
+    def __init__(self):
+        self.losses_dict = defaultdict(list)
+
+    def update(self, input, output, targets, model=None):
+        self.losses_dict['ce_loss'].append(
+            output.ce_loss.detach().cpu().numpy().item())
+        self.losses_dict['regularization_loss'].append(
+            output.regularization_loss.detach().cpu().numpy().item() if isinstance(output.regularization_loss, torch.Tensor) else 0.0)
+        self.losses_dict['loss'].append(
+            output.loss.detach().cpu().numpy().item())
+
+    def compute(self):
+        for name, metric_list in self.losses_dict.items():
+            self.losses_dict[name] = float(np.mean(metric_list))
+        return self.losses_dict
+
+    def reset(self):
+        del self.losses_dict
+        self.losses_dict = defaultdict(list)

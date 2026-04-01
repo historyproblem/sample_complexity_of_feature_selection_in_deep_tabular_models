@@ -30,23 +30,33 @@ class ClassicCVDataloaders(Dataloaders):
         # TODO:
         # change for other datasets
         # augmentations?
-
-        transform = transforms.Compose([
-            lambda x: x.convert("RGB"),
-            transforms.Resize(32),
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],
+                std=[0.2023, 0.1994, 0.2010]
+            )
         ])
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],
+                std=[0.2023, 0.1994, 0.2010]
+            )
+        ])
+
         train_dataset = task2class[taskname](
             root=path_to_data,
             train=True,
-            transform=transform,
+            transform=train_transform,
             download=True
         )
         test_dataset = task2class[taskname](
             root=path_to_data,
             train=False,
-            transform=transform,
+            transform=test_transform,
             download=True
         )
 
@@ -56,6 +66,7 @@ class ClassicCVDataloaders(Dataloaders):
 
         train_dataset, val_dataset = random_split(
             train_dataset, [train_size, val_size], torch.Generator().manual_seed(42))
+        val_dataset.dataset.transform = test_transform
 
         self.train_dataloader = DataLoader(
             dataset=train_dataset,

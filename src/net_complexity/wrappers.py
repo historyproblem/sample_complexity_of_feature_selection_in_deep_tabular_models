@@ -97,40 +97,76 @@ class GumbleSoftmax(torch.nn.Module):
             return self.gumbel_softmax(logits, temperature=temp, hard=True)
 
 
-# class AIGConvWrapper(nn.Module):
-#     def __init__(self,
-#                  module: nn.Module,
-#                  in_channels: int,
-#                  hidden_channels: int = 16,
-#                  temperature: float = 1,
-#                  hard: bool = False):
-#         super().__init__()
-#         self.gumbel = GumbleSoftmax(hard=hard)
-#         self.module = module
-#         self.temperature = temperature
-#         self.adapter = nn.Sequential(
-#             nn.Conv2d(in_channels=in_channels,
-#                       out_channels=hidden_channels, kernel_size=1),
-#             nn.BatchNorm2d(hidden_channels),
-#             nn.ReLU(),
-#             nn.Conv2d(hidden_channels, 2, kernel_size=1)
-#         )
-#         # initial opening rate of the gate of about 85%
-#         self.adapter[3].bias.data[0] = 0.1
-#         self.adapter[3].bias.data[1] = 2
+class GumbelLayer(nn.Module):
+    """
+    Gumbel-Softmax based feature selector.
+    Uses categorical distribution over {off, on} for each feature.
 
-#     def to(self, device, *args, **kwargs):
-#         super().to(device, *args, **kwargs)
-#         if device != 'cpu':
-#             self.gumbel.cuda()
-#         return self
+    Reference: "Categorical Reparameterization with Gumbel-Softmax"
+    (Jang et al., ICLR 2017)
 
-#     def forward(self, x) -> torch.Tensor:
-#         w = self.adapter(F.avg_pool2d(x, x.size(2)))
-#         w = self.gumbel(w, temp=self.temperature, force_hard=True)
-#         # todo: mb to register buffer?
-#         self.activations = w
-#         return self.module(x)*w[:, 1].unsqueeze(1)
+    Fixed implementation: Properly handles batch dimension and sampling.
+    """
+
+    def __init__(self, input_dim: int, temperature: float = 1.0):
+        super().__init__()
+        # Initialize with bias toward "off" state (first column larger)
+        # This encourages sparsity initially
+        # self.logits = nn.Parameter(torch.zeros(input_dim, 2))
+        self.logits = torch.empty(input_dim, 2)
+        self.logits[:, 1] = 2.0
+        self.logits[:, 0] = 0.1
+        self.logits = self.logits + torch.randn_like(self.logits)*0.02
+        self.logits = nn.Parameter(self.logits)
+        # self.logits.data[:, 0] = 1.0  # Bias toward off state
+        self.temperature = temperature
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply Gumbel-Softmax gates to input features.
+
+        Args:
+            x: Input tensor of shape [batch_size, input_dim]
+
+        Returns:
+            Gated input tensor
+        """
+        if self.training:
+            sampled = F.gumbel_softmax(
+                self.logits,
+                tau=self.temperature,
+                hard=True,
+                dim=1
+            )
+            gates = sampled[:, 1]
+        else:
+            gates = (self.logits[:, 1] > self.logits[:, 0]).float()
+        gates = gates.unsqueeze(0)
+        while len(gates.shape) < len(x.shape):
+            gates = gates.unsqueeze(-1)
+        return x
+
+    def regularization_loss(self) -> torch.Tensor:
+        """Compute regularization: sum of "on" state probabilities."""
+        probs = F.softmax(self.logits, dim=1)[:, 1]
+        return torch.mean(probs)
+
+    def get_selection_probs(self) -> torch.Tensor:
+        """Get selection probabilities for each feature."""
+        return F.softmax(self.logits, dim=1)[:, 1].detach()
+
+    def set_temperature(self, temperature: float):
+        """Update temperature for annealing schedule."""
+        self.temperature = temperature
+
+
+class GumbelBottleneckLayer(Bottleneck):
+    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1):
+        super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
+        self.gumbel_layer = GumbelLayer(
+            input_dim=planes, temperature=temperature)
+
+    def forward(self, x):
+        return self.gumbel_layer(super().forward(x))
 
 
 class AIGBottleneckLayer(Bottleneck):
@@ -200,6 +236,28 @@ def get_AIG_regularization_loss(model: nn.Module):
         reg_loss += act.mean()**2
     reg_loss /= len(activations_dict)
     return reg_loss
+
+
+def get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
+    if buff is None:
+        buff = {}
+    for name, module in model.named_modules():
+        if module is model:
+            continue
+        name = f'{prefix}.{name}' if prefix is not None else name
+        if isinstance(module, GumbelLayer):
+            buff[name] = module
+        get_gumbel_modules(module, buff, name)
+    return buff
+
+
+def get_gumbel_loss(model: nn.Module):
+    gumbel_modules = get_gumbel_modules(model)
+    loss = 0.0
+    for _, module in gumbel_modules.items():
+        loss += module.regularization_loss()
+    loss /= len(gumbel_modules)
+    return loss
 
 
 def replace_layers_by_regex(model, pattern, new_layer_factory):

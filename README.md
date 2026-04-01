@@ -49,3 +49,5 @@ In learning theory, sample complexity determines how much data is required for g
 ```bash
     python3 src/net_complexity/train.py --config-dir=configs/test_configs --config-name=test
 ```
+
+3. All monitoring will be in mlflow
