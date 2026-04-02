@@ -32,6 +32,9 @@ class GumbelProbMetric(BaseMetric):
             else:
                 estim_means.append(self.all_probs_dict[name])
 
+        if not real_means and not estim_means:
+            return {}
+
         self.all_probs_dict['average_real_prob'] = float(
             np.mean(real_means))
         self.all_probs_dict['max_real_prob'] = float(np.max(real_means))

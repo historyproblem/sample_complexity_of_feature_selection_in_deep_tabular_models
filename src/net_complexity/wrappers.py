@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import re
 
+from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .models import Bottleneck, ResNet
 from .outputs import ClassifModelOutput
 
@@ -146,6 +147,25 @@ class GumbelLayer(nn.Module):
             gates = gates.unsqueeze(-1)
         return x
 
+    def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            sampled = F.gumbel_softmax(
+                self.logits,
+                tau=self.temperature,
+                hard=True,
+                dim=1
+            )
+            gates = sampled[:, 1]
+        else:
+            gates = (self.logits[:, 1] > self.logits[:, 0]).float()
+        gates = gates.unsqueeze(0)
+        while len(gates.shape) < len(x.shape):
+            gates = gates.unsqueeze(-1)
+        return gates
+
+    def apply_gates(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.compute_gates(x)
+
     def regularization_loss(self) -> torch.Tensor:
         """Compute regularization: sum of "on" state probabilities."""
         probs = F.softmax(self.logits, dim=1)[:, 1]
@@ -168,6 +188,18 @@ class GumbelBottleneckLayer(Bottleneck):
 
     def forward(self, x):
         return self.gumbel_layer(super().forward(x))
+
+
+class CIFARGumbelBasicBlock(CIFARBasicBlock):
+    def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
+        super().__init__(in_planes, planes, stride=stride, option=option)
+        self.gumbel_layer = GumbelLayer(
+            input_dim=planes * self.expansion,
+            temperature=temperature,
+        )
+
+    def forward(self, x):
+        return self.gumbel_layer.apply_gates(super().forward(x))
 
 
 class AIGBottleneckLayer(Bottleneck):
@@ -254,6 +286,8 @@ def get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
 
 def get_gumbel_loss(model: nn.Module):
     gumbel_modules = get_gumbel_modules(model)
+    if len(gumbel_modules) == 0:
+        return 0.0
     loss = 0.0
     for _, module in gumbel_modules.items():
         loss += module.regularization_loss()
@@ -305,3 +339,63 @@ def ResNet101(num_classes, in_channels=3, resnet_block=Bottleneck):
 
 def ResNet152(num_classes, in_channels=3, resnet_block=Bottleneck):
     return ResNet(resnet_block, [3, 8, 36, 3], num_classes, in_channels)
+
+
+def CIFARResNet20(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [3, 3, 3],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
+
+
+def CIFARResNet32(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [5, 5, 5],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
+
+
+def CIFARResNet44(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [7, 7, 7],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
+
+
+def CIFARResNet56(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [9, 9, 9],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
+
+
+def CIFARResNet110(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [18, 18, 18],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
+
+
+def CIFARResNet1202(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
+    return CIFARResNet(
+        resnet_block,
+        [200, 200, 200],
+        num_classes=num_classes,
+        in_channels=in_channels,
+        shortcut_option=shortcut_option,
+    )
