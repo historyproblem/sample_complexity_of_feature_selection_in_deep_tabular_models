@@ -1,5 +1,6 @@
-from net_complexity.metrics.base import BaseMetric
 import numpy as np
+
+from .base import BaseMetric
 
 
 class Accuracy(BaseMetric):

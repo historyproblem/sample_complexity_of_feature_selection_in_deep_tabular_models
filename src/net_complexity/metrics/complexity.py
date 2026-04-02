@@ -6,10 +6,10 @@ from dataclasses import asdict
 import torch
 import torch.nn as nn
 
-from net_complexity.metrics.base import BaseMetric
-from net_complexity.metrics.inspection import BartlettCollector
-from net_complexity.metrics.inspection import ComputeCollector
-from net_complexity.metrics.inspection import WeightCollector
+from .base import BaseMetric
+from .inspection import BartlettCollector
+from .inspection import ComputeCollector
+from .inspection import WeightCollector
 
 
 def _unwrap_model(model: nn.Module | None) -> nn.Module | None:

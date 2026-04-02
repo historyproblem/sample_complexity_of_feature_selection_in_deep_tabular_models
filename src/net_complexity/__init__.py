@@ -1,2 +1,4 @@
-from net_complexity.models import ResNet
-from net_complexity.dataloaders import ClassicCVDataloaders
+from .dataloaders import ClassicCVDataloaders
+from .models import ResNet
+
+__all__ = ["ClassicCVDataloaders", "ResNet"]

@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import re
-from net_complexity.outputs import ClassifModelOutput
-from net_complexity.models import ResNet, Bottleneck
+
+from .models import Bottleneck, ResNet
+from .outputs import ClassifModelOutput
 
 
 class ClassificationFeatureSelectionWrapper(nn.Module):
