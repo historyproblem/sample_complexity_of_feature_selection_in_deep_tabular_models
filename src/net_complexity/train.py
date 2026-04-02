@@ -1,26 +1,23 @@
-import torch
-from torch.utils.data import DataLoader, random_split
-import torch.nn as nn
-import pandas as pd
-from tqdm import tqdm
-from collections import defaultdict
+from __future__ import annotations
 
-import pandas as pd
-import torch
-from torch.utils.data import TensorDataset, DataLoader, random_split
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path
 
-from dataclasses import dataclass
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import hydra
+import torch
+import torch.nn as nn
 from hydra.utils import instantiate
-import yaml
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from tqdm.auto import tqdm
+from torch.utils.data import DataLoader
 
-from dataloaders import Dataloaders
-from net_complexity.wrappers import AIGBottleneckLayer, parse_AIG_activations, ResNet50
-from net_complexity.metrics.base import Multimetric, BaseMetric
-from net_complexity.meta import Metrics
+from net_complexity.dataloaders import Dataloaders
 from net_complexity.logger import MLflowLogger
+from net_complexity.meta import Metrics
+from net_complexity.metrics.base import BaseMetric, Multimetric
 
 
 @torch.inference_mode()
@@ -83,9 +80,10 @@ def train(model: nn.Module,
     metrics.test_metrics.reset()
 
 
-@hydra.main(config_path=".", config_name="config", version_base=None)
+@hydra.main(config_path="../../configs/test_configs", config_name="test", version_base=None)
 def main(config: DictConfig):
-    device = config.device
+    # device = config.device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = instantiate(config.model).to(device)
     print(model)
     dataloaders = instantiate(config.dataloaders)

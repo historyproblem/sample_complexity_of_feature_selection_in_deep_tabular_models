@@ -3,8 +3,8 @@ import torch
 
 from collections import defaultdict
 
-from net_complexity.metrics.base import BaseMetric
-from net_complexity.wrappers import parse_AIG_activations
+from ..wrappers import parse_AIG_activations
+from .base import BaseMetric
 
 
 class AIGActivationsMetric(BaseMetric):

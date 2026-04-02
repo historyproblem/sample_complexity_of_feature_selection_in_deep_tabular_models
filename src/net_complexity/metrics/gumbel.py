@@ -3,8 +3,8 @@ import torch
 
 from collections import defaultdict
 
-from net_complexity.metrics.base import BaseMetric
-from net_complexity.wrappers import get_gumbel_modules
+from ..wrappers import get_gumbel_modules
+from .base import BaseMetric
 
 
 class GumbelProbMetric(BaseMetric):
