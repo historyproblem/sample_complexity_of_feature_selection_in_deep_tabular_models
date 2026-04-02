@@ -10,11 +10,11 @@ dataloaders:
 model:
   _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
   backbone:
-    _target_: net_complexity.wrappers.ResNet50
+    _target_: net_complexity.wrappers.CIFARResNet20
     num_classes: 10
     in_channels: 3
     resnet_block: 
-     _target_: net_complexity.wrappers.GumbelBottleneckLayer
+     _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
      _partial_: True
   lambda_coef: 0.0003
   criterion: 
@@ -60,4 +60,4 @@ mlflow:
   artifacts_dir: "./mlruns"
   tags:
     project: "net_complexity"
-    model_type: "ResNet20_Gumbel"
+    model_type: "CIFARResNet20_Gumbel"
