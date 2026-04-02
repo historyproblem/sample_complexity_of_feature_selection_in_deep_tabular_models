@@ -2,7 +2,7 @@ device: 'cuda:0'
 
 dataloaders:
     _target_: net_complexity.dataloaders.ClassicCVDataloaders
-    path_to_data: /home/machenike/IAD/sample_complexity_of_feature_selection_in_deep_tabular_models/data
+    path_to_data: ${hydra:runtime.cwd}/data
     train_val_ratio: [0.8, 0.2]
     batch_size: 512
     taskname: CIFAR10
@@ -26,6 +26,11 @@ model:
 training_arguments:
   num_epochs: 25
 
+run_history:
+  root_dir: outputs/runs
+  monitor: valid_loss
+  mode: min
+
 metrics:
   _target_: net_complexity.meta.Metrics
   train_metrics:
@@ -33,6 +38,10 @@ metrics:
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
   valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+  test_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
