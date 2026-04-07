@@ -34,6 +34,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         )
 
 
+# LEGACY: old custom Gumbel-Softmax helper used only by legacy paths, not by the main_gumbel pipeline.
 class GumbleSoftmax(torch.nn.Module):
     def __init__(self, hard=False):
         super(GumbleSoftmax, self).__init__()
@@ -99,6 +100,8 @@ class GumbleSoftmax(torch.nn.Module):
             return self.gumbel_softmax(logits, temperature=temp, hard=True)
 
 
+# ACTUAL: shared Gumbel selector used by the current main_gumbel pipeline.
+# Main pipeline uses compute_gates/apply_gates/regularization_loss/get_selection_probs below.
 class GumbelLayer(nn.Module):
     """
     Gumbel-Softmax based feature selector.
@@ -123,30 +126,8 @@ class GumbelLayer(nn.Module):
         # self.logits.data[:, 0] = 1.0  # Bias toward off state
         self.temperature = temperature
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply Gumbel-Softmax gates to input features.
 
-        Args:
-            x: Input tensor of shape [batch_size, input_dim]
-
-        Returns:
-            Gated input tensor
-        """
-        if self.training:
-            sampled = F.gumbel_softmax(
-                self.logits,
-                tau=self.temperature,
-                hard=True,
-                dim=1
-            )
-            gates = sampled[:, 1]
-        else:
-            gates = (self.logits[:, 1] > self.logits[:, 0]).float()
-        gates = gates.unsqueeze(0)
-        while len(gates.shape) < len(x.shape):
-            gates = gates.unsqueeze(-1)
-        return x
-
+    # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
             sampled = F.gumbel_softmax(
@@ -163,33 +144,28 @@ class GumbelLayer(nn.Module):
             gates = gates.unsqueeze(-1)
         return gates
 
-    def apply_gates(self, x: torch.Tensor) -> torch.Tensor:
+    # ACTUAL: applies Gumbel gates to activations in the current CIFAR main pipeline.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.compute_gates(x)
 
+    # ACTUAL: regularizer used by the current main_gumbel training loss.
     def regularization_loss(self) -> torch.Tensor:
         """Compute regularization: sum of "on" state probabilities."""
         probs = F.softmax(self.logits, dim=1)[:, 1]
         return torch.mean(probs)
 
+    # ACTUAL: probability readout used by current metrics/logging in the main_gumbel pipeline.
     def get_selection_probs(self) -> torch.Tensor:
         """Get selection probabilities for each feature."""
         return F.softmax(self.logits, dim=1)[:, 1].detach()
 
+    # ACTUAL: temperature control hook for the current Gumbel layer implementation.
     def set_temperature(self, temperature: float):
         """Update temperature for annealing schedule."""
         self.temperature = temperature
 
 
-class GumbelBottleneckLayer(Bottleneck):
-    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1):
-        super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
-        self.gumbel_layer = GumbelLayer(
-            input_dim=planes, temperature=temperature)
-
-    def forward(self, x):
-        return self.gumbel_layer(super().forward(x))
-
-
+# ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
     def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
         super().__init__(in_planes, planes, stride=stride, option=option)
@@ -199,7 +175,7 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         )
 
     def forward(self, x):
-        return self.gumbel_layer.apply_gates(super().forward(x))
+        return self.gumbel_layer(super().forward(x))
 
 
 class AIGBottleneckLayer(Bottleneck):
@@ -271,7 +247,8 @@ def get_AIG_regularization_loss(model: nn.Module):
     return reg_loss
 
 
-def get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
+# ACTUAL: helper used by the current main_gumbel pipeline to collect all Gumbel layers.
+def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
     if buff is None:
         buff = {}
     for name, module in model.named_modules():
@@ -280,12 +257,18 @@ def get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
         name = f'{prefix}.{name}' if prefix is not None else name
         if isinstance(module, GumbelLayer):
             buff[name] = module
-        get_gumbel_modules(module, buff, name)
+        _get_gumbel_modules(module, buff, name)
     return buff
 
 
+# ACTUAL: public wrapper used by the training/metrics pipeline after the recursive helper was internalized.
+def get_gumbel_modules(model: nn.Module):
+    return _get_gumbel_modules(model)
+
+
+# ACTUAL: regularization entry point used by the current main_gumbel training loss.
 def get_gumbel_loss(model: nn.Module):
-    gumbel_modules = get_gumbel_modules(model)
+    gumbel_modules = _get_gumbel_modules(model)
     if len(gumbel_modules) == 0:
         return 0.0
     loss = 0.0
