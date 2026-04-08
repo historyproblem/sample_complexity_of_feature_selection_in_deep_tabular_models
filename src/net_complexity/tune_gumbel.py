@@ -28,12 +28,13 @@ def parse_args() -> argparse.Namespace:
     default_python = repo_root / ".venv" / "bin" / "python"
 
     parser = argparse.ArgumentParser(
-        description="Run Optuna TPE search over Gumbel feature-selection hyperparameters."
+        description="Run Optuna TPE search over lambda_coef for Gumbel feature selection."
     )
     parser.add_argument("--n-trials", type=int, default=30)
     parser.add_argument("--beta", type=float, default=1.0 / 15.0)
     parser.add_argument("--study-name", type=str, default="gumbel_tpe_search")
     parser.add_argument("--storage", type=str, default=None)
+    parser.add_argument("--initial-lambda", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--python-executable",
@@ -73,17 +74,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--lambda-low", type=float, default=1e-5)
     parser.add_argument("--lambda-high", type=float, default=1e-2)
-    parser.add_argument("--lr-low", type=float, default=1e-4)
-    parser.add_argument("--lr-high", type=float, default=3e-3)
-    parser.add_argument("--temperature-low", type=float, default=0.5)
-    parser.add_argument("--temperature-high", type=float, default=2.0)
-
-    parser.add_argument("--search-init-logits", action="store_true")
-    parser.add_argument("--init-on-low", type=float, default=0.5)
-    parser.add_argument("--init-on-high", type=float, default=2.5)
-    parser.add_argument("--init-off-low", type=float, default=0.0)
-    parser.add_argument("--init-off-high", type=float, default=1.5)
-    parser.add_argument("--init-noise-std", type=float, default=0.02)
 
     parser.add_argument(
         "--summary-path",
@@ -151,34 +141,15 @@ def run_trial(
     repo_root: Path,
 ) -> float:
     lambda_coef = trial.suggest_float("lambda_coef", args.lambda_low, args.lambda_high, log=True)
-    lr = trial.suggest_float("lr", args.lr_low, args.lr_high, log=True)
-    temperature = trial.suggest_float(
-        "temperature",
-        args.temperature_low,
-        args.temperature_high,
-    )
 
     overrides = [
         "hydra.job.chdir=false",
         f"model.lambda_coef={lambda_coef}",
-        f"optimizer.lr={lr}",
-        f"++model.backbone.resnet_block.temperature={temperature}",
         f"mlflow.run_name=optuna_trial_{trial.number}",
         f"++run_history.run_name=optuna_trial_{trial.number}",
         "mlflow.log_model=false",
         "mlflow.log_artifacts=false",
     ]
-
-    if args.search_init_logits:
-        init_on = trial.suggest_float("init_on", args.init_on_low, args.init_on_high)
-        init_off = trial.suggest_float("init_off", args.init_off_low, args.init_off_high)
-        overrides.extend(
-            [
-                f"++model.backbone.resnet_block.init_on={init_on}",
-                f"++model.backbone.resnet_block.init_off={init_off}",
-                f"++model.backbone.resnet_block.init_noise_std={args.init_noise_std}",
-            ]
-        )
 
     if args.device is not None:
         overrides.append(f"device={args.device}")
@@ -237,6 +208,7 @@ def make_summary(study, args: argparse.Namespace) -> dict:
         "direction": study.direction.name,
         "beta": args.beta,
         "min_accuracy": args.min_accuracy,
+        "initial_lambda": args.initial_lambda,
         "n_trials": len(study.trials),
         "best_value": best_trial.value,
         "best_params": dict(best_trial.params),
@@ -264,6 +236,12 @@ def main() -> int:
         direction="minimize",
         sampler=sampler,
     )
+    if not (args.lambda_low <= args.initial_lambda <= args.lambda_high):
+        raise ValueError(
+            "initial_lambda must lie within [lambda_low, lambda_high]."
+        )
+    if len(study.trials) == 0:
+        study.enqueue_trial({"lambda_coef": args.initial_lambda})
     study.optimize(
         lambda trial: run_trial(trial, args, repo_root),
         n_trials=args.n_trials,
