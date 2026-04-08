@@ -19,6 +19,7 @@ class TrialMetrics:
     epoch: int
     accuracy: float
     p_mean: float
+    max_accuracy: float
     run_dir: str
 
 
@@ -30,7 +31,7 @@ def parse_args() -> argparse.Namespace:
         description="Run Optuna TPE search over Gumbel feature-selection hyperparameters."
     )
     parser.add_argument("--n-trials", type=int, default=30)
-    parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--beta", type=float, default=1.0 / 15.0)
     parser.add_argument("--study-name", type=str, default="gumbel_tpe_search")
     parser.add_argument("--storage", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -56,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         "--prob-metric-name",
         type=str,
         default="valid_average_estim_prob",
+    )
+    parser.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=0.6,
+        help="Require the selected epoch to reach at least this validation accuracy.",
     )
     parser.add_argument(
         "--override",
@@ -93,14 +100,19 @@ def read_best_metrics(
     beta: float,
     accuracy_metric_name: str,
     prob_metric_name: str,
+    min_accuracy: float,
     run_dir: Path,
 ) -> TrialMetrics:
     best_metrics: TrialMetrics | None = None
+    max_accuracy = float("-inf")
 
     with history_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             accuracy = float(row[accuracy_metric_name])
+            max_accuracy = max(max_accuracy, accuracy)
+            if accuracy < min_accuracy:
+                continue
             p_mean = float(row[prob_metric_name])
             objective = (1.0 - accuracy) + beta * p_mean
             metrics = TrialMetrics(
@@ -108,13 +120,19 @@ def read_best_metrics(
                 epoch=int(row["epoch"]),
                 accuracy=accuracy,
                 p_mean=p_mean,
+                max_accuracy=max_accuracy,
                 run_dir=str(run_dir),
             )
             if best_metrics is None or metrics.objective < best_metrics.objective:
                 best_metrics = metrics
 
     if best_metrics is None:
-        raise ValueError(f"No epoch metrics found in {history_path}")
+        raise ValueError(
+            f"No epoch in {history_path} reached min accuracy {min_accuracy:.4f}; "
+            f"max achieved accuracy was {max_accuracy:.4f}."
+        )
+
+    best_metrics.max_accuracy = max_accuracy
 
     return best_metrics
 
@@ -198,12 +216,14 @@ def run_trial(
         beta=args.beta,
         accuracy_metric_name=args.accuracy_metric_name,
         prob_metric_name=args.prob_metric_name,
+        min_accuracy=args.min_accuracy,
         run_dir=run_dir,
     )
 
     trial.set_user_attr("run_dir", best_metrics.run_dir)
     trial.set_user_attr("best_epoch", best_metrics.epoch)
     trial.set_user_attr("best_accuracy", best_metrics.accuracy)
+    trial.set_user_attr("max_accuracy", best_metrics.max_accuracy)
     trial.set_user_attr("best_p_mean", best_metrics.p_mean)
     trial.set_user_attr("best_objective", best_metrics.objective)
 
@@ -216,6 +236,7 @@ def make_summary(study, args: argparse.Namespace) -> dict:
         "study_name": study.study_name,
         "direction": study.direction.name,
         "beta": args.beta,
+        "min_accuracy": args.min_accuracy,
         "n_trials": len(study.trials),
         "best_value": best_trial.value,
         "best_params": dict(best_trial.params),
