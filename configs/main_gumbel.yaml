@@ -2,7 +2,7 @@ device: 'cuda:0'
 
 dataloaders:
     _target_: net_complexity.dataloaders.ClassicCVDataloaders
-    path_to_data: /Users/grigorii/MIPT/Матпрак/github/data
+    path_to_data: ${hydra:runtime.cwd}/data
     train_val_ratio: [0.8, 0.2]
     batch_size: 512
     taskname: CIFAR10
