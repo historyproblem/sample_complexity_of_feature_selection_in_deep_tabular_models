@@ -129,17 +129,19 @@ class GumbelLayer(nn.Module):
 
     # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
         if self.training:
+            logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
             sampled = F.gumbel_softmax(
-                self.logits,
+                logits,
                 tau=self.temperature,
                 hard=True,
-                dim=1
+                dim=-1
             )
-            gates = sampled[:, 1]
+            gates = sampled[..., 1]
         else:
-            gates = (self.logits[:, 1] > self.logits[:, 0]).float()
-        gates = gates.unsqueeze(0)
+            gates = (self.logits[:, 1] > self.logits[:, 0]).float().unsqueeze(0)
+            gates = gates.expand(batch_size, -1)
         while len(gates.shape) < len(x.shape):
             gates = gates.unsqueeze(-1)
         return gates
