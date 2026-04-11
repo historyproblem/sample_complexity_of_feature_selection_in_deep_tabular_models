@@ -16,7 +16,7 @@ model:
     resnet_block: 
      _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
      _partial_: True
-  lambda_coef: 0.0003
+  lambda_coef: 1.479470
   criterion: 
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:
