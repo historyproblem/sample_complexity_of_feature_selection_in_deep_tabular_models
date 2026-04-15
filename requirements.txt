@@ -6,3 +6,4 @@ tqdm
 mlflow
 numpy
 pandas
+optuna
