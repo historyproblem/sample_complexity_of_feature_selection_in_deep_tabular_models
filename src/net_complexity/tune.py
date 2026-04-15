@@ -16,6 +16,7 @@ import optuna
 import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from tqdm.auto import tqdm
 
 from net_complexity.train import run_training
 
@@ -210,18 +211,35 @@ def main(config: DictConfig) -> None:
     study = _build_study(config)
 
     def objective(trial: optuna.Trial) -> float:
+        trial_number = trial.number + 1
+        trial_total = int(getattr(tuning_cfg, "n_trials", 1))
         trial_config = _clone_config(config)
         suggested_params = _apply_search_space(trial, trial_config, tuning_cfg.search_space)
         _update_trial_metadata(trial_config, tuning_cfg, trial)
         observer = TrialObserver(trial, objective_metric, direction)
+        progress_context = {
+            "trial_number": trial_number,
+            "trial_total": trial_total,
+        }
 
         trial.set_user_attr("suggested_params", suggested_params)
         try:
-            result = run_training(trial_config, epoch_end_callback=observer)
+            result = run_training(
+                trial_config,
+                epoch_end_callback=observer,
+                progress_context=progress_context,
+            )
         except optuna.TrialPruned:
             if observer.best_value is not None:
                 trial.set_user_attr("best_epoch", observer.best_epoch)
                 trial.set_user_attr("best_objective_value", observer.best_value)
+                tqdm.write(
+                    f"[trial {trial_number}/{trial_total}] pruned | "
+                    f"best {objective_metric}={observer.best_value:.6f} | "
+                    f"epoch={observer.best_epoch}"
+                )
+            else:
+                tqdm.write(f"[trial {trial_number}/{trial_total}] pruned before first valid metric")
             raise
         finally:
             if torch.cuda.is_available():
@@ -240,6 +258,12 @@ def main(config: DictConfig) -> None:
         trial.set_user_attr("run_dir", result.get("run_dir"))
         trial.set_user_attr("best_epoch", observer.best_epoch)
         trial.set_user_attr("best_objective_value", objective_value)
+        tqdm.write(
+            f"[trial {trial_number}/{trial_total}] completed | "
+            f"best {objective_metric}={objective_value:.6f} | "
+            f"epoch={observer.best_epoch} | "
+            f"run_dir={result.get('run_dir')}"
+        )
         return float(objective_value)
 
     try:

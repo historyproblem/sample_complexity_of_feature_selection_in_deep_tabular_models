@@ -27,6 +27,7 @@ EpochEndCallback = Callable[
     [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, RunHistory | None],
     None,
 ]
+ProgressContext = Mapping[str, Any]
 
 
 def _to_float(value):
@@ -82,17 +83,57 @@ def collect_batch_metrics(output, targets, model: nn.Module | None = None) -> di
     return batch_metrics
 
 
+def _planned_bar_count(total_epochs: int) -> int:
+    return total_epochs * 2 + 1
+
+
+def _bar_index(stage: str, epoch: int, total_epochs: int) -> int:
+    if stage == "train":
+        return (epoch - 1) * 2 + 1
+    if stage == "valid":
+        return (epoch - 1) * 2 + 2
+    return _planned_bar_count(total_epochs)
+
+
+def _progress_desc(
+    stage: str,
+    epoch: int,
+    total_epochs: int,
+    progress_context: ProgressContext | None = None,
+) -> str:
+    parts = []
+    if progress_context is not None:
+        trial_number = progress_context.get("trial_number")
+        trial_total = progress_context.get("trial_total")
+        if trial_number is not None and trial_total is not None:
+            parts.append(f"trial {trial_number}/{trial_total}")
+
+    parts.append(f"bar {_bar_index(stage, epoch, total_epochs)}/{_planned_bar_count(total_epochs)}")
+    parts.append(f"epoch {min(epoch, total_epochs)}/{total_epochs}")
+    parts.append(stage)
+    return " | ".join(f"[{part}]" for part in parts)
+
+
 @torch.inference_mode()
 def evaluate(model: nn.Module,
              dataloader: DataLoader,
              metric: Multimetric,
              device: str,
+             total_epochs: int,
              stage: str = "valid",
              epoch: int = 0,
-             run_history: RunHistory | None = None):
+             run_history: RunHistory | None = None,
+             progress_context: ProgressContext | None = None):
     model.eval()
 
-    for batch_index, (X, y) in enumerate(tqdm(dataloader), start=1):
+    for batch_index, (X, y) in enumerate(
+        tqdm(
+            dataloader,
+            desc=_progress_desc(stage, epoch, total_epochs, progress_context),
+            dynamic_ncols=True,
+        ),
+        start=1,
+    ):
         X, y = X.to(device), y.to(device)
         output = model(X, y)
         metric.update(X, output, y, model)
@@ -110,12 +151,21 @@ def train_epoch(model,
                 dataloaders: Dataloaders,
                 metrics: Metrics,
                 device: str,
+                total_epochs: int,
                 epoch: int = 0,
-                run_history: RunHistory | None = None):
+                run_history: RunHistory | None = None,
+                progress_context: ProgressContext | None = None):
     """Train for one epoch."""
     model.train()
 
-    for batch_index, (X, y) in enumerate(tqdm(dataloaders.train_dataloader), start=1):
+    for batch_index, (X, y) in enumerate(
+        tqdm(
+            dataloaders.train_dataloader,
+            desc=_progress_desc("train", epoch, total_epochs, progress_context),
+            dynamic_ncols=True,
+        ),
+        start=1,
+    ):
         X, y = X.to(device), y.to(device)
         output = model(X, y)
 
@@ -141,13 +191,15 @@ def train(model: nn.Module,
           device: str,
           mlflow_logger=None,
           run_history: RunHistory | None = None,
-          epoch_end_callback: EpochEndCallback | None = None) -> dict[str, Any]:
+          epoch_end_callback: EpochEndCallback | None = None,
+          progress_context: ProgressContext | None = None) -> dict[str, Any]:
 
     model.to(device)
     last_train_metrics: dict[str, float] = {}
     last_valid_metrics: dict[str, float] = {}
+    total_epochs = int(training_arguments.num_epochs)
 
-    for epoch in range(training_arguments.num_epochs):
+    for epoch in range(total_epochs):
         epoch_num = epoch + 1
         train_epoch(
             model,
@@ -155,14 +207,22 @@ def train(model: nn.Module,
             dataloaders,
             metrics,
             device,
+            total_epochs=total_epochs,
             epoch=epoch_num,
             run_history=run_history,
+            progress_context=progress_context,
         )
-        evaluate(model, dataloaders.valid_dataloader,
-                 metrics.valid_metrics, device,
-                 stage="valid",
-                 epoch=epoch_num,
-                 run_history=run_history)
+        evaluate(
+            model,
+            dataloaders.valid_dataloader,
+            metrics.valid_metrics,
+            device,
+            total_epochs=total_epochs,
+            stage="valid",
+            epoch=epoch_num,
+            run_history=run_history,
+            progress_context=progress_context,
+        )
 
         train_metrics = dict(metrics.train_metrics.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
@@ -212,15 +272,17 @@ def train(model: nn.Module,
         dataloaders.test_dataloader,
         metrics.test_metrics,
         device,
+        total_epochs=total_epochs,
         stage="test",
-        epoch=training_arguments.num_epochs,
+        epoch=total_epochs,
         run_history=run_history,
+        progress_context=progress_context,
     )
     test_metrics = metrics.test_metrics.compute()
     if mlflow_logger is not None:
         mlflow_logger.log_metrics(
             test_metrics,
-            step=training_arguments.num_epochs,
+            step=total_epochs,
         )
         mlflow_logger.log_model(model, model_name="final_model")
     if run_history is not None:
@@ -297,6 +359,7 @@ def log_run_artifacts(config: DictConfig, run_history: RunHistory, mlflow_logger
 def run_training(
     config: DictConfig,
     epoch_end_callback: EpochEndCallback | None = None,
+    progress_context: ProgressContext | None = None,
 ) -> dict[str, Any]:
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
@@ -324,6 +387,7 @@ def run_training(
             mlflow_logger=mlflow_logger,
             run_history=run_history,
             epoch_end_callback=epoch_end_callback,
+            progress_context=progress_context,
         )
     finally:
         log_run_artifacts(config, run_history, mlflow_logger)
