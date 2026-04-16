@@ -23,6 +23,9 @@ from net_complexity.tuning.flags import install_tune_cli_flags
 from net_complexity.tuning.search import build_grid_search_space, count_grid_trials
 
 
+CONFIGS_PATH = str(Path(__file__).resolve().parents[3] / "configs")
+
+
 CLI_SEARCH_RESET = False
 CLI_SEARCH_SPACE: dict[str, dict[str, Any]] = {}
 CLI_TUNING_OVERRIDES: dict[str, Any] = {}
@@ -286,7 +289,7 @@ def _build_study(
     )
 
 
-@hydra.main(config_path="../../../configs/", config_name="tune", version_base=None)
+@hydra.main(config_path=CONFIGS_PATH, config_name="tune", version_base=None)
 def main(config: DictConfig) -> None:
     _apply_cli_tuning_overrides(config)
     _apply_cli_search_flags(config)
