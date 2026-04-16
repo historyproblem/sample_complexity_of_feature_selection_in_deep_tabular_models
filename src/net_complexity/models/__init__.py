@@ -1,4 +1,5 @@
-from .models.feature_selection import (
+from .cifar_resnet import CIFARBasicBlock, CIFARResNet, LambdaLayer
+from .feature_selection import (
     AIGBottleneckLayer,
     CIFARGumbelBasicBlock,
     CIFARResNet20,
@@ -19,10 +20,16 @@ from .models.feature_selection import (
     parse_AIG_activations,
     replace_layers_by_regex,
 )
+from .outputs import ClassifModelOutput
+from .resnet import Block, Bottleneck, ResNet
 
 __all__ = [
     "AIGBottleneckLayer",
+    "Block",
+    "Bottleneck",
+    "CIFARBasicBlock",
     "CIFARGumbelBasicBlock",
+    "CIFARResNet",
     "CIFARResNet20",
     "CIFARResNet32",
     "CIFARResNet44",
@@ -30,8 +37,11 @@ __all__ = [
     "CIFARResNet110",
     "CIFARResNet1202",
     "ClassificationFeatureSelectionWrapper",
+    "ClassifModelOutput",
     "GumbelLayer",
     "GumbleSoftmax",
+    "LambdaLayer",
+    "ResNet",
     "ResNet50",
     "ResNet101",
     "ResNet152",

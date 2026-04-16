@@ -1,11 +1,3 @@
-import torch
-from dataclasses import dataclass
+from .models.outputs import ClassifModelOutput
 
-
-@dataclass
-class ClassifModelOutput:
-    ce_loss: torch.Tensor = None
-    regularization_loss: torch.Tensor = None
-    loss: torch.Tensor = None
-    logits: torch.Tensor = None
-    mean_activations: list[torch.Tensor] = None
+__all__ = ["ClassifModelOutput"]

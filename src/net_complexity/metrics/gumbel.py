@@ -3,7 +3,7 @@ import torch
 
 from collections import defaultdict
 
-from ..wrappers import get_gumbel_modules
+from ..models.feature_selection import get_gumbel_modules
 from .base import BaseMetric
 
 

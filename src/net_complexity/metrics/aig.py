@@ -3,7 +3,7 @@ import torch
 
 from collections import defaultdict
 
-from ..wrappers import parse_AIG_activations
+from ..models.feature_selection import parse_AIG_activations
 from .base import BaseMetric
 
 
