@@ -14,11 +14,11 @@ class GumbelProbMetric(BaseMetric):
     def update(self, input, output, targets, model=None):
         modules_dict = get_gumbel_modules(model)
         for name, module in modules_dict.items():
-            value = module.get_selection_probs()
+            value = module.get_selection_probs().detach()
             self.all_probs_dict[f'{name}_avg_estim_prob'].append(
-                value.detach().cpu().numpy().mean())
+                float(value.mean().item()))
             self.all_probs_dict[f'{name}_avg_real_prob'].append(
-                (value.detach().cpu().numpy() > 0.5).sum() / len(value))
+                float((value > 0.5).float().mean().item()))
 
     def compute(self):
         real_means = []

@@ -8,9 +8,8 @@ class Accuracy(BaseMetric):
         self.buff = []
 
     def update(self, input, output, targets, model=None):
-        length = output.logits.shape[0]
-        self.buff.append((output.logits.argmax(dim=-1) ==
-                         targets).sum().detach().cpu().numpy()/length)
+        accuracy = (output.logits.argmax(dim=-1) == targets).float().mean().item()
+        self.buff.append(float(accuracy))
 
     def compute(self):
         return {'accuracy': float(np.mean(self.buff))}

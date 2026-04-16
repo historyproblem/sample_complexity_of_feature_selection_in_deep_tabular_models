@@ -46,12 +46,16 @@ class MultiLossMetric(BaseMetric):
         self.losses_dict = defaultdict(list)
 
     def update(self, input, output, targets, model=None):
-        self.losses_dict['ce_loss'].append(
-            output.ce_loss.detach().cpu().numpy().item())
-        self.losses_dict['regularization_loss'].append(
-            output.regularization_loss.detach().cpu().numpy().item() if isinstance(output.regularization_loss, torch.Tensor) else 0.0)
-        self.losses_dict['loss'].append(
-            output.loss.detach().cpu().numpy().item())
+        self.losses_dict['ce_loss'].append(float(output.ce_loss.detach().item()))
+
+        regularization_loss = output.regularization_loss
+        if isinstance(regularization_loss, torch.Tensor):
+            regularization_loss = regularization_loss.detach().item()
+        elif regularization_loss is None:
+            regularization_loss = 0.0
+        self.losses_dict['regularization_loss'].append(float(regularization_loss))
+
+        self.losses_dict['loss'].append(float(output.loss.detach().item()))
 
     def compute(self):
         for name, metric_list in self.losses_dict.items():

@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from omegaconf import DictConfig
-from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 from typing import Any, Callable, Mapping
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
-from net_complexity.models.feature_selection import get_gumbel_modules
 from net_complexity.training.meta import Metrics
 from net_complexity.training.run_history import RunHistory
 from net_complexity.training.tracking import MLflowLogger
@@ -62,88 +61,53 @@ class EarlyStoppingState:
         return epoch >= self.min_epochs and self.bad_epochs >= self.patience
 
 
-def _to_float(value):
-    if isinstance(value, torch.Tensor):
-        if value.numel() == 1:
-            return float(value.detach().cpu().item())
-        return float(value.detach().cpu().mean().item())
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
-
-
-def collect_batch_metrics(output, targets, model: nn.Module | None = None) -> dict[str, float]:
-    batch_metrics: dict[str, float] = {}
-
-    for name in ("ce_loss", "regularization_loss", "loss"):
-        value = _to_float(getattr(output, name, None))
-        if value is not None:
-            batch_metrics[name] = value
-
-    logits = getattr(output, "logits", None)
-    if isinstance(logits, torch.Tensor):
-        accuracy = (logits.argmax(dim=-1) == targets).float().mean().item()
-        batch_metrics["accuracy"] = float(accuracy)
-
-    if model is None:
-        return batch_metrics
-
-    gumbel_modules = get_gumbel_modules(model)
-    if not gumbel_modules:
-        return batch_metrics
-
-    real_means = []
-    estim_means = []
-    for name, module in gumbel_modules.items():
-        value = module.get_selection_probs().detach().cpu()
-        estim_prob = float(value.mean().item())
-        real_prob = float((value > 0.5).float().mean().item())
-        batch_metrics[f"{name}_avg_estim_prob"] = estim_prob
-        batch_metrics[f"{name}_avg_real_prob"] = real_prob
-        estim_means.append(estim_prob)
-        real_means.append(real_prob)
-
-    if real_means:
-        batch_metrics["average_real_prob"] = float(sum(real_means) / len(real_means))
-        batch_metrics["max_real_prob"] = float(max(real_means))
-        batch_metrics["min_real_prob"] = float(min(real_means))
-    if estim_means:
-        batch_metrics["average_estim_prob"] = float(sum(estim_means) / len(estim_means))
-        batch_metrics["max_estim_prob"] = float(max(estim_means))
-        batch_metrics["min_estim_prob"] = float(min(estim_means))
-
-    return batch_metrics
-
-
-def _planned_bar_count(total_epochs: int) -> int:
-    return total_epochs * 2 + 1
-
-
-def _bar_index(stage: str, epoch: int, total_epochs: int) -> int:
-    if stage == "train":
-        return (epoch - 1) * 2 + 1
-    if stage == "valid":
-        return (epoch - 1) * 2 + 2
-    return _planned_bar_count(total_epochs)
-
-
-def _progress_desc(
-    stage: str,
-    epoch: int,
-    total_epochs: int,
-    progress_context: ProgressContext | None = None,
-) -> str:
-    parts = []
+def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
     if progress_context is not None:
         trial_number = progress_context.get("trial_number")
         trial_total = progress_context.get("trial_total")
         if trial_number is not None and trial_total is not None:
-            parts.append(f"trial {trial_number}/{trial_total}")
+            return f"Trial {trial_number}/{trial_total}"
+    return None
 
-    parts.append(f"bar {_bar_index(stage, epoch, total_epochs)}/{_planned_bar_count(total_epochs)}")
-    parts.append(f"epoch {min(epoch, total_epochs)}/{total_epochs}")
-    parts.append(stage)
-    return " | ".join(f"[{part}]" for part in parts)
+
+def _format_metric(value: Any) -> str:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            value = value.detach().item()
+        else:
+            value = value.detach().mean().item()
+    if isinstance(value, (int, float)):
+        return f"{float(value):.4f}"
+    return "n/a"
+
+
+def _build_epoch_log_line(
+    epoch: int,
+    total_epochs: int,
+    train_metrics: Mapping[str, Any],
+    valid_metrics: Mapping[str, Any],
+    train_time: float,
+    valid_time: float,
+    epoch_time: float,
+    progress_context: ProgressContext | None = None,
+) -> str:
+    parts: list[str] = []
+    progress_prefix = _progress_prefix(progress_context)
+    if progress_prefix is not None:
+        parts.append(progress_prefix)
+
+    parts.extend(
+        [
+            f"Epoch {epoch}/{total_epochs}",
+            f"train_loss={_format_metric(train_metrics.get('train_loss', train_metrics.get('train_ce_loss')))}",
+            f"val_loss={_format_metric(valid_metrics.get('valid_loss', valid_metrics.get('valid_ce_loss')))}",
+            f"val_acc={_format_metric(valid_metrics.get('valid_accuracy'))}",
+            f"train_time={train_time:.2f}s",
+            f"val_time={valid_time:.2f}s",
+            f"epoch_time={epoch_time:.2f}s",
+        ]
+    )
+    return " | ".join(parts)
 
 
 def _build_early_stopping(
@@ -199,24 +163,10 @@ def evaluate(model: nn.Module,
              progress_context: ProgressContext | None = None):
     model.eval()
 
-    for batch_index, (X, y) in enumerate(
-        tqdm(
-            dataloader,
-            desc=_progress_desc(stage, epoch, total_epochs, progress_context),
-            dynamic_ncols=True,
-        ),
-        start=1,
-    ):
+    for X, y in dataloader:
         X, y = X.to(device), y.to(device)
         output = model(X, y)
         metric.update(X, output, y, model)
-        if run_history is not None:
-            run_history.log_batch(
-                stage=stage,
-                epoch=epoch,
-                batch_in_epoch=batch_index,
-                metrics=collect_batch_metrics(output, y, model),
-            )
 
 
 def train_epoch(model,
@@ -231,25 +181,11 @@ def train_epoch(model,
     """Train for one epoch."""
     model.train()
 
-    for batch_index, (X, y) in enumerate(
-        tqdm(
-            dataloaders.train_dataloader,
-            desc=_progress_desc("train", epoch, total_epochs, progress_context),
-            dynamic_ncols=True,
-        ),
-        start=1,
-    ):
+    for X, y in dataloaders.train_dataloader:
         X, y = X.to(device), y.to(device)
         output = model(X, y)
 
         metrics.train_metrics.update(X, output, y, model)
-        if run_history is not None:
-            run_history.log_batch(
-                stage="train",
-                epoch=epoch,
-                batch_in_epoch=batch_index,
-                metrics=collect_batch_metrics(output, y, model),
-            )
 
         output.loss.backward()
         optimizer.step()
@@ -277,6 +213,9 @@ def train(model: nn.Module,
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
+        epoch_started_at = perf_counter()
+
+        train_started_at = perf_counter()
         train_epoch(
             model,
             optimizer,
@@ -288,6 +227,9 @@ def train(model: nn.Module,
             run_history=run_history,
             progress_context=progress_context,
         )
+        train_time = perf_counter() - train_started_at
+
+        valid_started_at = perf_counter()
         evaluate(
             model,
             dataloaders.valid_dataloader,
@@ -299,6 +241,7 @@ def train(model: nn.Module,
             run_history=run_history,
             progress_context=progress_context,
         )
+        valid_time = perf_counter() - valid_started_at
 
         train_metrics = dict(metrics.train_metrics.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
@@ -347,12 +290,26 @@ def train(model: nn.Module,
         should_stop = False
         if early_stopping is not None:
             should_stop = early_stopping.step(epoch_num, valid_metrics)
-            if should_stop:
-                tqdm.write(
-                    f"Early stopping at epoch {epoch_num}: "
-                    f"best {early_stopping.monitor}={early_stopping.best_value:.6f} "
-                    f"at epoch {early_stopping.best_epoch}"
-                )
+
+        epoch_time = perf_counter() - epoch_started_at
+        print(
+            _build_epoch_log_line(
+                epoch=epoch_num,
+                total_epochs=total_epochs,
+                train_metrics=train_metrics,
+                valid_metrics=valid_metrics,
+                train_time=train_time,
+                valid_time=valid_time,
+                epoch_time=epoch_time,
+                progress_context=progress_context,
+            )
+        )
+        if should_stop:
+            print(
+                f"Early stopping at epoch {epoch_num}: "
+                f"best {early_stopping.monitor}={early_stopping.best_value:.6f} "
+                f"at epoch {early_stopping.best_epoch}"
+            )
 
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
@@ -458,14 +415,12 @@ def run_training(
 ) -> dict[str, Any]:
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
-    print(model)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
     scheduler = instantiate(config.scheduler, optimizer=optimizer) if getattr(config, "scheduler", None) is not None else None
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if getattr(config, "mlflow", None) is not None else None
     run_history = RunHistory(config)
-    print(f"Run artifacts: {run_history.run_dir}")
 
     result: dict[str, Any]
     if mlflow_logger is not None:
