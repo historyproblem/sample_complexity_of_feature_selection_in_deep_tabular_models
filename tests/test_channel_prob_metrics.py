@@ -7,10 +7,17 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 
 from net_complexity.metrics.gumbel import GumbelProbMetric
-from net_complexity.metrics.stg import STGProbMetric
-from net_complexity.models.feature_selection import GumbelLayer, STGChannelLayer
+from net_complexity.models import feature_selection as feature_selection_module
+from net_complexity.models.feature_selection import GumbelLayer
 from net_complexity.training.engine import _build_epoch_log_line
 from net_complexity.training.run_history import RunHistory
+
+STGChannelLayer = getattr(feature_selection_module, "STGChannelLayer", None)
+
+try:
+    from net_complexity.metrics.stg import STGProbMetric
+except Exception:  # pragma: no cover - only used when optional STG support is absent
+    STGProbMetric = None
 
 
 class TinyGumbelModel(nn.Module):
@@ -24,6 +31,8 @@ class TinyGumbelModel(nn.Module):
 class TinySTGModel(nn.Module):
     def __init__(self):
         super().__init__()
+        if STGChannelLayer is None:
+            raise RuntimeError("STG support is not available in this tree.")
         self.backbone = nn.Module()
         self.backbone.layer1 = nn.Module()
         self.backbone.layer1.stg = STGChannelLayer(input_dim=3, sigma=1.0)
@@ -71,6 +80,10 @@ def test_gumbel_metric_logs_per_channel_zero_probabilities():
     assert computed["backbone.layer1.gumbel_layer_avg_real_prob"] == pytest.approx(1 / 3)
 
 
+@pytest.mark.skipif(
+    STGChannelLayer is None or STGProbMetric is None,
+    reason="STG support is not available in this tree.",
+)
 def test_stg_metric_logs_per_channel_zero_probabilities():
     model = TinySTGModel()
     metric = STGProbMetric()
