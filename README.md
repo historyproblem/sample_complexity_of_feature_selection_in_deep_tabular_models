@@ -45,10 +45,20 @@ In learning theory, sample complexity determines how much data is required for g
     pip install -e .
 ```
 
-2. Run trianing example script:
+2. Run a training example:
 ```bash
-    python3 src/net_complexity/train.py --config-dir=configs/test_configs --config-name=test
+    python3 src/net_complexity/train.py
 ```
+
+3. Run Optuna hyperparameter search:
+```bash
+    python3 src/net_complexity/tune.py
+```
+
+Current configs are organized as:
+- `configs/experiment`: compact runnable experiment configs
+- `configs/tuning`: Optuna settings and search spaces
+- `configs/old`: legacy configs kept for backward compatibility
 
 ## 📊 Experiment Tracking with MLflow
 

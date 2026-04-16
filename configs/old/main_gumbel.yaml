@@ -1,0 +1,63 @@
+device: 'cuda:0'
+
+dataloaders:
+    _target_: net_complexity.dataloaders.ClassicCVDataloaders
+    path_to_data: ${hydra:runtime.cwd}/data
+    train_val_ratio: [0.8, 0.2]
+    batch_size: 512
+    taskname: CIFAR10
+    
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.CIFARResNet20
+    num_classes: 10
+    in_channels: 3
+    resnet_block: 
+     _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
+     _partial_: True
+  lambda_coef: 1.479470
+  criterion: 
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_gumbel_loss
+    _partial_: True
+
+training_arguments:
+  num_epochs: 25
+
+run_history:
+  root_dir: outputs/runs
+  monitor: valid_loss
+  mode: min
+
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+  test_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+    
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.001
+  #_partial_: True
+
+mlflow:
+  tracking_uri: null  # or set to your MLflow server URI, e.g., "http://localhost:5000"
+  experiment_name: "feature_selection_experiment"
+  run_name: gumbel_${model.lambda_coef}  # will auto-generate if not set
+  log_model: true
+  log_artifacts: true
+  artifacts_dir: "./mlruns"
+  tags:
+    project: "net_complexity"
+    model_type: "CIFARResNet20_Gumbel"
