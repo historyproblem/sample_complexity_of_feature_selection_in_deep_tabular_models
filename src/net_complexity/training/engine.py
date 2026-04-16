@@ -107,6 +107,15 @@ def _build_epoch_log_line(
             f"epoch_time={epoch_time:.2f}s",
         ]
     )
+
+    train_zero_prob = train_metrics.get("train_average_zero_prob")
+    if train_zero_prob is not None:
+        parts.append(f"train_zero={_format_metric(train_zero_prob)}")
+
+    valid_zero_prob = valid_metrics.get("valid_average_zero_prob")
+    if valid_zero_prob is not None:
+        parts.append(f"val_zero={_format_metric(valid_zero_prob)}")
+
     return " | ".join(parts)
 
 
