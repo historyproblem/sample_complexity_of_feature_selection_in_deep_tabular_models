@@ -3,7 +3,7 @@ import collections
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 from torch.utils.data import Dataset
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 import os
 import json
 
@@ -47,10 +47,10 @@ class ClassicCVDataloaders(Dataloaders):
             )
         ])
 
-        train_dataset = task2class[taskname](
+        full_train_dataset = task2class[taskname](
             root=path_to_data,
             train=True,
-            transform=train_transform,
+            transform=test_transform,
             download=True
         )
         test_dataset = task2class[taskname](
@@ -60,13 +60,26 @@ class ClassicCVDataloaders(Dataloaders):
             download=True
         )
 
-        train_size = int(len(train_dataset))
+        train_size = int(len(full_train_dataset))
         val_size = int(train_val_ratio[1]*train_size)
         train_size = train_size - val_size
 
-        train_dataset, val_dataset = random_split(
-            train_dataset, [train_size, val_size], torch.Generator().manual_seed(42))
-        val_dataset.dataset.transform = test_transform
+        split_indices = torch.randperm(
+            len(full_train_dataset),
+            generator=torch.Generator().manual_seed(42),
+        ).tolist()
+        train_indices = split_indices[:train_size]
+        val_indices = split_indices[train_size:]
+
+        val_dataset = Subset(full_train_dataset, val_indices)
+
+        train_augmented_dataset = task2class[taskname](
+            root=path_to_data,
+            train=True,
+            transform=train_transform,
+            download=True
+        )
+        train_dataset = Subset(train_augmented_dataset, train_indices)
 
         self.train_dataloader = DataLoader(
             dataset=train_dataset,
