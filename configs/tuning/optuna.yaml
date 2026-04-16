@@ -1,5 +1,6 @@
 tuning:
   enabled: true
+  mode: "optuna"
   study_name: "gumbel_cifar10_optuna"
   direction: "maximize"
   objective_metric: "valid_accuracy"

@@ -15,6 +15,7 @@ SEARCH_ALIASES = {
 }
 
 TUNING_FLAG_OVERRIDES = {
+    "--mode": "tuning.mode",
     "--trials": "tuning.n_trials",
     "--metric": "tuning.objective_metric",
     "--study-name": "tuning.study_name",
@@ -195,6 +196,11 @@ def preprocess_tune_argv(
                 raise SystemExit(f"{arg} requires a value.")
             tuning_overrides[TUNING_FLAG_OVERRIDES[arg]] = _parse_scalar(argv[index + 1])
             index += 2
+            continue
+
+        if arg in {"--grid", "--optuna"}:
+            tuning_overrides["tuning.mode"] = "grid" if arg == "--grid" else "optuna"
+            index += 1
             continue
 
         if arg in {"--maximize", "--minimize"}:

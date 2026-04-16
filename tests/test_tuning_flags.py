@@ -66,6 +66,7 @@ def test_preprocess_tune_argv_extracts_custom_flags():
     argv, search_reset, search_space, tuning_overrides = preprocess_tune_argv(
         [
             "tune.py",
+            "--grid",
             "--search-reset",
             "--float",
             "lr=0.0001:0.01:log",
@@ -94,6 +95,7 @@ def test_preprocess_tune_argv_extracts_custom_flags():
         },
     }
     assert tuning_overrides == {
+        "tuning.mode": "grid",
         "tuning.n_trials": 10,
         "tuning.objective_metric": "valid_accuracy",
         "tuning.direction": "maximize",

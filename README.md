@@ -59,6 +59,7 @@ You can override the most common tuning options from short CLI flags:
 
 ```bash
     python3 src/net_complexity/tune.py \
+      --optuna \
       --study-name gumbel_quick_check \
       --trials 20 \
       --metric valid_accuracy \
@@ -68,6 +69,18 @@ You can override the most common tuning options from short CLI flags:
       --float "lr=0.0001:0.01:log" \
       --float "wd=0.000001:0.01:log" \
       --cat "bs=128,256,512"
+```
+
+Switch to exhaustive grid search with the same entrypoint:
+
+```bash
+    python3 src/net_complexity/tune.py \
+      --grid \
+      --study-name gumbel_grid \
+      --search-reset \
+      --float "lambda=0.01:0.05:step=0.01" \
+      --float "lr=0.0005:0.0015:step=0.0005" \
+      --cat "bs=128,256"
 ```
 
 Short search aliases:
@@ -84,6 +97,8 @@ Supported search flag formats:
 - `--search-reset` clears the default YAML `tuning.search_space` before applying CLI flags
 
 Useful tuning override flags:
+- `--grid` / `--optuna`
+- `--mode NAME`
 - `--trials N`
 - `--metric NAME`
 - `--study-name NAME`
@@ -91,6 +106,13 @@ Useful tuning override flags:
 - `--timeout SECONDS`
 - `--output-dir PATH`
 - `--maximize` / `--minimize`
+
+Notes for grid mode:
+- default mode is `optuna`
+- grid mode expands the full discrete search space
+- `float` grid ranges require `step=...`
+- log-scaled numeric ranges are supported in `optuna` mode, but not in `grid`
+- for arbitrary numeric grids, prefer `--cat "name=v1,v2,v3"`
 
 Current configs are organized as:
 - `configs/experiment`: compact runnable experiment configs
