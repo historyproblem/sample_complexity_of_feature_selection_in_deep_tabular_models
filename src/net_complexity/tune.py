@@ -24,6 +24,7 @@ from net_complexity.tuning_flags import install_tune_cli_flags
 
 CLI_SEARCH_RESET = False
 CLI_SEARCH_SPACE: dict[str, dict[str, Any]] = {}
+CLI_TUNING_OVERRIDES: dict[str, Any] = {}
 
 
 def _clone_config(config: DictConfig) -> DictConfig:
@@ -121,6 +122,11 @@ def _apply_cli_search_flags(config: DictConfig) -> None:
     OmegaConf.update(config, "tuning.search_space", existing_search_space, merge=False)
 
 
+def _apply_cli_tuning_overrides(config: DictConfig) -> None:
+    for path, value in CLI_TUNING_OVERRIDES.items():
+        OmegaConf.update(config, path, value, merge=False)
+
+
 class TrialObserver:
     def __init__(self, trial: optuna.Trial, metric_name: str, direction: str):
         self.trial = trial
@@ -181,12 +187,24 @@ def _summarize_study(study: optuna.Study, study_dir: Path, config: DictConfig) -
     except ValueError:
         pass
 
+    resolved_search_space = OmegaConf.select(config, "tuning.search_space")
+
     summary = {
         "study_name": study.study_name,
         "direction": study.direction.name.lower(),
+        "objective_metric": OmegaConf.select(config, "tuning.objective_metric"),
+        "requested_trials": OmegaConf.select(config, "tuning.n_trials"),
         "best_trial_number": best_trial.number if best_trial is not None else None,
         "best_value": best_value,
         "best_params": best_params,
+        "best_epoch": best_trial.user_attrs.get("best_epoch") if best_trial is not None else None,
+        "best_run_id": best_trial.user_attrs.get("run_id") if best_trial is not None else None,
+        "best_run_dir": best_trial.user_attrs.get("run_dir") if best_trial is not None else None,
+        "search_space": (
+            OmegaConf.to_container(resolved_search_space, resolve=True)
+            if resolved_search_space is not None
+            else {}
+        ),
         "completed_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE),
         "pruned_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.PRUNED),
         "failed_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.FAIL),
@@ -214,6 +232,7 @@ def _build_study(config: DictConfig) -> optuna.Study:
 
 @hydra.main(config_path="../../configs/", config_name="tune", version_base=None)
 def main(config: DictConfig) -> None:
+    _apply_cli_tuning_overrides(config)
     _apply_cli_search_flags(config)
     tuning_cfg = config.tuning
     if not getattr(tuning_cfg, "enabled", False):
@@ -299,5 +318,5 @@ def main(config: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    CLI_SEARCH_RESET, CLI_SEARCH_SPACE = install_tune_cli_flags()
+    CLI_SEARCH_RESET, CLI_SEARCH_SPACE, CLI_TUNING_OVERRIDES = install_tune_cli_flags()
     main()

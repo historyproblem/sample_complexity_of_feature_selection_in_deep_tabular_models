@@ -50,15 +50,32 @@ def test_parse_categorical_search_flag_with_numeric_choices():
     }
 
 
+def test_parse_search_flag_resolves_short_aliases():
+    path, spec = parse_search_flag("lr=float:0.0001:0.01:log")
+
+    assert path == "optimizer.lr"
+    assert spec == {
+        "type": "float",
+        "low": 0.0001,
+        "high": 0.01,
+        "log": True,
+    }
+
+
 def test_preprocess_tune_argv_extracts_custom_flags():
-    argv, search_reset, search_space = preprocess_tune_argv(
+    argv, search_reset, search_space, tuning_overrides = preprocess_tune_argv(
         [
             "tune.py",
             "--search-reset",
-            "--search",
-            "optimizer.lr=float:0.0001:0.01:log",
+            "--float",
+            "lr=0.0001:0.01:log",
+            "--cat=bs=128,256",
+            "--trials",
+            "10",
+            "--metric",
+            "valid_accuracy",
+            "--maximize",
             "training_arguments.num_epochs=30",
-            "--search=dataloaders.batch_size=categorical:128,256",
         ]
     )
 
@@ -75,6 +92,11 @@ def test_preprocess_tune_argv_extracts_custom_flags():
             "type": "categorical",
             "choices": [128, 256],
         },
+    }
+    assert tuning_overrides == {
+        "tuning.n_trials": 10,
+        "tuning.objective_metric": "valid_accuracy",
+        "tuning.direction": "maximize",
     }
 
 
