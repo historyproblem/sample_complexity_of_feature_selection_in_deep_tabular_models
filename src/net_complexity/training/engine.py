@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
@@ -21,6 +23,43 @@ EpochEndCallback = Callable[
     None,
 ]
 ProgressContext = Mapping[str, Any]
+
+
+@dataclass
+class EarlyStoppingState:
+    monitor: str
+    mode: str
+    patience: int
+    min_epochs: int = 0
+    min_delta: float = 0.0
+    best_value: float | None = None
+    best_epoch: int | None = None
+    bad_epochs: int = 0
+
+    def step(self, epoch: int, metrics: Mapping[str, float]) -> bool:
+        if self.monitor not in metrics:
+            available_metrics = ", ".join(sorted(metrics.keys()))
+            raise KeyError(
+                f"Early stopping monitor '{self.monitor}' is missing in metrics. "
+                f"Available metrics: {available_metrics}"
+            )
+
+        current_value = float(metrics[self.monitor])
+        if self.best_value is None:
+            improved = True
+        elif self.mode == "max":
+            improved = current_value > self.best_value + self.min_delta
+        else:
+            improved = current_value < self.best_value - self.min_delta
+
+        if improved:
+            self.best_value = current_value
+            self.best_epoch = epoch
+            self.bad_epochs = 0
+            return False
+
+        self.bad_epochs += 1
+        return epoch >= self.min_epochs and self.bad_epochs >= self.patience
 
 
 def _to_float(value):
@@ -107,6 +146,47 @@ def _progress_desc(
     return " | ".join(f"[{part}]" for part in parts)
 
 
+def _build_early_stopping(
+    training_arguments: DictConfig,
+    run_history: RunHistory | None,
+) -> EarlyStoppingState | None:
+    cfg = getattr(training_arguments, "early_stopping", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    run_history_cfg = getattr(run_history.config, "run_history", None) if run_history is not None else None
+    monitor = getattr(cfg, "monitor", None)
+    if monitor is None and run_history_cfg is not None:
+        monitor = getattr(run_history_cfg, "monitor", None)
+    if monitor is None:
+        raise ValueError(
+            "training_arguments.early_stopping.monitor must be set, "
+            "or run_history.monitor must be configured."
+        )
+
+    mode = str(
+        getattr(
+            cfg,
+            "mode",
+            getattr(run_history_cfg, "mode", "min") if run_history_cfg is not None else "min",
+        )
+    ).lower()
+    if mode not in {"min", "max"}:
+        raise ValueError("early_stopping.mode must be either 'min' or 'max'.")
+
+    patience = int(getattr(cfg, "patience", 0))
+    if patience <= 0:
+        raise ValueError("training_arguments.early_stopping.patience must be > 0.")
+
+    return EarlyStoppingState(
+        monitor=str(monitor),
+        mode=mode,
+        patience=patience,
+        min_epochs=int(getattr(cfg, "min_epochs", 0)),
+        min_delta=float(getattr(cfg, "min_delta", 0.0)),
+    )
+
+
 @torch.inference_mode()
 def evaluate(model: nn.Module,
              dataloader: DataLoader,
@@ -178,6 +258,7 @@ def train_epoch(model,
 
 def train(model: nn.Module,
           optimizer: torch.optim.Optimizer,
+          scheduler: torch.optim.lr_scheduler.LRScheduler | None,
           dataloaders: Dataloaders,
           training_arguments: DictConfig,
           metrics,
@@ -191,6 +272,8 @@ def train(model: nn.Module,
     last_train_metrics: dict[str, float] = {}
     last_valid_metrics: dict[str, float] = {}
     total_epochs = int(training_arguments.num_epochs)
+    early_stopping = _build_early_stopping(training_arguments, run_history)
+    completed_epochs = 0
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
@@ -219,6 +302,7 @@ def train(model: nn.Module,
 
         train_metrics = dict(metrics.train_metrics.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
+        train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
         if mlflow_logger is not None:
@@ -257,17 +341,35 @@ def train(model: nn.Module,
                 run_history,
             )
 
+        if scheduler is not None:
+            scheduler.step()
+
+        should_stop = False
+        if early_stopping is not None:
+            should_stop = early_stopping.step(epoch_num, valid_metrics)
+            if should_stop:
+                tqdm.write(
+                    f"Early stopping at epoch {epoch_num}: "
+                    f"best {early_stopping.monitor}={early_stopping.best_value:.6f} "
+                    f"at epoch {early_stopping.best_epoch}"
+                )
+
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
+        completed_epochs = epoch_num
 
+        if should_stop:
+            break
+
+    final_epoch = completed_epochs or total_epochs
     evaluate(
         model,
         dataloaders.test_dataloader,
         metrics.test_metrics,
         device,
-        total_epochs=total_epochs,
+        total_epochs=final_epoch,
         stage="test",
-        epoch=total_epochs,
+        epoch=final_epoch,
         run_history=run_history,
         progress_context=progress_context,
     )
@@ -275,7 +377,7 @@ def train(model: nn.Module,
     if mlflow_logger is not None:
         mlflow_logger.log_metrics(
             test_metrics,
-            step=total_epochs,
+            step=final_epoch,
         )
         mlflow_logger.log_model(model, model_name="final_model")
     if run_history is not None:
@@ -359,6 +461,7 @@ def run_training(
     print(model)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
+    scheduler = instantiate(config.scheduler, optimizer=optimizer) if getattr(config, "scheduler", None) is not None else None
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if getattr(config, "mlflow", None) is not None else None
     run_history = RunHistory(config)
@@ -373,6 +476,7 @@ def run_training(
         result = train(
             model,
             optimizer,
+            scheduler,
             dataloaders,
             config.training_arguments,
             metrics,
