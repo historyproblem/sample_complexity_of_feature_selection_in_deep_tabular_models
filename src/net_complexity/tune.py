@@ -19,6 +19,11 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
 from net_complexity.train import run_training
+from net_complexity.tuning_flags import install_tune_cli_flags
+
+
+CLI_SEARCH_RESET = False
+CLI_SEARCH_SPACE: dict[str, dict[str, Any]] = {}
 
 
 def _clone_config(config: DictConfig) -> DictConfig:
@@ -100,6 +105,20 @@ def _create_study_dir(tuning_cfg: DictConfig) -> Path:
         suffix += 1
     study_dir.mkdir(parents=True, exist_ok=False)
     return study_dir
+
+
+def _apply_cli_search_flags(config: DictConfig) -> None:
+    if not CLI_SEARCH_RESET and not CLI_SEARCH_SPACE:
+        return
+
+    existing_search_space = {}
+    if not CLI_SEARCH_RESET:
+        current = OmegaConf.select(config, "tuning.search_space")
+        if current is not None:
+            existing_search_space = dict(OmegaConf.to_container(current, resolve=True))
+
+    existing_search_space.update(CLI_SEARCH_SPACE)
+    OmegaConf.update(config, "tuning.search_space", existing_search_space, merge=False)
 
 
 class TrialObserver:
@@ -195,6 +214,7 @@ def _build_study(config: DictConfig) -> optuna.Study:
 
 @hydra.main(config_path="../../configs/", config_name="tune", version_base=None)
 def main(config: DictConfig) -> None:
+    _apply_cli_search_flags(config)
     tuning_cfg = config.tuning
     if not getattr(tuning_cfg, "enabled", False):
         raise ValueError("Tuning config is disabled. Use tuning=optuna or enable config.tuning.enabled.")
@@ -279,4 +299,5 @@ def main(config: DictConfig) -> None:
 
 
 if __name__ == "__main__":
+    CLI_SEARCH_RESET, CLI_SEARCH_SPACE = install_tune_cli_flags()
     main()

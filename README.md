@@ -55,6 +55,22 @@ In learning theory, sample complexity determines how much data is required for g
     python3 src/net_complexity/tune.py
 ```
 
+You can also define the Optuna search space directly from CLI flags:
+
+```bash
+    python3 src/net_complexity/tune.py \
+      --search-reset \
+      --search "model.lambda_coef=float:0.01:5.0:log" \
+      --search "optimizer.lr=float:0.0001:0.01:log" \
+      --search "dataloaders.batch_size=categorical:128,256,512"
+```
+
+Supported `--search` formats:
+- `path=float:low:high[:log][:step=value]`
+- `path=int:low:high[:log][:step=value]`
+- `path=categorical:value1,value2,...`
+- `--search-reset` clears the default YAML `tuning.search_space` before applying CLI flags
+
 Current configs are organized as:
 - `configs/experiment`: compact runnable experiment configs
 - `configs/tuning`: Optuna settings and search spaces
