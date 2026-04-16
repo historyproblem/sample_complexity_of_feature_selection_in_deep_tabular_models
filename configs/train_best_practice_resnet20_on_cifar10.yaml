@@ -1,0 +1,4 @@
+defaults:
+  - /experiment@_here_: best_practice_resnet20_on_cifar10
+  - /tuning@_here_: none
+  - _self_
