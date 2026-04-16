@@ -8,6 +8,7 @@ from .complexity import (
     WeightStatisticsMetric,
 )
 from .gumbel import GumbelProbMetric
+from .stg import STGProbMetric
 from .storage import (
     ExperimentMetricsStore,
     list_metric_files,
@@ -27,6 +28,7 @@ __all__ = [
     "MultiLossMetric",
     "Multimetric",
     "NormalizedMarginMetric",
+    "STGProbMetric",
     "WeightStatisticsMetric",
     "list_metric_files",
     "load_metrics",

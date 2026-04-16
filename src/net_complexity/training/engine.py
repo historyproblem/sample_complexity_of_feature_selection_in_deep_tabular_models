@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
+from net_complexity.models.feature_selection import get_gumbel_modules
 from net_complexity.training.meta import Metrics
 from net_complexity.training.run_history import RunHistory
 from net_complexity.training.tracking import MLflowLogger
@@ -22,6 +23,60 @@ EpochEndCallback = Callable[
     None,
 ]
 ProgressContext = Mapping[str, Any]
+
+
+def _to_float(value: Any) -> float | None:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return float(value.detach().cpu().item())
+        return float(value.detach().cpu().mean().item())
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def collect_batch_metrics(output, targets, model: nn.Module | None = None) -> dict[str, float]:
+    """Compatibility helper kept for legacy imports and optional batch logging."""
+    batch_metrics: dict[str, float] = {}
+
+    for name in ("ce_loss", "regularization_loss", "loss"):
+        value = _to_float(getattr(output, name, None))
+        if value is not None:
+            batch_metrics[name] = value
+
+    logits = getattr(output, "logits", None)
+    if isinstance(logits, torch.Tensor):
+        accuracy = (logits.argmax(dim=-1) == targets).float().mean().item()
+        batch_metrics["accuracy"] = float(accuracy)
+
+    if model is None:
+        return batch_metrics
+
+    gumbel_modules = get_gumbel_modules(model)
+    if not gumbel_modules:
+        return batch_metrics
+
+    real_means = []
+    estim_means = []
+    for name, module in gumbel_modules.items():
+        value = module.get_selection_probs().detach().cpu()
+        estim_prob = float(value.mean().item())
+        real_prob = float((value > 0.5).float().mean().item())
+        batch_metrics[f"{name}_avg_estim_prob"] = estim_prob
+        batch_metrics[f"{name}_avg_real_prob"] = real_prob
+        estim_means.append(estim_prob)
+        real_means.append(real_prob)
+
+    if real_means:
+        batch_metrics["average_real_prob"] = float(sum(real_means) / len(real_means))
+        batch_metrics["max_real_prob"] = float(max(real_means))
+        batch_metrics["min_real_prob"] = float(min(real_means))
+    if estim_means:
+        batch_metrics["average_estim_prob"] = float(sum(estim_means) / len(estim_means))
+        batch_metrics["max_estim_prob"] = float(max(estim_means))
+        batch_metrics["min_estimm_prob"] = float(min(estim_means))
+
+    return batch_metrics
 
 
 @dataclass

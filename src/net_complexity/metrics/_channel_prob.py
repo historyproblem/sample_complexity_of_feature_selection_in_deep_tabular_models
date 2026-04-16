@@ -73,7 +73,9 @@ class ChannelZeroProbMetric(BaseMetric):
 
         results["average_estim_prob"] = float(np.mean(estim_means))
         results["max_estim_prob"] = float(np.max(estim_means))
-        results["min_estimm_prob"] = float(np.min(estim_means))
+        # Keep the legacy typo for backward compatibility with existing notebooks/parsers.
+        results["min_estim_prob"] = float(np.min(estim_means))
+        results["min_estimm_prob"] = results["min_estim_prob"]
 
         results["average_zero_prob"] = float(np.mean(zero_means))
         results["max_zero_prob"] = float(np.max(zero_means))
