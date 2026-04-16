@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "net_complexity" / "tuning_search.py"
-SPEC = importlib.util.spec_from_file_location("tuning_search", MODULE_PATH)
+MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "net_complexity" / "tuning" / "search.py"
+SPEC = importlib.util.spec_from_file_location("net_complexity.tuning.search", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

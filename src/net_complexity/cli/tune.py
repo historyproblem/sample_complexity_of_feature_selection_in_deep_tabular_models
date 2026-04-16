@@ -19,8 +19,8 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
 from net_complexity.training.engine import run_training
-from net_complexity.tuning_flags import install_tune_cli_flags
-from net_complexity.tuning_search import build_grid_search_space, count_grid_trials
+from net_complexity.tuning.flags import install_tune_cli_flags
+from net_complexity.tuning.search import build_grid_search_space, count_grid_trials
 
 
 CLI_SEARCH_RESET = False
