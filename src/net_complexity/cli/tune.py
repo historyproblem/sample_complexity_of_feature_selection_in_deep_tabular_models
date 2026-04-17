@@ -20,7 +20,12 @@ from tqdm.auto import tqdm
 
 from net_complexity.training.engine import run_training
 from net_complexity.tuning.flags import install_tune_cli_flags
-from net_complexity.tuning.repeats import resolve_repeat_seeds, select_best_repeat
+from net_complexity.tuning.restart_guard import RepeatRestartGuard, RepeatRestartRequested
+from net_complexity.tuning.repeats import (
+    resolve_repeat_attempt_seed,
+    resolve_repeat_seeds,
+    select_best_repeat,
+)
 from net_complexity.tuning.search import build_grid_search_space, count_grid_trials
 
 
@@ -121,13 +126,14 @@ def _update_repeat_metadata(
     repeat_number: int,
     repeat_total: int,
     repeat_seed: int | None,
+    attempt_number: int,
 ) -> None:
     base_run_name = OmegaConf.select(config, "mlflow.run_name")
     if base_run_name is not None:
         OmegaConf.update(
             config,
             "mlflow.run_name",
-            f"{base_run_name}_repeat_{repeat_number:02d}",
+            f"{base_run_name}_repeat_{repeat_number:02d}_attempt_{attempt_number:02d}",
             merge=False,
         )
 
@@ -139,6 +145,7 @@ def _update_repeat_metadata(
         "repeat_number": str(repeat_number),
         "repeat_total": str(repeat_total),
         "repeat_seed": str(repeat_seed) if repeat_seed is not None else "none",
+        "attempt_number": str(attempt_number),
     })
     OmegaConf.update(config, "mlflow.tags", tags, merge=True)
 
@@ -147,9 +154,41 @@ def _update_repeat_metadata(
         OmegaConf.update(
             config,
             "run_history.run_name",
-            f"{run_history_name}_repeat_{repeat_number:02d}",
+            f"{run_history_name}_repeat_{repeat_number:02d}_attempt_{attempt_number:02d}",
             merge=False,
         )
+
+
+def _build_restart_guard(
+    tuning_cfg: DictConfig,
+    *,
+    objective_metric: str,
+    direction: str,
+) -> RepeatRestartGuard | None:
+    cfg = getattr(tuning_cfg, "restart_guard", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    metric_name = str(getattr(cfg, "metric", objective_metric) or objective_metric)
+    mode = str(getattr(cfg, "mode", "max" if direction == "maximize" else "min")).lower()
+    epoch = int(getattr(cfg, "epoch"))
+    threshold = float(getattr(cfg, "threshold"))
+    return RepeatRestartGuard(
+        metric_name=metric_name,
+        mode=mode,
+        epoch=epoch,
+        threshold=threshold,
+    )
+
+
+def _compose_epoch_end_callbacks(*callbacks):
+    def _callback(epoch, train_metrics, valid_metrics, model, optimizer, run_history):
+        for callback in callbacks:
+            if callback is None:
+                continue
+            callback(epoch, train_metrics, valid_metrics, model, optimizer, run_history)
+
+    return _callback
 
 
 def _resolve_output_dir(tuning_cfg: DictConfig) -> Path:
@@ -283,6 +322,10 @@ def _summarize_study(
         "repeats_per_trial": OmegaConf.select(config, "tuning.repeats_per_trial"),
         "seed_base": OmegaConf.select(config, "tuning.seed_base"),
         "seed_stride": OmegaConf.select(config, "tuning.seed_stride"),
+        "restart_guard": OmegaConf.to_container(
+            OmegaConf.select(config, "tuning.restart_guard"),
+            resolve=True,
+        ) if OmegaConf.select(config, "tuning.restart_guard") is not None else None,
         "best_trial_number": best_trial.number if best_trial is not None else None,
         "best_value": best_value,
         "best_params": best_params,
@@ -360,6 +403,16 @@ def main(config: DictConfig) -> None:
         seed_base=getattr(tuning_cfg, "seed_base", None),
         seed_stride=int(getattr(tuning_cfg, "seed_stride", 1)),
     )
+    repeat_seed_stride = int(getattr(tuning_cfg, "seed_stride", 1))
+    restart_max_attempts = int(getattr(tuning_cfg, "restart_guard", {}).get("max_attempts_per_repeat", 1))
+    if restart_max_attempts <= 0:
+        raise ValueError("tuning.restart_guard.max_attempts_per_repeat must be >= 1.")
+    restart_guard_template = _build_restart_guard(
+        tuning_cfg,
+        objective_metric=objective_metric,
+        direction=direction,
+    )
+    restart_guard_enabled = restart_guard_template is not None
 
     study_dir = _create_study_dir(tuning_cfg)
     if mode == "grid":
@@ -384,95 +437,149 @@ def main(config: DictConfig) -> None:
         trial.set_user_attr("suggested_params", suggested_params)
         repeat_results: list[dict[str, Any]] = []
         repeat_failures: list[dict[str, Any]] = []
+        repeat_restarts: list[dict[str, Any]] = []
 
         for repeat_index, repeat_seed in enumerate(repeat_seeds, start=1):
-            repeat_config = _clone_config(trial_config)
-            OmegaConf.update(repeat_config, "seed", repeat_seed, merge=False)
-            _update_repeat_metadata(
-                repeat_config,
-                repeat_number=repeat_index,
-                repeat_total=repeats_per_trial,
-                repeat_seed=repeat_seed,
-            )
-            repeat_observer = TrialObserver(
-                trial,
-                objective_metric,
-                direction,
-                allow_pruning=(mode == "optuna" and repeats_per_trial == 1),
-            )
-            progress_context = {
-                "trial_number": trial_number,
-                "trial_total": trial_total,
-                "repeat_number": repeat_index,
-                "repeat_total": repeats_per_trial,
-            }
-
-            try:
-                result = run_training(
-                    repeat_config,
-                    epoch_end_callback=repeat_observer,
-                    progress_context=progress_context,
+            for attempt_index in range(1, restart_max_attempts + 1):
+                attempt_seed = resolve_repeat_attempt_seed(
+                    repeat_seed,
+                    attempt_number=attempt_index,
+                    repeats_per_trial=repeats_per_trial,
+                    seed_stride=repeat_seed_stride,
                 )
-            except optuna.TrialPruned:
-                if repeat_observer.best_value is not None:
-                    trial.set_user_attr("best_epoch", repeat_observer.best_epoch)
-                    trial.set_user_attr("best_objective_value", repeat_observer.best_value)
-                    tqdm.write(
-                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                        f"pruned | best {objective_metric}={repeat_observer.best_value:.6f} | "
-                        f"epoch={repeat_observer.best_epoch}"
-                    )
-                else:
-                    tqdm.write(
-                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                        "pruned before first valid metric"
-                    )
-                raise
-            except Exception as exc:
-                repeat_failures.append({
+                repeat_config = _clone_config(trial_config)
+                OmegaConf.update(repeat_config, "seed", attempt_seed, merge=False)
+                _update_repeat_metadata(
+                    repeat_config,
+                    repeat_number=repeat_index,
+                    repeat_total=repeats_per_trial,
+                    repeat_seed=attempt_seed,
+                    attempt_number=attempt_index,
+                )
+                repeat_observer = TrialObserver(
+                    trial,
+                    objective_metric,
+                    direction,
+                    allow_pruning=(
+                        mode == "optuna"
+                        and repeats_per_trial == 1
+                        and not restart_guard_enabled
+                    ),
+                )
+                repeat_guard = _build_restart_guard(
+                    tuning_cfg,
+                    objective_metric=objective_metric,
+                    direction=direction,
+                ) if restart_guard_enabled else None
+                progress_context = {
+                    "trial_number": trial_number,
+                    "trial_total": trial_total,
                     "repeat_number": repeat_index,
-                    "seed": repeat_seed,
-                    "error": str(exc),
-                })
+                    "repeat_total": repeats_per_trial,
+                    "attempt_number": attempt_index,
+                    "attempt_total": restart_max_attempts,
+                }
+                epoch_callback = _compose_epoch_end_callbacks(repeat_observer, repeat_guard)
+
+                try:
+                    result = run_training(
+                        repeat_config,
+                        epoch_end_callback=epoch_callback,
+                        progress_context=progress_context,
+                    )
+                except RepeatRestartRequested as exc:
+                    restart_event = {
+                        "repeat_number": repeat_index,
+                        "attempt_number": attempt_index,
+                        "seed": attempt_seed,
+                        "metric_name": exc.metric_name,
+                        "epoch": exc.epoch,
+                        "value": exc.value,
+                        "threshold": exc.threshold,
+                        "run_dir": exc.run_dir,
+                        "run_id": exc.run_id,
+                    }
+                    repeat_restarts.append(restart_event)
+                    tqdm.write(
+                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial} "
+                        f"attempt {attempt_index}/{restart_max_attempts}] restart | "
+                        f"{exc.metric_name}={exc.value:.6f} at epoch {exc.epoch} | "
+                        f"threshold={exc.threshold:.6f} | seed={attempt_seed}"
+                    )
+                    if attempt_index == restart_max_attempts:
+                        repeat_failures.append({
+                            "repeat_number": repeat_index,
+                            "seed": attempt_seed,
+                            "attempt_number": attempt_index,
+                            "error": str(exc),
+                            "reason": "restart_guard",
+                        })
+                    continue
+                except optuna.TrialPruned:
+                    if repeat_observer.best_value is not None:
+                        trial.set_user_attr("best_epoch", repeat_observer.best_epoch)
+                        trial.set_user_attr("best_objective_value", repeat_observer.best_value)
+                        tqdm.write(
+                            f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                            f"pruned | best {objective_metric}={repeat_observer.best_value:.6f} | "
+                            f"epoch={repeat_observer.best_epoch}"
+                        )
+                    else:
+                        tqdm.write(
+                            f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                            "pruned before first valid metric"
+                        )
+                    raise
+                except Exception as exc:
+                    repeat_failures.append({
+                        "repeat_number": repeat_index,
+                        "seed": attempt_seed,
+                        "attempt_number": attempt_index,
+                        "error": str(exc),
+                        "reason": "exception",
+                    })
+                    tqdm.write(
+                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                        f"failed | seed={attempt_seed} | error={exc}"
+                    )
+                    break
+                finally:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                objective_value = repeat_observer.best_value
+                if objective_value is None:
+                    last_valid_metrics = result.get("last_valid_metrics", {})
+                    if objective_metric not in last_valid_metrics:
+                        raise KeyError(
+                            f"Objective metric '{objective_metric}' is missing in final validation metrics."
+                        )
+                    objective_value = float(last_valid_metrics[objective_metric])
+
+                repeat_result = {
+                    "repeat_number": repeat_index,
+                    "attempt_number": attempt_index,
+                    "seed": attempt_seed,
+                    "objective_value": float(objective_value),
+                    "best_epoch": repeat_observer.best_epoch,
+                    "run_id": result.get("run_id"),
+                    "run_dir": result.get("run_dir"),
+                    "best_metric_name": result.get("best_metric_name"),
+                    "best_metric_value": result.get("best_metric_value"),
+                }
+                repeat_results.append(repeat_result)
                 tqdm.write(
                     f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                    f"failed | seed={repeat_seed} | error={exc}"
+                    f"completed | best {objective_metric}={objective_value:.6f} | "
+                    f"epoch={repeat_observer.best_epoch} | "
+                    f"seed={attempt_seed} | run_dir={result.get('run_dir')}"
                 )
-                continue
-            finally:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            objective_value = repeat_observer.best_value
-            if objective_value is None:
-                last_valid_metrics = result.get("last_valid_metrics", {})
-                if objective_metric not in last_valid_metrics:
-                    raise KeyError(
-                        f"Objective metric '{objective_metric}' is missing in final validation metrics."
-                    )
-                objective_value = float(last_valid_metrics[objective_metric])
-
-            repeat_result = {
-                "repeat_number": repeat_index,
-                "seed": repeat_seed,
-                "objective_value": float(objective_value),
-                "best_epoch": repeat_observer.best_epoch,
-                "run_id": result.get("run_id"),
-                "run_dir": result.get("run_dir"),
-                "best_metric_name": result.get("best_metric_name"),
-                "best_metric_value": result.get("best_metric_value"),
-            }
-            repeat_results.append(repeat_result)
-            tqdm.write(
-                f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                f"completed | best {objective_metric}={objective_value:.6f} | "
-                f"epoch={repeat_observer.best_epoch} | "
-                f"seed={repeat_seed} | run_dir={result.get('run_dir')}"
-            )
+                break
 
         if not repeat_results:
             error_summary = "; ".join(
-                f"repeat={failure['repeat_number']} seed={failure['seed']} error={failure['error']}"
+                f"repeat={failure['repeat_number']} attempt={failure.get('attempt_number')} "
+                f"seed={failure['seed']} error={failure['error']}"
                 for failure in repeat_failures
             )
             raise RuntimeError(f"All repeats failed for trial {trial_number}: {error_summary}")
@@ -486,6 +593,7 @@ def main(config: DictConfig) -> None:
         trial.set_user_attr("best_repeat_seed", best_repeat.get("seed"))
         trial.set_user_attr("repeat_results", repeat_results)
         trial.set_user_attr("repeat_failures", repeat_failures)
+        trial.set_user_attr("repeat_restarts", repeat_restarts)
         trial.set_user_attr("repeat_seeds", [result["seed"] for result in repeat_results])
         trial.set_user_attr(
             "repeat_objective_values",

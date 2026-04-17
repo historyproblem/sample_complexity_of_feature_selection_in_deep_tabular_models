@@ -18,6 +18,24 @@ def resolve_repeat_seeds(
     return [int(seed_base) + repeat_index * int(seed_stride) for repeat_index in range(repeats_per_trial)]
 
 
+def resolve_repeat_attempt_seed(
+    initial_seed: int | None,
+    *,
+    attempt_number: int,
+    repeats_per_trial: int,
+    seed_stride: int,
+) -> int | None:
+    if initial_seed is None:
+        return None
+    if attempt_number <= 0:
+        raise ValueError("attempt_number must be >= 1.")
+    if repeats_per_trial <= 0:
+        raise ValueError("repeats_per_trial must be >= 1.")
+    if seed_stride <= 0:
+        raise ValueError("seed_stride must be >= 1.")
+    return int(initial_seed) + (attempt_number - 1) * int(repeats_per_trial) * int(seed_stride)
+
+
 def select_best_repeat(direction: str, repeat_results: list[dict[str, Any]]) -> dict[str, Any]:
     if not repeat_results:
         raise ValueError("repeat_results must not be empty.")

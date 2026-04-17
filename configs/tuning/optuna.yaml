@@ -10,6 +10,13 @@ tuning:
   n_jobs: 1
   seed_base: 42
   seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
   storage: null
   load_if_exists: true
   output_dir: "outputs/tuning"

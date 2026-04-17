@@ -128,6 +128,10 @@ def _progress_prefix(progress_context: ProgressContext | None = None) -> str | N
         repeat_total = progress_context.get("repeat_total")
         if repeat_number is not None and repeat_total is not None:
             parts.append(f"Repeat {repeat_number}/{repeat_total}")
+        attempt_number = progress_context.get("attempt_number")
+        attempt_total = progress_context.get("attempt_total")
+        if attempt_number is not None and attempt_total is not None:
+            parts.append(f"Attempt {attempt_number}/{attempt_total}")
     return " | ".join(parts) if parts else None
 
 

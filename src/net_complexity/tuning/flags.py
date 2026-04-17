@@ -25,6 +25,7 @@ TUNING_FLAG_OVERRIDES = {
     "--output-dir": "tuning.output_dir",
     "--seed-base": "tuning.seed_base",
     "--seed-stride": "tuning.seed_stride",
+    "--restart-max-attempts": "tuning.restart_guard.max_attempts_per_repeat",
 }
 
 
@@ -208,6 +209,34 @@ def preprocess_tune_argv(
 
         if arg in {"--maximize", "--minimize"}:
             tuning_overrides["tuning.direction"] = "maximize" if arg == "--maximize" else "minimize"
+            index += 1
+            continue
+
+        if arg == "--restart-below-acc":
+            if index + 1 >= len(argv):
+                raise SystemExit("--restart-below-acc requires a value like '20:0.4'.")
+            value = argv[index + 1]
+            if ":" not in value:
+                raise SystemExit("--restart-below-acc must look like '20:0.4'.")
+            epoch_raw, threshold_raw = value.split(":", 1)
+            tuning_overrides["tuning.restart_guard.enabled"] = True
+            tuning_overrides["tuning.restart_guard.metric"] = "valid_accuracy"
+            tuning_overrides["tuning.restart_guard.mode"] = "max"
+            tuning_overrides["tuning.restart_guard.epoch"] = int(epoch_raw)
+            tuning_overrides["tuning.restart_guard.threshold"] = float(threshold_raw)
+            index += 2
+            continue
+
+        if arg.startswith("--restart-below-acc="):
+            value = arg.split("=", 1)[1]
+            if ":" not in value:
+                raise SystemExit("--restart-below-acc must look like '20:0.4'.")
+            epoch_raw, threshold_raw = value.split(":", 1)
+            tuning_overrides["tuning.restart_guard.enabled"] = True
+            tuning_overrides["tuning.restart_guard.metric"] = "valid_accuracy"
+            tuning_overrides["tuning.restart_guard.mode"] = "max"
+            tuning_overrides["tuning.restart_guard.epoch"] = int(epoch_raw)
+            tuning_overrides["tuning.restart_guard.threshold"] = float(threshold_raw)
             index += 1
             continue
 

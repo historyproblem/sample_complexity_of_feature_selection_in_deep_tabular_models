@@ -104,6 +104,8 @@ Useful tuning override flags:
 - `--mode NAME`
 - `--trials N`
 - `--repeats N`
+- `--restart-below-acc EPOCH:THRESHOLD`
+- `--restart-max-attempts N`
 - `--metric NAME`
 - `--study-name NAME`
 - `--jobs N`
@@ -117,6 +119,7 @@ Notes for grid mode:
 - default mode is `optuna`
 - grid mode expands the full discrete search space
 - `--repeats N` reruns each parameter point with different seeds and keeps the best repeat as the trial objective
+- `--restart-below-acc 20:0.4` restarts a repeat with a new seed if `valid_accuracy` has not reached `0.4` by epoch `20`
 - `float` grid ranges require `step=...`
 - log-scaled numeric ranges are supported in `optuna` mode, but not in `grid`
 - for arbitrary numeric grids, prefer `--cat "name=v1,v2,v3"`

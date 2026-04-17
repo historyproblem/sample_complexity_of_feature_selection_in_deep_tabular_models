@@ -13,6 +13,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 resolve_repeat_seeds = MODULE.resolve_repeat_seeds
+resolve_repeat_attempt_seed = MODULE.resolve_repeat_attempt_seed
 select_best_repeat = MODULE.select_best_repeat
 
 
@@ -22,6 +23,11 @@ def test_resolve_repeat_seeds_generates_distinct_sequence():
 
 def test_resolve_repeat_seeds_allows_missing_seed_base():
     assert resolve_repeat_seeds(2, seed_base=None, seed_stride=1) == [None, None]
+
+
+def test_resolve_repeat_attempt_seed_uses_distinct_attempt_offsets():
+    assert resolve_repeat_attempt_seed(42, attempt_number=1, repeats_per_trial=3, seed_stride=2) == 42
+    assert resolve_repeat_attempt_seed(42, attempt_number=2, repeats_per_trial=3, seed_stride=2) == 48
 
 
 def test_select_best_repeat_for_maximize():
