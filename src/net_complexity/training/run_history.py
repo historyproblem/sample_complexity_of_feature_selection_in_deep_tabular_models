@@ -223,7 +223,11 @@ class RunHistory:
         torch.save(payload, checkpoint_path)
         return checkpoint_path
 
-    def save_summary(self, test_metrics: Mapping[str, Any] | None = None) -> None:
+    def save_summary(
+        self,
+        test_metrics: Mapping[str, Any] | None = None,
+        stop_info: Mapping[str, Any] | None = None,
+    ) -> None:
         summary = {
             "run_id": self.run_id,
             "run_name": self.run_name,
@@ -239,4 +243,6 @@ class RunHistory:
             "best_epoch": self.best_epoch,
             "test_metrics": dict(test_metrics or {}),
         }
+        if stop_info is not None:
+            summary.update(dict(stop_info))
         self._write_json(self.summary_path, summary)

@@ -17,6 +17,7 @@ from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
 from net_complexity.training.tracking import MLflowLogger
+from net_complexity.tuning.restart_guard import CollapseDetected, CollapseGuard
 
 
 EpochEndCallback = Callable[
@@ -225,6 +226,24 @@ def _build_early_stopping(
     )
 
 
+def _build_collapse_guard(training_arguments: DictConfig) -> CollapseGuard | None:
+    cfg = getattr(training_arguments, "collapse_guard", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    return CollapseGuard(
+        min_epoch=int(getattr(cfg, "min_epoch", 35)),
+        patience=int(getattr(cfg, "patience", 20)),
+        min_epochs_since_best=int(
+            getattr(cfg, "min_epochs_since_best", getattr(cfg, "patience", 20))
+        ),
+        acc_threshold_abs=float(getattr(cfg, "acc_threshold_abs", 0.15)),
+        acc_threshold_rel=float(getattr(cfg, "acc_threshold_rel", 0.30)),
+        loss_threshold=float(getattr(cfg, "loss_threshold", 2.25)),
+        zero_threshold=float(getattr(cfg, "zero_threshold", 0.86)),
+    )
+
+
 @torch.inference_mode()
 def evaluate(model: nn.Module,
              dataloader: DataLoader,
@@ -283,7 +302,9 @@ def train(model: nn.Module,
     last_valid_metrics: dict[str, float] = {}
     total_epochs = int(training_arguments.num_epochs)
     early_stopping = _build_early_stopping(training_arguments, run_history)
+    collapse_guard = _build_collapse_guard(training_arguments)
     completed_epochs = 0
+    stop_info: dict[str, Any] | None = None
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
@@ -358,12 +379,48 @@ def train(model: nn.Module,
                 run_history,
             )
 
+        collapse_detected: CollapseDetected | None = None
+        if collapse_guard is not None:
+            try:
+                collapse_guard(
+                    epoch_num,
+                    train_metrics,
+                    valid_metrics,
+                    model,
+                    optimizer,
+                    run_history,
+                )
+            except CollapseDetected as exc:
+                collapse_detected = exc
+                stop_info = exc.as_dict()
+                if mlflow_logger is not None:
+                    mlflow_logger.log_params(stop_info)
+
         if scheduler is not None:
             scheduler.step()
 
         should_stop = False
+        stop_message: str | None = None
         if early_stopping is not None:
             should_stop = early_stopping.step(epoch_num, valid_metrics)
+            if should_stop:
+                stop_message = (
+                    f"Early stopping at epoch {epoch_num}: "
+                    f"best {early_stopping.monitor}={early_stopping.best_value:.6f} "
+                    f"at epoch {early_stopping.best_epoch}"
+                )
+
+        if collapse_detected is not None:
+            should_stop = True
+            stop_message = (
+                f"Collapse detected at epoch {epoch_num}: "
+                f"valid_accuracy={collapse_detected.valid_accuracy:.6f} | "
+                f"valid_loss={collapse_detected.valid_loss:.6f} | "
+                f"valid_average_zero_prob={collapse_detected.valid_average_zero_prob:.6f} | "
+                f"best_val_acc_so_far={collapse_detected.best_val_acc_so_far:.6f} | "
+                f"epochs_since_best={collapse_detected.epochs_since_best} | "
+                f"consecutive_epochs={collapse_detected.consecutive_epochs}"
+            )
 
         epoch_time = perf_counter() - epoch_started_at
         print(
@@ -378,12 +435,8 @@ def train(model: nn.Module,
                 progress_context=progress_context,
             )
         )
-        if should_stop:
-            print(
-                f"Early stopping at epoch {epoch_num}: "
-                f"best {early_stopping.monitor}={early_stopping.best_value:.6f} "
-                f"at epoch {early_stopping.best_epoch}"
-            )
+        if stop_message is not None:
+            print(stop_message)
 
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
@@ -412,13 +465,16 @@ def train(model: nn.Module,
         )
         mlflow_logger.log_model(model, model_name="final_model")
     if run_history is not None:
-        run_history.save_summary(test_metrics)
+        run_history.save_summary(test_metrics, stop_info=stop_info)
     metrics.test_metrics.reset()
-    return {
+    result = {
         "last_train_metrics": last_train_metrics,
         "last_valid_metrics": last_valid_metrics,
         "test_metrics": dict(test_metrics),
     }
+    if stop_info is not None:
+        result.update(stop_info)
+    return result
 
 
 def resolve_device(config: DictConfig) -> str:
