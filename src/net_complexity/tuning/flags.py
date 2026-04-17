@@ -17,11 +17,14 @@ SEARCH_ALIASES = {
 TUNING_FLAG_OVERRIDES = {
     "--mode": "tuning.mode",
     "--trials": "tuning.n_trials",
+    "--repeats": "tuning.repeats_per_trial",
     "--metric": "tuning.objective_metric",
     "--study-name": "tuning.study_name",
     "--jobs": "tuning.n_jobs",
     "--timeout": "tuning.timeout",
     "--output-dir": "tuning.output_dir",
+    "--seed-base": "tuning.seed_base",
+    "--seed-stride": "tuning.seed_stride",
 }
 
 

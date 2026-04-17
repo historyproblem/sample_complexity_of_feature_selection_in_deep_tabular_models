@@ -77,6 +77,9 @@ Switch to exhaustive grid search with the same entrypoint:
     python3 src/net_complexity/tune.py \
       --grid \
       --study-name gumbel_grid \
+      --repeats 3 \
+      --seed-base 42 \
+      --seed-stride 1 \
       --search-reset \
       --float "lambda=0.01:0.05:step=0.01" \
       --float "lr=0.0005:0.0015:step=0.0005" \
@@ -100,16 +103,20 @@ Useful tuning override flags:
 - `--grid` / `--optuna`
 - `--mode NAME`
 - `--trials N`
+- `--repeats N`
 - `--metric NAME`
 - `--study-name NAME`
 - `--jobs N`
 - `--timeout SECONDS`
 - `--output-dir PATH`
+- `--seed-base N`
+- `--seed-stride N`
 - `--maximize` / `--minimize`
 
 Notes for grid mode:
 - default mode is `optuna`
 - grid mode expands the full discrete search space
+- `--repeats N` reruns each parameter point with different seeds and keeps the best repeat as the trial objective
 - `float` grid ranges require `step=...`
 - log-scaled numeric ranges are supported in `optuna` mode, but not in `grid`
 - for arbitrary numeric grids, prefer `--cat "name=v1,v2,v3"`

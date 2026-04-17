@@ -63,6 +63,7 @@ class RunHistory:
             {
                 "run_id": self.run_id,
                 "run_name": self.run_name,
+                "seed": getattr(config, "seed", None),
                 "started_at": self.started_at.isoformat(timespec="seconds"),
                 "run_dir": str(self.run_dir),
             },
@@ -226,6 +227,7 @@ class RunHistory:
         summary = {
             "run_id": self.run_id,
             "run_name": self.run_name,
+            "seed": getattr(self.config, "seed", None),
             "run_dir": str(self.run_dir),
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "finished_at": datetime.now().isoformat(timespec="seconds"),

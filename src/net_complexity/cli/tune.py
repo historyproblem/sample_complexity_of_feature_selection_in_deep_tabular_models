@@ -20,6 +20,7 @@ from tqdm.auto import tqdm
 
 from net_complexity.training.engine import run_training
 from net_complexity.tuning.flags import install_tune_cli_flags
+from net_complexity.tuning.repeats import resolve_repeat_seeds, select_best_repeat
 from net_complexity.tuning.search import build_grid_search_space, count_grid_trials
 
 
@@ -112,6 +113,43 @@ def _update_trial_metadata(config: DictConfig, tuning_cfg: DictConfig, trial: op
         "objective_metric": str(tuning_cfg.objective_metric),
     })
     OmegaConf.update(config, "mlflow.tags", tags, merge=True)
+
+
+def _update_repeat_metadata(
+    config: DictConfig,
+    *,
+    repeat_number: int,
+    repeat_total: int,
+    repeat_seed: int | None,
+) -> None:
+    base_run_name = OmegaConf.select(config, "mlflow.run_name")
+    if base_run_name is not None:
+        OmegaConf.update(
+            config,
+            "mlflow.run_name",
+            f"{base_run_name}_repeat_{repeat_number:02d}",
+            merge=False,
+        )
+
+    existing_tags = OmegaConf.select(config, "mlflow.tags")
+    tags = {}
+    if existing_tags is not None:
+        tags = dict(OmegaConf.to_container(existing_tags, resolve=True))
+    tags.update({
+        "repeat_number": str(repeat_number),
+        "repeat_total": str(repeat_total),
+        "repeat_seed": str(repeat_seed) if repeat_seed is not None else "none",
+    })
+    OmegaConf.update(config, "mlflow.tags", tags, merge=True)
+
+    run_history_name = OmegaConf.select(config, "run_history.run_name")
+    if run_history_name is not None:
+        OmegaConf.update(
+            config,
+            "run_history.run_name",
+            f"{run_history_name}_repeat_{repeat_number:02d}",
+            merge=False,
+        )
 
 
 def _resolve_output_dir(tuning_cfg: DictConfig) -> Path:
@@ -242,10 +280,15 @@ def _summarize_study(
         "requested_trials": OmegaConf.select(config, "tuning.n_trials") if mode == "optuna" else None,
         "effective_trials": effective_trials,
         "grid_total_trials": grid_total_trials,
+        "repeats_per_trial": OmegaConf.select(config, "tuning.repeats_per_trial"),
+        "seed_base": OmegaConf.select(config, "tuning.seed_base"),
+        "seed_stride": OmegaConf.select(config, "tuning.seed_stride"),
         "best_trial_number": best_trial.number if best_trial is not None else None,
         "best_value": best_value,
         "best_params": best_params,
         "best_epoch": best_trial.user_attrs.get("best_epoch") if best_trial is not None else None,
+        "best_repeat_number": best_trial.user_attrs.get("best_repeat_number") if best_trial is not None else None,
+        "best_repeat_seed": best_trial.user_attrs.get("best_repeat_seed") if best_trial is not None else None,
         "best_run_id": best_trial.user_attrs.get("run_id") if best_trial is not None else None,
         "best_run_dir": best_trial.user_attrs.get("run_dir") if best_trial is not None else None,
         "search_space": (
@@ -311,12 +354,21 @@ def main(config: DictConfig) -> None:
         if grid_search_space is not None
         else int(getattr(tuning_cfg, "n_trials", 1))
     )
+    repeats_per_trial = int(getattr(tuning_cfg, "repeats_per_trial", 1))
+    repeat_seeds = resolve_repeat_seeds(
+        repeats_per_trial,
+        seed_base=getattr(tuning_cfg, "seed_base", None),
+        seed_stride=int(getattr(tuning_cfg, "seed_stride", 1)),
+    )
 
     study_dir = _create_study_dir(tuning_cfg)
     if mode == "grid":
-        print(f"Grid search artifacts: {study_dir} | points={effective_trials}")
+        print(
+            f"Grid search artifacts: {study_dir} | points={effective_trials} | "
+            f"repeats={repeats_per_trial}"
+        )
     else:
-        print(f"Optuna artifacts: {study_dir}")
+        print(f"Optuna artifacts: {study_dir} | repeats={repeats_per_trial}")
     study = _build_study(config, mode=mode, grid_search_space=grid_search_space)
 
     def objective(trial: optuna.Trial) -> float:
@@ -328,60 +380,124 @@ def main(config: DictConfig) -> None:
         else:
             suggested_params = _apply_optuna_search_space(trial, trial_config, tuning_cfg.search_space)
         _update_trial_metadata(trial_config, tuning_cfg, trial)
-        observer = TrialObserver(
-            trial,
-            objective_metric,
-            direction,
-            allow_pruning=(mode == "optuna"),
-        )
-        progress_context = {
-            "trial_number": trial_number,
-            "trial_total": trial_total,
-        }
 
         trial.set_user_attr("suggested_params", suggested_params)
-        try:
-            result = run_training(
-                trial_config,
-                epoch_end_callback=observer,
-                progress_context=progress_context,
+        repeat_results: list[dict[str, Any]] = []
+        repeat_failures: list[dict[str, Any]] = []
+
+        for repeat_index, repeat_seed in enumerate(repeat_seeds, start=1):
+            repeat_config = _clone_config(trial_config)
+            OmegaConf.update(repeat_config, "seed", repeat_seed, merge=False)
+            _update_repeat_metadata(
+                repeat_config,
+                repeat_number=repeat_index,
+                repeat_total=repeats_per_trial,
+                repeat_seed=repeat_seed,
             )
-        except optuna.TrialPruned:
-            if observer.best_value is not None:
-                trial.set_user_attr("best_epoch", observer.best_epoch)
-                trial.set_user_attr("best_objective_value", observer.best_value)
+            repeat_observer = TrialObserver(
+                trial,
+                objective_metric,
+                direction,
+                allow_pruning=(mode == "optuna" and repeats_per_trial == 1),
+            )
+            progress_context = {
+                "trial_number": trial_number,
+                "trial_total": trial_total,
+                "repeat_number": repeat_index,
+                "repeat_total": repeats_per_trial,
+            }
+
+            try:
+                result = run_training(
+                    repeat_config,
+                    epoch_end_callback=repeat_observer,
+                    progress_context=progress_context,
+                )
+            except optuna.TrialPruned:
+                if repeat_observer.best_value is not None:
+                    trial.set_user_attr("best_epoch", repeat_observer.best_epoch)
+                    trial.set_user_attr("best_objective_value", repeat_observer.best_value)
+                    tqdm.write(
+                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                        f"pruned | best {objective_metric}={repeat_observer.best_value:.6f} | "
+                        f"epoch={repeat_observer.best_epoch}"
+                    )
+                else:
+                    tqdm.write(
+                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                        "pruned before first valid metric"
+                    )
+                raise
+            except Exception as exc:
+                repeat_failures.append({
+                    "repeat_number": repeat_index,
+                    "seed": repeat_seed,
+                    "error": str(exc),
+                })
                 tqdm.write(
-                    f"[trial {trial_number}/{trial_total}] pruned | "
-                    f"best {objective_metric}={observer.best_value:.6f} | "
-                    f"epoch={observer.best_epoch}"
+                    f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                    f"failed | seed={repeat_seed} | error={exc}"
                 )
-            else:
-                tqdm.write(f"[trial {trial_number}/{trial_total}] pruned before first valid metric")
-            raise
-        finally:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                continue
+            finally:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-        objective_value = observer.best_value
-        if objective_value is None:
-            last_valid_metrics = result.get("last_valid_metrics", {})
-            if objective_metric not in last_valid_metrics:
-                raise KeyError(
-                    f"Objective metric '{objective_metric}' is missing in final validation metrics."
-                )
-            objective_value = float(last_valid_metrics[objective_metric])
+            objective_value = repeat_observer.best_value
+            if objective_value is None:
+                last_valid_metrics = result.get("last_valid_metrics", {})
+                if objective_metric not in last_valid_metrics:
+                    raise KeyError(
+                        f"Objective metric '{objective_metric}' is missing in final validation metrics."
+                    )
+                objective_value = float(last_valid_metrics[objective_metric])
 
-        trial.set_user_attr("run_id", result.get("run_id"))
-        trial.set_user_attr("run_dir", result.get("run_dir"))
-        trial.set_user_attr("best_epoch", observer.best_epoch)
-        trial.set_user_attr("best_objective_value", objective_value)
-        tqdm.write(
-            f"[trial {trial_number}/{trial_total}] completed | "
-            f"best {objective_metric}={objective_value:.6f} | "
-            f"epoch={observer.best_epoch} | "
-            f"run_dir={result.get('run_dir')}"
+            repeat_result = {
+                "repeat_number": repeat_index,
+                "seed": repeat_seed,
+                "objective_value": float(objective_value),
+                "best_epoch": repeat_observer.best_epoch,
+                "run_id": result.get("run_id"),
+                "run_dir": result.get("run_dir"),
+                "best_metric_name": result.get("best_metric_name"),
+                "best_metric_value": result.get("best_metric_value"),
+            }
+            repeat_results.append(repeat_result)
+            tqdm.write(
+                f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
+                f"completed | best {objective_metric}={objective_value:.6f} | "
+                f"epoch={repeat_observer.best_epoch} | "
+                f"seed={repeat_seed} | run_dir={result.get('run_dir')}"
+            )
+
+        if not repeat_results:
+            error_summary = "; ".join(
+                f"repeat={failure['repeat_number']} seed={failure['seed']} error={failure['error']}"
+                for failure in repeat_failures
+            )
+            raise RuntimeError(f"All repeats failed for trial {trial_number}: {error_summary}")
+
+        best_repeat = select_best_repeat(direction, repeat_results)
+        trial.set_user_attr("run_id", best_repeat.get("run_id"))
+        trial.set_user_attr("run_dir", best_repeat.get("run_dir"))
+        trial.set_user_attr("best_epoch", best_repeat.get("best_epoch"))
+        trial.set_user_attr("best_objective_value", best_repeat.get("objective_value"))
+        trial.set_user_attr("best_repeat_number", best_repeat.get("repeat_number"))
+        trial.set_user_attr("best_repeat_seed", best_repeat.get("seed"))
+        trial.set_user_attr("repeat_results", repeat_results)
+        trial.set_user_attr("repeat_failures", repeat_failures)
+        trial.set_user_attr("repeat_seeds", [result["seed"] for result in repeat_results])
+        trial.set_user_attr(
+            "repeat_objective_values",
+            [result["objective_value"] for result in repeat_results],
         )
-        return float(objective_value)
+        trial.set_user_attr("repeat_run_dirs", [result["run_dir"] for result in repeat_results])
+        tqdm.write(
+            f"[trial {trial_number}/{trial_total}] selected repeat {best_repeat['repeat_number']}/"
+            f"{repeats_per_trial} | best {objective_metric}={best_repeat['objective_value']:.6f} | "
+            f"seed={best_repeat['seed']} | run_dir={best_repeat.get('run_dir')}"
+        )
+        return float(best_repeat["objective_value"])
 
     try:
         study.optimize(

@@ -14,6 +14,7 @@ from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
 from net_complexity.models.feature_selection import get_gumbel_modules
 from net_complexity.training.meta import Metrics
+from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
 from net_complexity.training.tracking import MLflowLogger
 
@@ -117,12 +118,17 @@ class EarlyStoppingState:
 
 
 def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
+    parts: list[str] = []
     if progress_context is not None:
         trial_number = progress_context.get("trial_number")
         trial_total = progress_context.get("trial_total")
         if trial_number is not None and trial_total is not None:
-            return f"Trial {trial_number}/{trial_total}"
-    return None
+            parts.append(f"Trial {trial_number}/{trial_total}")
+        repeat_number = progress_context.get("repeat_number")
+        repeat_total = progress_context.get("repeat_total")
+        if repeat_number is not None and repeat_total is not None:
+            parts.append(f"Repeat {repeat_number}/{repeat_total}")
+    return " | ".join(parts) if parts else None
 
 
 def _format_metric(value: Any) -> str:
@@ -435,6 +441,7 @@ def log_training_metadata(
     optimizer: torch.optim.Optimizer,
     run_history: RunHistory,
     mlflow_logger: MLflowLogger | None,
+    config: DictConfig | None = None,
 ) -> None:
     if mlflow_logger is None:
         return
@@ -451,6 +458,7 @@ def log_training_metadata(
         "optimizer.type": optimizer.__class__.__name__,
         "optimizer.lr": optimizer.param_groups[0].get("lr"),
         "optimizer.weight_decay": optimizer.param_groups[0].get("weight_decay", 0.0),
+        "seed": getattr(config, "seed", None) if config is not None else None,
     })
 
 
@@ -477,6 +485,7 @@ def run_training(
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
 ) -> dict[str, Any]:
+    resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
     dataloaders = instantiate(config.dataloaders)
@@ -489,7 +498,7 @@ def run_training(
     result: dict[str, Any]
     if mlflow_logger is not None:
         mlflow_logger.setup()
-        log_training_metadata(model, optimizer, run_history, mlflow_logger)
+        log_training_metadata(model, optimizer, run_history, mlflow_logger, config=config)
 
     try:
         result = train(
@@ -516,5 +525,6 @@ def run_training(
         "best_metric_name": run_history.best_metric_name,
         "best_metric_value": run_history.best_metric_value,
         "best_epoch": run_history.best_epoch,
+        "seed": resolved_seed,
     })
     return result

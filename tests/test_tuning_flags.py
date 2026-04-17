@@ -73,6 +73,12 @@ def test_preprocess_tune_argv_extracts_custom_flags():
             "--cat=bs=128,256",
             "--trials",
             "10",
+            "--repeats",
+            "3",
+            "--seed-base",
+            "100",
+            "--seed-stride",
+            "7",
             "--metric",
             "valid_accuracy",
             "--maximize",
@@ -97,6 +103,9 @@ def test_preprocess_tune_argv_extracts_custom_flags():
     assert tuning_overrides == {
         "tuning.mode": "grid",
         "tuning.n_trials": 10,
+        "tuning.repeats_per_trial": 3,
+        "tuning.seed_base": 100,
+        "tuning.seed_stride": 7,
         "tuning.objective_metric": "valid_accuracy",
         "tuning.direction": "maximize",
     }

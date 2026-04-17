@@ -5,8 +5,11 @@ tuning:
   direction: "maximize"
   objective_metric: "valid_accuracy"
   n_trials: 20
+  repeats_per_trial: 1
   timeout: null
   n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
   storage: null
   load_if_exists: true
   output_dir: "outputs/tuning"
