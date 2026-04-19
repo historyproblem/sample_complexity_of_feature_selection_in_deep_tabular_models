@@ -177,7 +177,12 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         )
 
     def forward(self, x):
-        return self.gumbel_layer(super().forward(x))
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.gumbel_layer(out)
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
 
 
 class AIGBottleneckLayer(Bottleneck):
