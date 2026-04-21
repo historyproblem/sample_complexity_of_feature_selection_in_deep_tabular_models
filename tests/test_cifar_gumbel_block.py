@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from net_complexity.models.feature_selection import CIFARGumbelBasicBlock
+from net_complexity.models.feature_selection import CIFARGumbelBasicBlock, CIFARSTGBasicBlock
 
 
 def _close_all_gates(block: CIFARGumbelBasicBlock) -> None:
@@ -10,10 +10,43 @@ def _close_all_gates(block: CIFARGumbelBasicBlock) -> None:
         block.gumbel_layer.logits[:, 1] = 0.0
 
 
+def _close_all_stg_gates(block: CIFARSTGBasicBlock) -> None:
+    with torch.no_grad():
+        block.stg_layer.mu.fill_(-1.0)
+
+
 def test_closed_gumbel_gates_preserve_identity_shortcut():
     block = CIFARGumbelBasicBlock(16, 16, stride=1)
     block.eval()
     _close_all_gates(block)
+
+    x = torch.randn(2, 16, 8, 8)
+
+    with torch.no_grad():
+        output = block(x)
+        expected = F.relu(block.shortcut(x))
+
+    torch.testing.assert_close(output, expected)
+
+
+def test_closed_stg_gates_preserve_identity_shortcut():
+    block = CIFARSTGBasicBlock(16, 16, stride=1)
+    block.eval()
+    _close_all_stg_gates(block)
+
+    x = torch.randn(2, 16, 8, 8)
+
+    with torch.no_grad():
+        output = block(x)
+        expected = F.relu(block.shortcut(x))
+
+    torch.testing.assert_close(output, expected)
+
+
+def test_closed_stg_gates_preserve_downsample_shortcut():
+    block = CIFARSTGBasicBlock(16, 32, stride=2, option="A")
+    block.eval()
+    _close_all_stg_gates(block)
 
     x = torch.randn(2, 16, 8, 8)
 

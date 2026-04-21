@@ -1,12 +1,14 @@
+import math
+import re
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import re
-
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .outputs import ClassifModelOutput
-from .resnet import Bottleneck, ResNet
+from .resnet import Block, Bottleneck, ResNet
 
 
 class ClassificationFeatureSelectionWrapper(nn.Module):
@@ -167,6 +169,108 @@ class GumbelLayer(nn.Module):
         self.temperature = temperature
 
 
+class STGChannelLayer(nn.Module):
+    """
+    Stochastic Gates (STG) selector for channel-wise masking.
+
+    Reference: Yamada et al., "Feature Selection using Stochastic Gates".
+    """
+
+    def __init__(self, input_dim: int, sigma: float = 0.5, init_mu: float = 1.0):
+        super().__init__()
+        if sigma <= 0:
+            raise ValueError("sigma must be positive for STGChannelLayer.")
+
+        self.mu = nn.Parameter(0.01 * torch.randn(input_dim) + init_mu)
+        self.sigma = sigma
+        self._select_features_count = 0.0
+        self._num_forwards = 0
+
+    def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
+        self._num_forwards += 1
+
+        if self.training:
+            z = self.mu + torch.randn_like(self.mu) * self.sigma
+            self._select_features_count += float((z > 0).sum().item())
+        else:
+            z = self.mu
+            self._select_features_count += float((self.mu > 0).sum().item())
+
+        gates = torch.clamp(z, 0.0, 1.0)
+        reshape_dims = (1, -1) + (1,) * max(0, x.dim() - 2)
+        return gates.view(*reshape_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.compute_gates(x)
+
+    def reset_counter(self):
+        self._select_features_count = 0.0
+        self._num_forwards = 0
+
+    def get_select_features_mean(self) -> float:
+        if self._num_forwards == 0:
+            return 0.0
+        return self._select_features_count / self._num_forwards
+
+    def regularization_loss(self) -> torch.Tensor:
+        probs = 0.5 * (1 + torch.erf(self.mu / (self.sigma * math.sqrt(2))))
+        return torch.mean(probs)
+
+    def get_selection_probs(self) -> torch.Tensor:
+        return (
+            0.5 * (1 + torch.erf(self.mu / (self.sigma * math.sqrt(2))))
+        ).detach()
+
+
+class STGBasicBlock(Block):
+    def __init__(self, in_channels, out_channels, i_downsample=None, stride=1, sigma: float = 0.5):
+        super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.stg1 = STGChannelLayer(out_channels, sigma=sigma)
+        self.stg2 = STGChannelLayer(out_channels * self.expansion, sigma=sigma)
+
+    def forward(self, x):
+        identity = x
+
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+        x = self.stg1(x)
+        x = self.batch_norm2(self.conv2(x))
+        x = self.stg2(x)
+
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
+class STGBottleneckLayer(Bottleneck):
+    def __init__(self, in_channels, out_channels, i_downsample=None, stride=1, sigma: float = 0.5):
+        super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.stg1 = STGChannelLayer(out_channels, sigma=sigma)
+        self.stg2 = STGChannelLayer(out_channels, sigma=sigma)
+        self.stg3 = STGChannelLayer(out_channels * self.expansion, sigma=sigma)
+
+    def forward(self, x):
+        identity = x
+
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+        x = self.stg1(x)
+
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+        x = self.stg2(x)
+
+        x = self.batch_norm3(self.conv3(x))
+        x = self.stg3(x)
+
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
     def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
@@ -180,6 +284,32 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out = self.gumbel_layer(out)
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+
+class CIFARSTGBasicBlock(CIFARBasicBlock):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        sigma: float = 0.5,
+        init_mu: float = 1.0,
+    ):
+        super().__init__(in_planes, planes, stride=stride, option=option)
+        self.stg_layer = STGChannelLayer(
+            input_dim=planes * self.expansion,
+            sigma=sigma,
+            init_mu=init_mu,
+        )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.stg_layer(out)
         out += self.shortcut(x)
         out = F.relu(out)
         return out
@@ -254,18 +384,20 @@ def get_AIG_regularization_loss(model: nn.Module):
     return reg_loss
 
 
-# ACTUAL: helper used by the current main_gumbel pipeline to collect all Gumbel layers.
-def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
+def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):
     if buff is None:
         buff = {}
-    for name, module in model.named_modules():
-        if module is model:
-            continue
-        name = f'{prefix}.{name}' if prefix is not None else name
-        if isinstance(module, GumbelLayer):
-            buff[name] = module
-        _get_gumbel_modules(module, buff, name)
+    for name, module in model.named_children():
+        full_name = f'{prefix}.{name}' if prefix is not None else name
+        if isinstance(module, module_types):
+            buff[full_name] = module
+        _collect_modules_by_type(module, module_types, buff, full_name)
     return buff
+
+
+# ACTUAL: helper used by the current main_gumbel pipeline to collect all Gumbel layers.
+def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
+    return _collect_modules_by_type(model, GumbelLayer, buff=buff, prefix=prefix)
 
 
 # ACTUAL: public wrapper used by the training/metrics pipeline after the recursive helper was internalized.
@@ -282,6 +414,26 @@ def get_gumbel_loss(model: nn.Module):
     for _, module in gumbel_modules.items():
         loss += module.regularization_loss()
     loss /= len(gumbel_modules)
+    return loss
+
+
+def _get_stg_modules(model: nn.Module, buff=None, prefix: str = None):
+    return _collect_modules_by_type(model, STGChannelLayer, buff=buff, prefix=prefix)
+
+
+def get_stg_modules(model: nn.Module):
+    return _get_stg_modules(model)
+
+
+def get_stg_loss(model: nn.Module):
+    stg_modules = _get_stg_modules(model)
+    if len(stg_modules) == 0:
+        return 0.0
+
+    loss = 0.0
+    for _, module in stg_modules.items():
+        loss += module.regularization_loss()
+    loss /= len(stg_modules)
     return loss
 
 
@@ -329,6 +481,36 @@ def ResNet101(num_classes, in_channels=3, resnet_block=Bottleneck):
 
 def ResNet152(num_classes, in_channels=3, resnet_block=Bottleneck):
     return ResNet(resnet_block, [3, 8, 36, 3], num_classes, in_channels)
+
+
+def STGResNet50(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+    return ResNet(
+        partial(resnet_block, sigma=sigma),
+        [3, 4, 6, 3],
+        num_classes,
+        in_channels,
+        stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+    )
+
+
+def STGResNet101(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+    return ResNet(
+        partial(resnet_block, sigma=sigma),
+        [3, 4, 23, 3],
+        num_classes,
+        in_channels,
+        stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+    )
+
+
+def STGResNet152(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+    return ResNet(
+        partial(resnet_block, sigma=sigma),
+        [3, 8, 36, 3],
+        num_classes,
+        in_channels,
+        stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+    )
 
 
 def CIFARResNet20(num_classes, in_channels=3, resnet_block=CIFARBasicBlock, shortcut_option: str = "A"):
