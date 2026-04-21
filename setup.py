@@ -17,5 +17,14 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=[
+        "torch==2.1.2",
+        "torchvision==0.16.2",
+        "hydra-core",
+        "omegaconf",
+        "tqdm",
+        "mlflow",
+        "numpy",
+        "pandas",
+        "optuna",
     ],
 )

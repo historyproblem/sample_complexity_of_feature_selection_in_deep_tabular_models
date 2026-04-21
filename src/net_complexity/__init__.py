@@ -1,5 +1,4 @@
-from .dataloaders import ClassicCVDataloaders
-from .cifar_resnet import CIFARResNet
-from .models import ResNet
+from .data import ClassicCVDataloaders
+from .models import CIFARResNet, ResNet
 
 __all__ = ["ClassicCVDataloaders", "CIFARResNet", "ResNet"]

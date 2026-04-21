@@ -1,0 +1,49 @@
+tuning:
+  enabled: true
+  mode: "optuna"
+  study_name: "gumbel_cifar10_optuna"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 20
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/tuning"
+  sampler:
+    _target_: optuna.samplers.TPESampler
+    seed: 42
+    multivariate: true
+  pruner:
+    _target_: optuna.pruners.MedianPruner
+    n_startup_trials: 5
+    n_warmup_steps: 5
+  search_space:
+    model.lambda_coef:
+      type: float
+      low: 0.01
+      high: 5.0
+      log: true
+    optimizer.lr:
+      type: float
+      low: 0.0001
+      high: 0.01
+      log: true
+    optimizer.weight_decay:
+      type: float
+      low: 0.000001
+      high: 0.01
+      log: true
+    dataloaders.batch_size:
+      type: categorical
+      choices: [128, 256, 512]
