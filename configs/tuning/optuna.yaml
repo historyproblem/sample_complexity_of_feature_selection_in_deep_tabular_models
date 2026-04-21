@@ -19,7 +19,7 @@ tuning:
     max_attempts_per_repeat: 3
   storage: null
   load_if_exists: true
-  output_dir: "outputs/tuning"
+  output_dir: "outputs/runs"
   sampler:
     _target_: optuna.samplers.TPESampler
     seed: 42

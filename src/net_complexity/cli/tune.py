@@ -193,7 +193,7 @@ def _compose_epoch_end_callbacks(*callbacks):
 
 def _resolve_output_dir(tuning_cfg: DictConfig) -> Path:
     repo_root = Path(__file__).resolve().parents[3]
-    configured = Path(str(getattr(tuning_cfg, "output_dir", "outputs/tuning")))
+    configured = Path(str(getattr(tuning_cfg, "output_dir", "outputs/runs")))
     return configured if configured.is_absolute() else repo_root / configured
 
 
@@ -209,6 +209,16 @@ def _create_study_dir(tuning_cfg: DictConfig) -> Path:
         suffix += 1
     study_dir.mkdir(parents=True, exist_ok=False)
     return study_dir
+
+
+def _set_trial_run_history_root(config: DictConfig, study_dir: Path) -> None:
+    OmegaConf.update(
+        config,
+        "run_history.root_dir",
+        str(study_dir),
+        merge=False,
+        force_add=True,
+    )
 
 
 def _apply_cli_search_flags(config: DictConfig) -> None:
@@ -417,11 +427,11 @@ def main(config: DictConfig) -> None:
     study_dir = _create_study_dir(tuning_cfg)
     if mode == "grid":
         print(
-            f"Grid search artifacts: {study_dir} | points={effective_trials} | "
+            f"Grid search artifacts and trial runs: {study_dir} | points={effective_trials} | "
             f"repeats={repeats_per_trial}"
         )
     else:
-        print(f"Optuna artifacts: {study_dir} | repeats={repeats_per_trial}")
+        print(f"Optuna artifacts and trial runs: {study_dir} | repeats={repeats_per_trial}")
     study = _build_study(config, mode=mode, grid_search_space=grid_search_space)
 
     def objective(trial: optuna.Trial) -> float:
@@ -433,6 +443,7 @@ def main(config: DictConfig) -> None:
         else:
             suggested_params = _apply_optuna_search_space(trial, trial_config, tuning_cfg.search_space)
         _update_trial_metadata(trial_config, tuning_cfg, trial)
+        _set_trial_run_history_root(trial_config, study_dir)
 
         trial.set_user_attr("suggested_params", suggested_params)
         repeat_results: list[dict[str, Any]] = []
