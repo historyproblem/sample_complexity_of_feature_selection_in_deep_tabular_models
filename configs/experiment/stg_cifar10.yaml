@@ -62,6 +62,12 @@ optimizer:
   lr: 0.001
   weight_decay: 0.0005
 
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  milestones: [91, 136]
+  gamma: 0.1
+  interval: epoch
+
 mlflow:
   tracking_uri: null
   experiment_name: "feature_selection_experiment"

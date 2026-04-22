@@ -27,6 +27,76 @@ EpochEndCallback = Callable[
 ProgressContext = Mapping[str, Any]
 
 
+@dataclass
+class SchedulerState:
+    scheduler: Any
+    interval: str = "epoch"
+    monitor: str | None = None
+    frequency: int = 1
+    step_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.interval = str(self.interval).lower()
+        if self.interval not in {"epoch", "batch"}:
+            raise ValueError("scheduler.interval must be either 'epoch' or 'batch'.")
+        if self.frequency <= 0:
+            raise ValueError("scheduler.frequency must be >= 1.")
+
+    @property
+    def needs_metric(self) -> bool:
+        return self.monitor is not None or isinstance(
+            self.scheduler,
+            torch.optim.lr_scheduler.ReduceLROnPlateau,
+        )
+
+    def step(self, metrics: Mapping[str, Any] | None = None) -> None:
+        self.step_count += 1
+        if self.step_count % self.frequency != 0:
+            return
+
+        if not self.needs_metric:
+            self.scheduler.step()
+            return
+
+        metric_name = self.monitor or "valid_loss"
+        metrics = metrics or {}
+        if metric_name not in metrics:
+            available_metrics = ", ".join(sorted(metrics.keys()))
+            raise KeyError(
+                f"Scheduler monitor '{metric_name}' is missing in metrics. "
+                f"Available metrics: {available_metrics}"
+            )
+
+        metric_value = _to_float(metrics[metric_name])
+        if metric_value is None:
+            raise TypeError(f"Scheduler monitor '{metric_name}' must be numeric.")
+        self.scheduler.step(metric_value)
+
+
+def _build_scheduler(config: DictConfig, optimizer: torch.optim.Optimizer) -> SchedulerState | None:
+    scheduler_cfg = getattr(config, "scheduler", None)
+    if scheduler_cfg is None:
+        return None
+    if not bool(getattr(scheduler_cfg, "enabled", True)):
+        return None
+
+    scheduler_kwargs = {
+        key: value
+        for key, value in scheduler_cfg.items()
+        if key not in {"enabled", "interval", "monitor", "frequency"}
+    }
+    if "_target_" not in scheduler_kwargs:
+        raise ValueError("scheduler._target_ must be set when scheduler config is enabled.")
+
+    scheduler = instantiate(scheduler_kwargs, optimizer=optimizer)
+    return SchedulerState(
+        scheduler=scheduler,
+        interval=str(getattr(scheduler_cfg, "interval", "epoch")),
+        monitor=getattr(scheduler_cfg, "monitor", None),
+        frequency=int(getattr(scheduler_cfg, "frequency", 1)),
+    )
+
+
 def _to_float(value: Any) -> float | None:
     if isinstance(value, torch.Tensor):
         if value.numel() == 1:
@@ -270,6 +340,7 @@ def train_epoch(model,
                 total_epochs: int,
                 epoch: int = 0,
                 run_history: RunHistory | None = None,
+                scheduler_state: SchedulerState | None = None,
                 progress_context: ProgressContext | None = None):
     """Train for one epoch."""
     model.train()
@@ -282,12 +353,15 @@ def train_epoch(model,
 
         output.loss.backward()
         optimizer.step()
+        if scheduler_state is not None and scheduler_state.interval == "batch":
+            batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
+            scheduler_state.step(batch_metrics)
         optimizer.zero_grad()
 
 
 def train(model: nn.Module,
           optimizer: torch.optim.Optimizer,
-          scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+          scheduler_state: SchedulerState | None,
           dataloaders: Dataloaders,
           training_arguments: DictConfig,
           metrics,
@@ -320,6 +394,7 @@ def train(model: nn.Module,
             total_epochs=total_epochs,
             epoch=epoch_num,
             run_history=run_history,
+            scheduler_state=scheduler_state,
             progress_context=progress_context,
         )
         train_time = perf_counter() - train_started_at
@@ -396,8 +471,8 @@ def train(model: nn.Module,
                 if mlflow_logger is not None:
                     mlflow_logger.log_params(stop_info)
 
-        if scheduler is not None:
-            scheduler.step()
+        if scheduler_state is not None and scheduler_state.interval == "epoch":
+            scheduler_state.step({**train_metrics, **valid_metrics})
 
         should_stop = False
         stop_message: str | None = None
@@ -550,7 +625,7 @@ def run_training(
     model = instantiate(config.model).to(device)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
-    scheduler = instantiate(config.scheduler, optimizer=optimizer) if getattr(config, "scheduler", None) is not None else None
+    scheduler_state = _build_scheduler(config, optimizer)
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if getattr(config, "mlflow", None) is not None else None
     run_history = RunHistory(config)
@@ -564,7 +639,7 @@ def run_training(
         result = train(
             model,
             optimizer,
-            scheduler,
+            scheduler_state,
             dataloaders,
             config.training_arguments,
             metrics,
