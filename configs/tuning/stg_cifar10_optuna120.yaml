@@ -1,0 +1,52 @@
+tuning:
+  enabled: true
+  mode: "optuna"
+  study_name: "stg_cifar10_120_optuna"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 48
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/runs"
+  sampler:
+    _target_: optuna.samplers.RandomSampler
+    seed: 42
+  pruner: null
+  search_space:
+    model.lambda_coef:
+      type: float
+      low: 0.03
+      high: 5.0
+      log: true
+    model.backbone.resnet_block.sigma:
+      type: float
+      low: 0.25
+      high: 1.0
+      log: false
+    model.backbone.resnet_block.init_mu:
+      type: float
+      low: 0.0
+      high: 1.5
+      log: false
+    optimizer.lr:
+      type: float
+      low: 0.0001
+      high: 0.003
+      log: true
+    optimizer.weight_decay:
+      type: float
+      low: 0.000001
+      high: 0.003
+      log: true

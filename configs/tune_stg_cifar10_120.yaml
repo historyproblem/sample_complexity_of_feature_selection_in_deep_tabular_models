@@ -1,0 +1,4 @@
+defaults:
+  - /experiment@_here_: stg_cifar10_120
+  - /tuning@_here_: stg_cifar10_optuna120
+  - _self_
