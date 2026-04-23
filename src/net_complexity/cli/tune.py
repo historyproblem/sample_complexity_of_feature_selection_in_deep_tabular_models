@@ -120,6 +120,23 @@ def _update_trial_metadata(config: DictConfig, tuning_cfg: DictConfig, trial: op
     OmegaConf.update(config, "mlflow.tags", tags, merge=True)
 
 
+def _log_trial_configuration(
+    config: DictConfig,
+    *,
+    trial_number: int,
+    trial_total: int,
+) -> None:
+    lambda_coef = OmegaConf.select(config, "model.lambda_coef")
+    init_mu = OmegaConf.select(config, "model.backbone.resnet_block.init_mu")
+    sigma = OmegaConf.select(config, "model.backbone.resnet_block.sigma")
+    tqdm.write(
+        f"[trial {trial_number}/{trial_total}] params | "
+        f"model.lambda_coef={lambda_coef} | "
+        f"model.backbone.resnet_block.init_mu={init_mu} | "
+        f"model.backbone.resnet_block.sigma={sigma}"
+    )
+
+
 def _update_repeat_metadata(
     config: DictConfig,
     *,
@@ -371,7 +388,11 @@ def _build_study(
         if not grid_search_space:
             raise ValueError("Grid search mode requires a non-empty search space.")
         sampler = optuna.samplers.GridSampler(grid_search_space)
-        pruner = None
+        pruner = (
+            instantiate(tuning_cfg.pruner)
+            if getattr(tuning_cfg, "pruner", None)
+            else optuna.pruners.NopPruner()
+        )
     else:
         sampler = instantiate(tuning_cfg.sampler) if getattr(tuning_cfg, "sampler", None) else None
         pruner = instantiate(tuning_cfg.pruner) if getattr(tuning_cfg, "pruner", None) else None
@@ -444,6 +465,11 @@ def main(config: DictConfig) -> None:
             suggested_params = _apply_optuna_search_space(trial, trial_config, tuning_cfg.search_space)
         _update_trial_metadata(trial_config, tuning_cfg, trial)
         _set_trial_run_history_root(trial_config, study_dir)
+        _log_trial_configuration(
+            trial_config,
+            trial_number=trial_number,
+            trial_total=trial_total,
+        )
 
         trial.set_user_attr("suggested_params", suggested_params)
         repeat_results: list[dict[str, Any]] = []

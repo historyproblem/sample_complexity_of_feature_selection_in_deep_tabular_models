@@ -1,0 +1,32 @@
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "stg_lambda_initmu_grid_sigma05"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 45
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/runs"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  search_space:
+    model.lambda_coef:
+      type: categorical
+      choices: [0.03, 0.06, 0.1, 0.15, 0.22, 0.33, 0.5, 0.75, 1.0]
+    model.backbone.resnet_block.init_mu:
+      type: categorical
+      choices: [0.5, 0.7, 0.9, 1.1, 1.3]
