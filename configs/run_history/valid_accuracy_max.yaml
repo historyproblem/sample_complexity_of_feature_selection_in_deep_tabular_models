@@ -5,3 +5,4 @@ run_history:
   monitor: valid_accuracy
   mode: max
   use_hydra_output_dir: true
+  log_channel_history: true

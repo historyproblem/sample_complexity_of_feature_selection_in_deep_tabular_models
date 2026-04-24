@@ -94,3 +94,12 @@ def test_run_history_defaults_use_hydra_output_dir_for_single_runs():
 
     assert cfg.run_history.root_dir == "outputs/runs"
     assert cfg.run_history.use_hydra_output_dir is True
+    assert cfg.run_history.log_channel_history is True
+
+
+def test_stg_metrics_keep_scalar_history_compact():
+    cfg = OmegaConf.load(CONFIGS_DIR / "metrics" / "stg.yaml")
+
+    assert cfg.metrics.train_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.valid_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.test_metrics[2].log_channel_zero_probs is False

@@ -6,11 +6,14 @@ metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.stg.STGProbMetric
+      log_channel_zero_probs: false
   valid_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.stg.STGProbMetric
+      log_channel_zero_probs: false
   test_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.stg.STGProbMetric
+      log_channel_zero_probs: false

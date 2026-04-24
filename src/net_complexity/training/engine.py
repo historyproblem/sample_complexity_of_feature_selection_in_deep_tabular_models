@@ -428,6 +428,7 @@ def train(model: nn.Module,
         }
         if run_history is not None:
             run_history.log_epoch(epoch_num, train_metrics, valid_metrics)
+            run_history.log_channel_history(epoch_num, model)
             run_history.save_checkpoint(
                 "last.pt",
                 model=model,
@@ -443,6 +444,11 @@ def train(model: nn.Module,
                     epoch=epoch_num,
                     metrics=epoch_metrics,
                 )
+            run_history.update_last_epoch({
+                "train_time_sec": float(train_time),
+                "valid_time_sec": float(valid_time),
+                "epoch_time_sec": float(perf_counter() - epoch_started_at),
+            })
 
         if epoch_end_callback is not None:
             epoch_end_callback(
@@ -540,7 +546,12 @@ def train(model: nn.Module,
         )
         mlflow_logger.log_model(model, model_name="final_model")
     if run_history is not None:
-        run_history.save_summary(test_metrics, stop_info=stop_info)
+        run_history.save_summary(
+            final_train_metrics=last_train_metrics,
+            final_valid_metrics=last_valid_metrics,
+            test_metrics=test_metrics,
+            stop_info=stop_info,
+        )
     metrics.test_metrics.reset()
     result = {
         "last_train_metrics": last_train_metrics,
@@ -606,6 +617,7 @@ def log_run_artifacts(config: DictConfig, run_history: RunHistory, mlflow_logger
     for artifact_path, artifact_dir in (
         (run_history.config_path, "run_history"),
         (run_history.history_path, "run_history"),
+        (run_history.channel_history_path, "run_history"),
         (run_history.batch_history_path, "run_history"),
         (run_history.summary_path, "run_history"),
         (run_history.checkpoints_dir / "last.pt", "run_history/checkpoints"),

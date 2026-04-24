@@ -110,7 +110,7 @@ Current configs are organized as:
 - `configs/old`: legacy configs kept for backward compatibility
 
 Artifacts are split by intent:
-- single training run: `outputs/runs/<timestamp>_<run_name>/` with `config_resolved.yaml`, `history.csv`, `summary.json`, `checkpoints/`, and `.hydra/`
+- single training run: `outputs/runs/<timestamp>_<run_name>/` with scalar `history.csv`, per-channel `channel_history.csv.gz`, `config_resolved.yaml`, `summary.json`, `checkpoints/`, and `.hydra/`
 - tuning study: `outputs/studies/<timestamp>_<study_name>/` with `study_config.yaml`, `trials.csv`, `summary.json`, `best_trial.yaml`, `runs/`, and `.hydra/`
 
 Hydra metadata now lives inside the same run or study directory instead of a separate `outputs/YYYY-MM-DD/...` tree.

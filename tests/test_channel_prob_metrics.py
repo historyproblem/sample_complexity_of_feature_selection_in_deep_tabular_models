@@ -1,4 +1,6 @@
 import csv
+import gzip
+import json
 import math
 
 import pytest
@@ -36,6 +38,19 @@ class TinySTGModel(nn.Module):
         self.backbone = nn.Module()
         self.backbone.layer1 = nn.Module()
         self.backbone.layer1.stg = STGChannelLayer(input_dim=3, sigma=1.0)
+
+
+class TinyGumbelBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gumbel_layer = GumbelLayer(input_dim=3)
+
+
+class TinyResNet20LikeGumbelModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = nn.Module()
+        self.backbone.layer1 = nn.Sequential(TinyGumbelBlock())
 
 
 def test_gumbel_metric_logs_per_channel_zero_probabilities():
@@ -113,12 +128,29 @@ def test_stg_metric_logs_per_channel_zero_probabilities():
     )
 
 
-def test_run_history_writes_channel_zero_prob_columns(tmp_path):
+def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
+    model = TinyResNet20LikeGumbelModel()
+    with torch.no_grad():
+        model.backbone.layer1[0].gumbel_layer.logits.copy_(
+            torch.tensor([[0.0, 2.0], [1.0, 0.0], [-1.0, 1.0]])
+        )
+
     config = OmegaConf.create(
         {
             "run_history": {
                 "root_dir": str(tmp_path),
                 "run_name": "channel_zero_prob_test",
+                "monitor": "valid_loss",
+                "mode": "min",
+                "log_channel_history": True,
+            },
+            "model": {
+                "backbone": {
+                    "_target_": "net_complexity.wrappers.CIFARResNet20",
+                    "resnet_block": {
+                        "_target_": "net_complexity.wrappers.CIFARGumbelBasicBlock",
+                    },
+                },
             }
         }
     )
@@ -132,16 +164,51 @@ def test_run_history_writes_channel_zero_prob_columns(tmp_path):
         },
         {
             "valid_average_zero_prob": 0.5,
-            "valid_backbone.layer1.gumbel_layer.channel_000_zero_prob": 0.2,
+            "valid_loss": 0.9,
         },
+    )
+    run_history.log_channel_history(1, model)
+    run_history.update_last_epoch({
+        "train_time_sec": 1.5,
+        "valid_time_sec": 0.5,
+        "epoch_time_sec": 2.1,
+    })
+    assert run_history.should_update_best(1, {"valid_average_zero_prob": 0.5, "valid_loss": 0.9}) is True
+    run_history.save_summary(
+        final_train_metrics={"train_average_zero_prob": 0.25, "train_loss": 1.2},
+        final_valid_metrics={"valid_average_zero_prob": 0.5, "valid_loss": 0.9},
+        test_metrics={"test_accuracy": 0.8},
     )
 
     with run_history.history_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
 
     assert len(rows) == 1
-    assert rows[0]["train_backbone.layer1.gumbel_layer.channel_000_zero_prob"] == "0.1"
-    assert rows[0]["valid_backbone.layer1.gumbel_layer.channel_000_zero_prob"] == "0.2"
+    assert rows[0]["train_average_zero_prob"] == "0.25"
+    assert rows[0]["valid_average_zero_prob"] == "0.5"
+    assert rows[0]["epoch_time_sec"] == "2.1"
+    assert all(".channel_" not in key for key in rows[0])
+
+    with gzip.open(run_history.channel_history_path, "rt", newline="", encoding="utf-8") as handle:
+        channel_rows = list(csv.DictReader(handle))
+
+    assert len(channel_rows) == 3
+    assert channel_rows[0]["layer_name"] == "backbone.layer1.0.gumbel_layer"
+    assert channel_rows[0]["stage_name"] == "layer1"
+    assert channel_rows[0]["block_index"] == "0"
+    assert channel_rows[0]["channel_index"] == "0"
+    assert channel_rows[0]["selection_prob"] != ""
+    assert channel_rows[0]["zero_prob"] != ""
+    assert channel_rows[0]["logit_margin"] != ""
+    assert channel_rows[0]["mu"] == ""
+
+    summary = json.loads(run_history.summary_path.read_text(encoding="utf-8"))
+    assert summary["identity"]["run_id"] == run_history.run_id
+    assert summary["final_valid"]["valid_loss"] == 0.9
+    assert summary["best_valid"]["metric"] == "valid_loss"
+    assert summary["best_valid"]["value"] == 0.9
+    assert summary["artifacts"]["history"] == "history.csv"
+    assert summary["artifacts"]["channel_history"] == "channel_history.csv.gz"
 
 
 def test_epoch_log_line_includes_zero_probability_summary():
