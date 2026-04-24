@@ -14,6 +14,7 @@ from typing import Any
 import hydra
 import optuna
 import torch
+from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
@@ -32,14 +33,12 @@ from net_complexity.tuning.search import build_grid_search_space, count_grid_tri
 CONFIGS_PATH = str(Path(__file__).resolve().parents[3] / "configs")
 
 
-CLI_SEARCH_RESET = False
-CLI_SEARCH_SPACE: dict[str, dict[str, Any]] = {}
 CLI_TUNING_OVERRIDES: dict[str, Any] = {}
 
 
 def initialize_cli_flags() -> None:
-    global CLI_SEARCH_RESET, CLI_SEARCH_SPACE, CLI_TUNING_OVERRIDES
-    CLI_SEARCH_RESET, CLI_SEARCH_SPACE, CLI_TUNING_OVERRIDES = install_tune_cli_flags()
+    global CLI_TUNING_OVERRIDES
+    CLI_TUNING_OVERRIDES = install_tune_cli_flags()
 
 
 def _clone_config(config: DictConfig) -> DictConfig:
@@ -210,11 +209,11 @@ def _compose_epoch_end_callbacks(*callbacks):
 
 def _resolve_output_dir(tuning_cfg: DictConfig) -> Path:
     repo_root = Path(__file__).resolve().parents[3]
-    configured = Path(str(getattr(tuning_cfg, "output_dir", "outputs/runs")))
+    configured = Path(str(getattr(tuning_cfg, "output_dir", "outputs/studies")))
     return configured if configured.is_absolute() else repo_root / configured
 
 
-def _create_study_dir(tuning_cfg: DictConfig) -> Path:
+def _create_unique_study_dir(tuning_cfg: DictConfig) -> Path:
     root_dir = _resolve_output_dir(tuning_cfg)
     root_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -228,28 +227,35 @@ def _create_study_dir(tuning_cfg: DictConfig) -> Path:
     return study_dir
 
 
+def _resolve_study_dir(tuning_cfg: DictConfig) -> Path:
+    if HydraConfig.initialized():
+        output_dir = getattr(HydraConfig.get().runtime, "output_dir", None)
+        if output_dir is not None:
+            study_dir = Path(str(output_dir))
+            study_dir.mkdir(parents=True, exist_ok=True)
+            return study_dir
+    return _create_unique_study_dir(tuning_cfg)
+
+
+def _study_runs_dir(study_dir: Path) -> Path:
+    return study_dir / "runs"
+
+
 def _set_trial_run_history_root(config: DictConfig, study_dir: Path) -> None:
     OmegaConf.update(
         config,
         "run_history.root_dir",
-        str(study_dir),
+        str(_study_runs_dir(study_dir)),
         merge=False,
         force_add=True,
     )
-
-
-def _apply_cli_search_flags(config: DictConfig) -> None:
-    if not CLI_SEARCH_RESET and not CLI_SEARCH_SPACE:
-        return
-
-    existing_search_space = {}
-    if not CLI_SEARCH_RESET:
-        current = OmegaConf.select(config, "tuning.search_space")
-        if current is not None:
-            existing_search_space = dict(OmegaConf.to_container(current, resolve=True))
-
-    existing_search_space.update(CLI_SEARCH_SPACE)
-    OmegaConf.update(config, "tuning.search_space", existing_search_space, merge=False)
+    OmegaConf.update(
+        config,
+        "run_history.use_hydra_output_dir",
+        False,
+        merge=False,
+        force_add=True,
+    )
 
 
 def _apply_cli_tuning_overrides(config: DictConfig) -> None:
@@ -321,7 +327,8 @@ def _summarize_study(
     grid_total_trials: int | None,
 ) -> None:
     resolved_config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
-    OmegaConf.save(config=resolved_config, f=str(study_dir / "config_resolved.yaml"))
+    study_config_path = study_dir / "study_config.yaml"
+    OmegaConf.save(config=resolved_config, f=str(study_config_path))
 
     trials_df = study.trials_dataframe()
     trials_df.to_csv(study_dir / "trials.csv", index=False)
@@ -337,6 +344,31 @@ def _summarize_study(
         pass
 
     resolved_search_space = OmegaConf.select(config, "tuning.search_space")
+    best_trial_path = study_dir / "best_trial.yaml"
+    if best_trial is not None:
+        best_trial_payload: dict[str, Any] = {
+            "trial_number": best_trial.number,
+            "objective_value": best_value,
+            "params": dict(best_params),
+            "best_epoch": best_trial.user_attrs.get("best_epoch"),
+            "best_repeat_number": best_trial.user_attrs.get("best_repeat_number"),
+            "best_repeat_seed": best_trial.user_attrs.get("best_repeat_seed"),
+            "run_id": best_trial.user_attrs.get("run_id"),
+            "run_dir": best_trial.user_attrs.get("run_dir"),
+            "repeat_results": best_trial.user_attrs.get("repeat_results"),
+            "repeat_failures": best_trial.user_attrs.get("repeat_failures"),
+            "repeat_restarts": best_trial.user_attrs.get("repeat_restarts"),
+        }
+        run_dir = best_trial.user_attrs.get("run_dir")
+        if run_dir is not None:
+            run_config_path = Path(str(run_dir)) / "config_resolved.yaml"
+            if run_config_path.exists():
+                best_trial_payload["config_path"] = str(run_config_path)
+                best_trial_payload["config"] = OmegaConf.to_container(
+                    OmegaConf.load(run_config_path),
+                    resolve=False,
+                )
+        OmegaConf.save(config=OmegaConf.create(best_trial_payload), f=str(best_trial_path))
 
     summary = {
         "study_name": study.study_name,
@@ -370,6 +402,9 @@ def _summarize_study(
         "pruned_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.PRUNED),
         "failed_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.FAIL),
         "study_dir": str(study_dir),
+        "runs_dir": str(_study_runs_dir(study_dir)),
+        "study_config_path": str(study_config_path),
+        "best_trial_path": str(best_trial_path) if best_trial is not None else None,
     }
     (study_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -409,7 +444,6 @@ def _build_study(
 @hydra.main(config_path=CONFIGS_PATH, config_name="tune", version_base=None)
 def main(config: DictConfig) -> None:
     _apply_cli_tuning_overrides(config)
-    _apply_cli_search_flags(config)
     tuning_cfg = config.tuning
     if not getattr(tuning_cfg, "enabled", False):
         raise ValueError("Tuning config is disabled. Use tuning=optuna or enable config.tuning.enabled.")
@@ -445,7 +479,8 @@ def main(config: DictConfig) -> None:
     )
     restart_guard_enabled = restart_guard_template is not None
 
-    study_dir = _create_study_dir(tuning_cfg)
+    study_dir = _resolve_study_dir(tuning_cfg)
+    _study_runs_dir(study_dir).mkdir(parents=True, exist_ok=True)
     if mode == "grid":
         print(
             f"Grid search artifacts and trial runs: {study_dir} | points={effective_trials} | "

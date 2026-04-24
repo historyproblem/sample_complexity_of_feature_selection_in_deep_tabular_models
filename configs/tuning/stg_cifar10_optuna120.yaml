@@ -21,7 +21,7 @@ tuning:
     max_attempts_per_repeat: 3
   storage: null
   load_if_exists: true
-  output_dir: "outputs/runs"
+  output_dir: "outputs/studies"
   sampler:
     _target_: optuna.samplers.RandomSampler
     seed: 42

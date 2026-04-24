@@ -25,6 +25,7 @@ def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
     assert cfg.tuning.mode == "grid"
     assert cfg.tuning.study_name == "stg_lambda_initmu_grid_sigma05"
     assert cfg.tuning.n_trials == 45
+    assert cfg.tuning.output_dir == "outputs/studies"
     assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
     assert set(cfg.tuning.search_space.keys()) == {
         "model.lambda_coef",
@@ -63,7 +64,33 @@ def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
 
 def test_stg_tune_entrypoint_pins_sigma_and_uses_grid_config():
     cfg = OmegaConf.load(CONFIGS_DIR / "tune_stg_cifar10_120.yaml")
+    hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
 
     assert cfg.defaults[0]["experiment"] == "stg_cifar10_120"
     assert cfg.defaults[1]["tuning"] == "stg_lambda_initmu_grid_sigma05"
     assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5
+    assert hydra_cfg == {
+        "run": {
+            "dir": "${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}",
+        },
+        "output_subdir": ".hydra",
+    }
+
+
+def test_train_entrypoint_routes_hydra_output_into_run_artifacts_dir():
+    cfg = OmegaConf.load(CONFIGS_DIR / "train.yaml")
+    hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
+
+    assert hydra_cfg == {
+        "run": {
+            "dir": "${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_${mlflow.run_name}",
+        },
+        "output_subdir": ".hydra",
+    }
+
+
+def test_run_history_defaults_use_hydra_output_dir_for_single_runs():
+    cfg = OmegaConf.load(CONFIGS_DIR / "run_history" / "valid_accuracy_max.yaml")
+
+    assert cfg.run_history.root_dir == "outputs/runs"
+    assert cfg.run_history.use_hydra_output_dir is True

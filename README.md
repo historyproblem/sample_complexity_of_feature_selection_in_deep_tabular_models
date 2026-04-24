@@ -65,74 +65,42 @@ The tuning entrypoint uses the same experiment recipes:
     python3 src/net_complexity/tune.py experiment=stg_cifar10_120 tuning=stg_cifar10_optuna120
 ```
 
-You can override the most common tuning options from short CLI flags:
+Tune search settings through Hydra overrides instead of a separate tuning CLI:
 
 ```bash
     python3 src/net_complexity/tune.py \
-      --optuna \
-      --study-name gumbel_quick_check \
-      --trials 20 \
-      --metric valid_accuracy \
-      --maximize \
-      --search-reset \
-      --float "lambda=0.01:5.0:log" \
-      --float "lr=0.0001:0.01:log" \
-      --float "wd=0.000001:0.01:log" \
-      --cat "bs=128,256,512"
+      experiment=stg_cifar10_120 \
+      tuning=stg_cifar10_optuna120 \
+      tuning.study_name=stg_quick_check \
+      tuning.n_trials=20 \
+      tuning.direction=maximize
 ```
 
-Switch to exhaustive grid search with the same entrypoint:
+Grid search is configured the same way:
 
 ```bash
     python3 src/net_complexity/tune.py \
-      --grid \
-      --study-name gumbel_grid \
-      --repeats 3 \
+      experiment=stg_cifar10_120 \
+      tuning=stg_lambda_initmu_grid_sigma05 \
+      tuning.repeats_per_trial=3 \
       --seed-base 42 \
       --seed-stride 1 \
-      --search-reset \
-      --float "lambda=0.01:0.05:step=0.01" \
-      --float "lr=0.0005:0.0015:step=0.0005" \
-      --cat "bs=128,256"
+      --restart-below-acc 20:0.4 \
+      --restart-max-attempts 5
 ```
 
-Short search aliases:
-- `lambda` -> `model.lambda_coef`
-- `lr` -> `optimizer.lr`
-- `wd` -> `optimizer.weight_decay`
-- `bs` -> `dataloaders.batch_size`
-
-Supported search flag formats:
-- `--float "name=low:high[:log][:step=value]"`
-- `--int "name=low:high[:log][:step=value]"`
-- `--cat "name=value1,value2,..."`
-- `--search "path=float:low:high[:log][:step=value]"` for explicit full config paths
-- `--search-reset` clears the default YAML `tuning.search_space` before applying CLI flags
-
-Useful tuning override flags:
-- `--grid` / `--optuna`
-- `--mode NAME`
-- `--trials N`
-- `--repeats N`
+The remaining custom shortcuts are only for repeat-seed and restart-guard control:
 - `--restart-below-acc EPOCH:THRESHOLD`
 - `--restart-max-attempts N`
-- `--metric NAME`
-- `--study-name NAME`
-- `--jobs N`
-- `--timeout SECONDS`
-- `--output-dir PATH`
 - `--seed-base N`
 - `--seed-stride N`
-- `--maximize` / `--minimize`
 
 Notes for grid mode:
 - default mode is `optuna`
 - grid mode expands the full discrete search space
-- `--repeats N` reruns each parameter point with different seeds and keeps the best repeat as the trial objective
+- `tuning.repeats_per_trial=N` reruns each parameter point with different seeds and keeps the best repeat as the trial objective
 - `--restart-below-acc 20:0.4` restarts a repeat with a new seed if `valid_accuracy` has not reached `0.4` by epoch `20`
-- `float` grid ranges require `step=...`
-- log-scaled numeric ranges are supported in `optuna` mode, but not in `grid`
-- for arbitrary numeric grids, prefer `--cat "name=v1,v2,v3"`
+- search spaces live in YAML under `configs/tuning`
 
 Current configs are organized as:
 - `configs/data`, `configs/model`, `configs/method`, `configs/train`, `configs/optimizer`, `configs/scheduler`, `configs/tracking`, `configs/run_history`, `configs/metrics`: reusable config layers
@@ -140,6 +108,12 @@ Current configs are organized as:
 - `configs/tuning`: Optuna/grid settings and search spaces
 - top-level `configs/train.yaml` and `configs/tune.yaml`: entry configs that default to one experiment recipe and one tuning profile
 - `configs/old`: legacy configs kept for backward compatibility
+
+Artifacts are split by intent:
+- single training run: `outputs/runs/<timestamp>_<run_name>/` with `config_resolved.yaml`, `history.csv`, `summary.json`, `checkpoints/`, and `.hydra/`
+- tuning study: `outputs/studies/<timestamp>_<study_name>/` with `study_config.yaml`, `trials.csv`, `summary.json`, `best_trial.yaml`, `runs/`, and `.hydra/`
+
+Hydra metadata now lives inside the same run or study directory instead of a separate `outputs/YYYY-MM-DD/...` tree.
 
 ## 📊 Experiment Tracking with MLflow
 

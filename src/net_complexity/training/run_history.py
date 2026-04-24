@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import torch
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -46,10 +47,20 @@ class RunHistory:
             configured_root = Path(str(run_history_cfg.root_dir))
             root_dir = configured_root if configured_root.is_absolute() else self.repo_root / configured_root
 
+        use_hydra_output_dir = True
+        if run_history_cfg is not None and getattr(run_history_cfg, "use_hydra_output_dir", None) is not None:
+            use_hydra_output_dir = bool(run_history_cfg.use_hydra_output_dir)
+
         timestamp = self.started_at.strftime("%Y%m%d_%H%M%S")
         self.run_name = str(run_name)
-        self.run_id = f"{timestamp}_{_slugify(self.run_name)}"
-        self.run_dir = self._make_unique_dir(root_dir, self.run_id)
+        hydra_output_dir = self._resolve_hydra_output_dir() if use_hydra_output_dir else None
+        if hydra_output_dir is not None:
+            self.run_dir = hydra_output_dir
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self.run_id = self.run_dir.name
+        else:
+            self.run_id = f"{timestamp}_{_slugify(self.run_name)}"
+            self.run_dir = self._make_unique_dir(root_dir, self.run_id)
         self.checkpoints_dir = self.run_dir / "checkpoints"
         self.history_path = self.run_dir / "history.csv"
         self.batch_history_path = self.run_dir / "batch_history.csv"
@@ -68,6 +79,14 @@ class RunHistory:
                 "run_dir": str(self.run_dir),
             },
         )
+
+    def _resolve_hydra_output_dir(self) -> Path | None:
+        if not HydraConfig.initialized():
+            return None
+        runtime_output_dir = getattr(HydraConfig.get().runtime, "output_dir", None)
+        if runtime_output_dir is None:
+            return None
+        return Path(str(runtime_output_dir))
 
     def _make_unique_dir(self, root_dir: Path, base_name: str) -> Path:
         root_dir.mkdir(parents=True, exist_ok=True)

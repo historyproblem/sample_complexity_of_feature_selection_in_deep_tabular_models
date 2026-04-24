@@ -4,3 +4,4 @@ run_history:
   root_dir: outputs/runs
   monitor: valid_loss
   mode: min
+  use_hydra_output_dir: true
