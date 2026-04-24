@@ -25,7 +25,8 @@ tuning:
   sampler:
     _target_: optuna.samplers.RandomSampler
     seed: 42
-  pruner: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
   search_space:
     model.lambda_coef:
       type: categorical
