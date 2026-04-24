@@ -1,0 +1,35 @@
+# @package _global_
+
+tuning:
+  enabled: true
+  mode: "optuna"
+  study_name: "stg_cifar10_120_optuna_lambda06_30_initmu_mix"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 20
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler:
+    _target_: optuna.samplers.RandomSampler
+    seed: 42
+  pruner: null
+  search_space:
+    model.lambda_coef:
+      type: categorical
+      choices: [0.6, 1.2, 1.8, 2.4, 3.0]
+    model.backbone.resnet_block.init_mu:
+      type: categorical
+      choices: [0.25, 0.5, 0.75, "random"]

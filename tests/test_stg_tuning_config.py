@@ -43,6 +43,24 @@ def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
     assert count_grid_trials(grid_space) == 45
 
 
+def test_stg_optuna_lambda_mu_mix_config_uses_requested_discrete_search_space():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "stg_cifar10_optuna120_lambda06_30_initmu_mix.yaml")
+
+    assert cfg.tuning.mode == "optuna"
+    assert cfg.tuning.study_name == "stg_cifar10_120_optuna_lambda06_30_initmu_mix"
+    assert cfg.tuning.n_trials == 20
+    assert cfg.tuning.output_dir == "outputs/studies"
+    assert cfg.tuning.search_space["model.lambda_coef"].type == "categorical"
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.6, 1.2, 1.8, 2.4, 3.0]
+    assert cfg.tuning.search_space["model.backbone.resnet_block.init_mu"].type == "categorical"
+    assert cfg.tuning.search_space["model.backbone.resnet_block.init_mu"].choices == [
+        0.25,
+        0.5,
+        0.75,
+        "random",
+    ]
+
+
 def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_120.yaml")
 
