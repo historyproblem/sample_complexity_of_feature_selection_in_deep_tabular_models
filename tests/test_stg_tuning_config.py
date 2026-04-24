@@ -42,9 +42,28 @@ def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
     assert count_grid_trials(grid_space) == 45
 
 
+def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_120.yaml")
+
+    assert cfg.defaults == [
+        {"/data": "cifar10"},
+        {"/model": "cifar_resnet20"},
+        {"/method": "stg"},
+        {"/train": "long"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "multistep_91"},
+        {"/metrics": "stg"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5
+    assert OmegaConf.select(cfg, "model.backbone.resnet_block.init_mu") == 1.0
+
+
 def test_stg_tune_entrypoint_pins_sigma_and_uses_grid_config():
     cfg = OmegaConf.load(CONFIGS_DIR / "tune_stg_cifar10_120.yaml")
 
-    assert cfg.defaults[0]["/experiment@_here_"] == "stg_cifar10_120"
-    assert cfg.defaults[1]["/tuning@_here_"] == "stg_lambda_initmu_grid_sigma05"
+    assert cfg.defaults[0]["experiment"] == "stg_cifar10_120"
+    assert cfg.defaults[1]["tuning"] == "stg_lambda_initmu_grid_sigma05"
     assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5

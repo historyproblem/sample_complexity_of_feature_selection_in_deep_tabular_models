@@ -1,80 +1,29 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10
+  - /model: cifar_resnet20
+  - /method: stg
+  - /train: default
+  - /optimizer: adamw
+  - /scheduler: multistep_91_136
+  - /metrics: stg
+  - /run_history: valid_loss_min
+  - /tracking: default
+  - _self_
+
 device: "cuda:0"
 
-dataloaders:
-  _target_: net_complexity.dataloaders.ClassicCVDataloaders
-  path_to_data: ${hydra:runtime.cwd}/data
-  train_val_ratio: [0.8, 0.2]
-  batch_size: 512
-  taskname: CIFAR10
-
 model:
-  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  lambda_coef: 1.479470
   backbone:
-    _target_: net_complexity.wrappers.CIFARResNet20
-    num_classes: 10
-    in_channels: 3
     resnet_block:
-      _target_: net_complexity.wrappers.CIFARSTGBasicBlock
-      _partial_: true
       sigma: 0.5
       init_mu: 1.0
-  lambda_coef: 1.479470
-  criterion:
-    _target_: torch.nn.CrossEntropyLoss
-  regularization_loss:
-    _target_: net_complexity.wrappers.get_stg_loss
-    _partial_: true
-
-training_arguments:
-  num_epochs: 25
-  collapse_guard:
-    enabled: false
-    min_epoch: 35
-    patience: 20
-    min_epochs_since_best: 20
-    acc_threshold_abs: 0.15
-    acc_threshold_rel: 0.30
-    loss_threshold: 2.25
-    zero_threshold: 0.86
-
-run_history:
-  root_dir: outputs/runs
-  monitor: valid_loss
-  mode: min
-
-metrics:
-  _target_: net_complexity.meta.Metrics
-  train_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.stg.STGProbMetric
-  valid_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.stg.STGProbMetric
-  test_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.stg.STGProbMetric
-
-optimizer:
-  _target_: torch.optim.AdamW
-  lr: 0.001
-  weight_decay: 0.0005
-
-scheduler:
-  _target_: torch.optim.lr_scheduler.MultiStepLR
-  milestones: [91, 136]
-  gamma: 0.1
-  interval: epoch
 
 mlflow:
-  tracking_uri: null
-  experiment_name: "feature_selection_experiment"
-  run_name: "stg_${model.backbone._target_}_${model.lambda_coef}"
-  log_model: true
-  log_artifacts: true
-  artifacts_dir: "./mlruns"
+  run_name: "stg_cifar_resnet20_lambda_${model.lambda_coef}_mu_${model.backbone.resnet_block.init_mu}_sigma_${model.backbone.resnet_block.sigma}"
   tags:
-    project: "net_complexity"
     model_type: "CIFARResNet20_STG"
+    method: "stg"
+    recipe: "stg_cifar10"

@@ -1,4 +1,4 @@
 defaults:
-  - /experiment@_here_: gumbel_cifar10
-  - /tuning@_here_: optuna
+  - experiment: gumbel_cifar10
+  - tuning: optuna
   - _self_

@@ -1,0 +1,11 @@
+# @package _global_
+
+mlflow:
+  tracking_uri: null
+  experiment_name: "feature_selection_experiment"
+  run_name: null
+  log_model: true
+  log_artifacts: true
+  artifacts_dir: "./mlruns"
+  tags:
+    project: "net_complexity"

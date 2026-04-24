@@ -1,0 +1,6 @@
+# @package _global_
+
+run_history:
+  root_dir: outputs/runs
+  monitor: valid_accuracy
+  mode: max

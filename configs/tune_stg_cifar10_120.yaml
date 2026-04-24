@@ -1,6 +1,6 @@
 defaults:
-  - /experiment@_here_: stg_cifar10_120
-  - /tuning@_here_: stg_lambda_initmu_grid_sigma05
+  - experiment: stg_cifar10_120
+  - tuning: stg_lambda_initmu_grid_sigma05
   - _self_
 
 model:

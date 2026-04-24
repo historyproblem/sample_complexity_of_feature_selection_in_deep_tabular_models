@@ -1,3 +1,5 @@
+# @package _global_
+
 tuning:
   enabled: true
   mode: "optuna"

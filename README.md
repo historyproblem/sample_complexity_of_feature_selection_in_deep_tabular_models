@@ -50,9 +50,19 @@ In learning theory, sample complexity determines how much data is required for g
     python3 src/net_complexity/train.py
 ```
 
+Pick a different recipe through Hydra defaults instead of maintaining a separate long CLI:
+```bash
+    python3 src/net_complexity/train.py experiment=stg_cifar10_120 seed=3
+```
+
 3. Run Optuna hyperparameter search:
 ```bash
     python3 src/net_complexity/tune.py
+```
+
+The tuning entrypoint uses the same experiment recipes:
+```bash
+    python3 src/net_complexity/tune.py experiment=stg_cifar10_120 tuning=stg_cifar10_optuna120
 ```
 
 You can override the most common tuning options from short CLI flags:
@@ -125,8 +135,10 @@ Notes for grid mode:
 - for arbitrary numeric grids, prefer `--cat "name=v1,v2,v3"`
 
 Current configs are organized as:
-- `configs/experiment`: compact runnable experiment configs
-- `configs/tuning`: Optuna settings and search spaces
+- `configs/data`, `configs/model`, `configs/method`, `configs/train`, `configs/optimizer`, `configs/scheduler`, `configs/tracking`, `configs/run_history`, `configs/metrics`: reusable config layers
+- `configs/experiment`: thin recipes that compose the layers above and keep only a few recipe-specific overrides
+- `configs/tuning`: Optuna/grid settings and search spaces
+- top-level `configs/train.yaml` and `configs/tune.yaml`: entry configs that default to one experiment recipe and one tuning profile
 - `configs/old`: legacy configs kept for backward compatibility
 
 ## 📊 Experiment Tracking with MLflow

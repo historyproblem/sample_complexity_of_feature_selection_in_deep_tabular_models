@@ -1,72 +1,25 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10
+  - /model: cifar_resnet20
+  - /method: gumbel
+  - /train: default
+  - /optimizer: adamw
+  - /scheduler: none
+  - /metrics: gumbel
+  - /run_history: valid_loss_min
+  - /tracking: default
+  - _self_
+
 device: "cuda:0"
 
-dataloaders:
-  _target_: net_complexity.dataloaders.ClassicCVDataloaders
-  path_to_data: ${hydra:runtime.cwd}/data
-  train_val_ratio: [0.8, 0.2]
-  batch_size: 512
-  taskname: CIFAR10
-
 model:
-  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
-  backbone:
-    _target_: net_complexity.wrappers.CIFARResNet20
-    num_classes: 10
-    in_channels: 3
-    resnet_block:
-      _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
-      _partial_: true
   lambda_coef: 1.479470
-  criterion:
-    _target_: torch.nn.CrossEntropyLoss
-  regularization_loss:
-    _target_: net_complexity.wrappers.get_gumbel_loss
-    _partial_: true
-
-training_arguments:
-  num_epochs: 25
-  collapse_guard:
-    enabled: false
-    min_epoch: 35
-    patience: 20
-    min_epochs_since_best: 20
-    acc_threshold_abs: 0.15
-    acc_threshold_rel: 0.30
-    loss_threshold: 2.25
-    zero_threshold: 0.86
-
-run_history:
-  root_dir: outputs/runs
-  monitor: valid_loss
-  mode: min
-
-metrics:
-  _target_: net_complexity.meta.Metrics
-  train_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
-  valid_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
-  test_metrics:
-    - _target_: net_complexity.metrics.base.MultiLossMetric
-    - _target_: net_complexity.metrics.classification.Accuracy
-    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
-
-optimizer:
-  _target_: torch.optim.AdamW
-  lr: 0.001
-  weight_decay: 0.0005
 
 mlflow:
-  tracking_uri: null
-  experiment_name: "feature_selection_experiment"
-  run_name: "gumbel_${model.backbone._target_}_${model.lambda_coef}"
-  log_model: true
-  log_artifacts: true
-  artifacts_dir: "./mlruns"
+  run_name: "gumbel_cifar_resnet20_lambda_${model.lambda_coef}"
   tags:
-    project: "net_complexity"
     model_type: "CIFARResNet20_Gumbel"
+    method: "gumbel"
+    recipe: "gumbel_cifar10"

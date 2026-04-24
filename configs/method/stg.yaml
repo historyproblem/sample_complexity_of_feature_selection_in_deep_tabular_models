@@ -1,0 +1,12 @@
+# @package _global_
+
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_stg_loss
+    _partial_: true
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.CIFARSTGBasicBlock
+      _partial_: true

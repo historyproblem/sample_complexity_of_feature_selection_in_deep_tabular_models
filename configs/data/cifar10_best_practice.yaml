@@ -1,0 +1,8 @@
+# @package _global_
+
+dataloaders:
+  _target_: net_complexity.dataloaders.ClassicCVDataloaders
+  path_to_data: ${hydra:runtime.cwd}/data
+  train_val_ratio: [0.9, 0.1]
+  batch_size: 128
+  taskname: CIFAR10
