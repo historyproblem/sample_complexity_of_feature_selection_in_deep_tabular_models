@@ -48,11 +48,11 @@ def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_120.yaml")
 
     assert cfg.defaults == [
-        {"/data": "cifar10"},
+        {"/data": "cifar10_best_practice"},
         {"/model": "cifar_resnet20"},
         {"/method": "stg"},
         {"/train": "long"},
-        {"/optimizer": "adamw"},
+        {"/optimizer": "sgd_resnet20"},
         {"/scheduler": "multistep_91"},
         {"/metrics": "stg"},
         {"/run_history": "valid_accuracy_max"},
@@ -94,3 +94,11 @@ def test_run_history_defaults_use_hydra_output_dir_for_single_runs():
 
     assert cfg.run_history.root_dir == "outputs/runs"
     assert cfg.run_history.use_hydra_output_dir is True
+
+
+def test_stg_optuna_profile_matches_sgd_based_stg_recipe():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "stg_cifar10_optuna120.yaml")
+
+    assert cfg.tuning.study_name == "stg_cifar10_120_optuna"
+    assert cfg.tuning.search_space["optimizer.lr"].low == 0.01
+    assert cfg.tuning.search_space["optimizer.lr"].high == 0.3

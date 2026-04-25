@@ -52,3 +52,24 @@ def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
     assert cfg.tuning.search_space["optimizer.lr"].low == 0.01
     assert cfg.tuning.search_space["optimizer.lr"].high == 0.3
     assert cfg.tuning.search_space["dataloaders.batch_size"].choices == [128, 256, 512]
+
+
+def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor_stg_cifar10_120.yaml")
+
+    assert cfg.defaults == [
+        {"/data": "cifar10"},
+        {"/model": "cifar_resnet20"},
+        {"/method": "stg"},
+        {"/train": "long"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "multistep_91"},
+        {"/metrics": "stg"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.backbone.resnet_block.sigma == 0.5
+    assert cfg.model.backbone.resnet_block.init_mu == 1.0
+    assert cfg.mlflow.tags.recipe == "before_refactor_stg_cifar10_120"
