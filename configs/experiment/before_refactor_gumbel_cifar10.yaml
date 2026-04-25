@@ -1,14 +1,14 @@
 # @package _global_
 
 defaults:
-  - /data: cifar10_best_practice
+  - /data: cifar10
   - /model: cifar_resnet20
   - /method: gumbel
-  - /train: best_practice
-  - /optimizer: sgd_resnet20
-  - /scheduler: multistep_91_136
+  - /train: default
+  - /optimizer: adamw
+  - /scheduler: none
   - /metrics: gumbel
-  - /run_history: valid_accuracy_max
+  - /run_history: valid_loss_min
   - /tracking: default
   - _self_
 
@@ -18,8 +18,8 @@ model:
   lambda_coef: 1.479470
 
 mlflow:
-  run_name: "gumbel_cifar10_lambda_${model.lambda_coef}"
+  run_name: "before_refactor_gumbel_cifar10_lambda_${model.lambda_coef}"
   tags:
     model_type: "CIFARResNet20_Gumbel"
     method: "gumbel"
-    recipe: "gumbel_cifar10"
+    recipe: "before_refactor_gumbel_cifar10"
