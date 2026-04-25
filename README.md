@@ -52,7 +52,7 @@ In learning theory, sample complexity determines how much data is required for g
 
 Pick a different recipe through Hydra defaults instead of maintaining a separate long CLI:
 ```bash
-    python3 src/net_complexity/train.py experiment=stg_cifar10_120 seed=3
+    python3 src/net_complexity/train.py experiment=stg_cifar10_default_valid_accuracy seed=3
 ```
 
 3. Run Optuna hyperparameter search:
@@ -62,14 +62,14 @@ Pick a different recipe through Hydra defaults instead of maintaining a separate
 
 The tuning entrypoint uses the same experiment recipes:
 ```bash
-    python3 src/net_complexity/tune.py experiment=stg_cifar10_120 tuning=stg_cifar10_optuna120
+    python3 src/net_complexity/tune.py experiment=stg_cifar10_default_valid_accuracy tuning=stg_cifar10_optuna120
 ```
 
 Tune search settings through Hydra overrides instead of a separate tuning CLI:
 
 ```bash
     python3 src/net_complexity/tune.py \
-      experiment=stg_cifar10_120 \
+      experiment=stg_cifar10_default_valid_accuracy \
       tuning=stg_cifar10_optuna120 \
       tuning.study_name=stg_quick_check \
       tuning.n_trials=20 \
@@ -80,7 +80,7 @@ Grid search is configured the same way:
 
 ```bash
     python3 src/net_complexity/tune.py \
-      experiment=stg_cifar10_120 \
+      experiment=stg_cifar10_default_valid_accuracy \
       tuning=stg_lambda_initmu_grid_sigma05 \
       tuning.repeats_per_trial=3 \
       --seed-base 42 \

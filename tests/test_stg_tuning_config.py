@@ -45,13 +45,13 @@ def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
 
 
 def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
-    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_120.yaml")
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_default_valid_accuracy.yaml")
 
     assert cfg.defaults == [
         {"/data": "cifar10_best_practice"},
         {"/model": "cifar_resnet20"},
         {"/method": "stg"},
-        {"/train": "long"},
+        {"/train": "default"},
         {"/optimizer": "sgd_resnet20"},
         {"/scheduler": "multistep_91"},
         {"/metrics": "stg"},

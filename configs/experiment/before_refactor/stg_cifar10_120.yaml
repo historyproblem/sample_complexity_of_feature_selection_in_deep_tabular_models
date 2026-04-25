@@ -4,7 +4,7 @@ defaults:
   - /data: cifar10
   - /model: cifar_resnet20
   - /method: stg
-  - /train: long
+  - /train: default
   - /optimizer: adamw
   - /scheduler: multistep_91
   - /metrics: stg

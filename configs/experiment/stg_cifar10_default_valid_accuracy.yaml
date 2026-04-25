@@ -4,7 +4,7 @@ defaults:
   - /data: cifar10_best_practice
   - /model: cifar_resnet20
   - /method: stg
-  - /train: long
+  - /train: default
   - /optimizer: sgd_resnet20
   - /scheduler: multistep_91
   - /metrics: stg
@@ -22,8 +22,8 @@ model:
       init_mu: 1.0
 
 mlflow:
-  run_name: "stg_cifar10_120_lambda_${model.lambda_coef}_mu_${model.backbone.resnet_block.init_mu}_sigma_${model.backbone.resnet_block.sigma}"
+  run_name: "stg_cifar10_default_valid_accuracy_lambda_${model.lambda_coef}_mu_${model.backbone.resnet_block.init_mu}_sigma_${model.backbone.resnet_block.sigma}"
   tags:
     model_type: "CIFARResNet20_STG"
     method: "stg"
-    recipe: "stg_cifar10_120"
+    recipe: "stg_cifar10_default_valid_accuracy"

@@ -62,11 +62,11 @@ def test_preprocess_tune_argv_supports_inline_restart_flag_value():
         [
             "tune.py",
             "--restart-below-acc=15:0.55",
-            "experiment=stg_cifar10_120",
+            "experiment=stg_cifar10_default_valid_accuracy",
         ]
     )
 
-    assert argv == ["tune.py", "experiment=stg_cifar10_120"]
+    assert argv == ["tune.py", "experiment=stg_cifar10_default_valid_accuracy"]
     assert tuning_overrides == {
         "tuning.restart_guard.enabled": True,
         "tuning.restart_guard.metric": "valid_accuracy",
