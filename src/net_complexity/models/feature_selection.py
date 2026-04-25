@@ -176,12 +176,19 @@ class STGChannelLayer(nn.Module):
     Reference: Yamada et al., "Feature Selection using Stochastic Gates".
     """
 
-    def __init__(self, input_dim: int, sigma: float = 0.5, init_mu: float = 1.0):
+    def __init__(self, input_dim: int, sigma: float = 0.5, init_mu: float | str = 1.0):
         super().__init__()
         if sigma <= 0:
             raise ValueError("sigma must be positive for STGChannelLayer.")
 
-        self.mu = nn.Parameter(0.01 * torch.randn(input_dim) + init_mu)
+        if isinstance(init_mu, str):
+            if init_mu.lower() != "random":
+                raise ValueError("init_mu must be numeric or the literal string 'random'.")
+            mu_init = 0.01 * torch.randn(input_dim)
+        else:
+            mu_init = 0.01 * torch.randn(input_dim) + float(init_mu)
+
+        self.mu = nn.Parameter(mu_init)
         self.sigma = sigma
         self._select_features_count = 0.0
         self._num_forwards = 0

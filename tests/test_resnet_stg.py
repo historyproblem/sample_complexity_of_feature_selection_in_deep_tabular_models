@@ -5,6 +5,7 @@ import torch
 from net_complexity.models.feature_selection import (
     ResNet50,
     STGBottleneckLayer,
+    STGChannelLayer,
     STGResNet50,
     get_stg_loss,
     get_stg_modules,
@@ -38,3 +39,17 @@ def test_resnet50_accepts_partial_stg_blocks():
 
     assert logits.shape == (1, 5)
     assert len(get_stg_modules(model)) == 48
+
+
+def test_stg_channel_layer_accepts_random_init_mu_mode():
+    torch.manual_seed(0)
+    random_init_layer = STGChannelLayer(input_dim=4, sigma=0.5, init_mu="random")
+
+    torch.manual_seed(0)
+    shifted_init_layer = STGChannelLayer(input_dim=4, sigma=0.5, init_mu=0.25)
+
+    assert random_init_layer.mu.shape == (4,)
+    assert torch.allclose(
+        shifted_init_layer.mu.detach() - random_init_layer.mu.detach(),
+        torch.full((4,), 0.25),
+    )
