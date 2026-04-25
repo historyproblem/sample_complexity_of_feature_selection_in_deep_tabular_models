@@ -3,7 +3,7 @@
 training_arguments:
   num_epochs: 250
   early_stopping:
-    enabled: true
+    enabled: false  # Skip the per-epoch early stopping check for this recipe.
     patience: 40
     min_epochs: 150
     min_delta: 0.0
