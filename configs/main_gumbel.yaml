@@ -1,9 +1,0 @@
-defaults:
-  - experiment: gumbel_cifar10
-  - tuning: none
-  - _self_
-
-hydra:
-  run:
-    dir: ${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_${mlflow.run_name}
-  output_subdir: .hydra

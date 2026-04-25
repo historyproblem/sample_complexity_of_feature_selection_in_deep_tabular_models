@@ -1,5 +1,10 @@
 # @package _global_
 
+model:
+  backbone:
+    resnet_block:
+      sigma: 0.5
+
 tuning:
   enabled: true
   mode: "grid"

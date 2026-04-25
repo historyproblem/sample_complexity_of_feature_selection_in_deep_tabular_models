@@ -107,7 +107,6 @@ Current configs are organized as:
 - `configs/experiment`: thin recipes that compose the layers above and keep only a few recipe-specific overrides
 - `configs/tuning`: Optuna/grid settings and search spaces
 - top-level `configs/train.yaml` and `configs/tune.yaml`: entry configs that default to one experiment recipe and one tuning profile
-- `configs/old`: legacy configs kept for backward compatibility
 
 Artifacts are split by intent:
 - single training run: `outputs/runs/<timestamp>_<run_name>/` with `config_resolved.yaml`, `history.csv`, `summary.json`, `checkpoints/`, and `.hydra/`

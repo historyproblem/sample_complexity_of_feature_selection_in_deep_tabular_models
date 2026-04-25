@@ -22,6 +22,7 @@ count_grid_trials = MODULE.count_grid_trials
 def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
     cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "stg_lambda_initmu_grid_sigma05.yaml")
 
+    assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5
     assert cfg.tuning.mode == "grid"
     assert cfg.tuning.study_name == "stg_lambda_initmu_grid_sigma05"
     assert cfg.tuning.n_trials == 45
@@ -62,13 +63,12 @@ def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
     assert OmegaConf.select(cfg, "model.backbone.resnet_block.init_mu") == 1.0
 
 
-def test_stg_tune_entrypoint_pins_sigma_and_uses_grid_config():
-    cfg = OmegaConf.load(CONFIGS_DIR / "tune_stg_cifar10_120.yaml")
+def test_tune_entrypoint_routes_hydra_output_into_study_artifacts_dir():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune.yaml")
     hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
 
-    assert cfg.defaults[0]["experiment"] == "stg_cifar10_120"
-    assert cfg.defaults[1]["tuning"] == "stg_lambda_initmu_grid_sigma05"
-    assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5
+    assert cfg.defaults[0]["experiment"] == "gumbel_cifar10"
+    assert cfg.defaults[1]["tuning"] == "optuna"
     assert hydra_cfg == {
         "run": {
             "dir": "${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}",
