@@ -53,7 +53,7 @@ def test_before_refactor_gumbel_cifar10_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "gumbel_cifar10.yaml")
 
     assert cfg.defaults == [
-        {"/data": "cifar10"},
+        {"/data/before_refactor": "cifar10"},
         {"/model": "cifar_resnet20"},
         {"/method": "gumbel"},
         {"/train": "default"},
@@ -72,7 +72,7 @@ def test_before_refactor_stg_cifar10_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10.yaml")
 
     assert cfg.defaults == [
-        {"/data": "cifar10"},
+        {"/data/before_refactor": "cifar10"},
         {"/model": "cifar_resnet20"},
         {"/method": "stg"},
         {"/train": "default"},
@@ -102,7 +102,7 @@ def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10_120.yaml")
 
     assert cfg.defaults == [
-        {"/data": "cifar10"},
+        {"/data/before_refactor": "cifar10"},
         {"/model": "cifar_resnet20"},
         {"/method": "stg"},
         {"/train": "default"},
