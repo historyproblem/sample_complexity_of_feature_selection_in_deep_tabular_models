@@ -27,7 +27,13 @@ from net_complexity.tuning.repeats import (
     resolve_repeat_seeds,
     select_best_repeat,
 )
-from net_complexity.tuning.search import build_grid_search_space, count_grid_trials
+from net_complexity.tuning.search import (
+    GRID_POINT_INDEX_PARAM,
+    build_grid_points,
+    build_grid_search_space,
+    build_point_grid_search_space,
+    count_grid_trials,
+)
 
 
 CONFIGS_PATH = str(Path(__file__).resolve().parents[3] / "configs")
@@ -94,6 +100,20 @@ def _apply_grid_search_space(
         OmegaConf.update(config, path, value, merge=False)
         suggested_params[path] = value
     return suggested_params
+
+
+def _apply_grid_points(
+    trial: optuna.Trial,
+    config: DictConfig,
+    grid_points: list[dict[str, Any]],
+) -> tuple[int, dict[str, Any]]:
+    point_index = int(
+        trial.suggest_categorical(GRID_POINT_INDEX_PARAM, list(range(len(grid_points))))
+    )
+    suggested_params = dict(grid_points[point_index])
+    for path, value in suggested_params.items():
+        OmegaConf.update(config, path, value, merge=False)
+    return point_index, suggested_params
 
 
 def _update_trial_metadata(config: DictConfig, tuning_cfg: DictConfig, trial: optuna.Trial) -> None:
@@ -339,17 +359,19 @@ def _summarize_study(
     try:
         best_trial = study.best_trial
         best_value = study.best_value
-        best_params = study.best_params
+        best_params = dict(best_trial.user_attrs.get("suggested_params") or study.best_params)
     except ValueError:
         pass
 
     resolved_search_space = OmegaConf.select(config, "tuning.search_space")
+    resolved_grid_points = OmegaConf.select(config, "tuning.points")
     best_trial_path = study_dir / "best_trial.yaml"
     if best_trial is not None:
         best_trial_payload: dict[str, Any] = {
             "trial_number": best_trial.number,
             "objective_value": best_value,
             "params": dict(best_params),
+            "grid_point_index": best_trial.user_attrs.get("grid_point_index"),
             "best_epoch": best_trial.user_attrs.get("best_epoch"),
             "best_repeat_number": best_trial.user_attrs.get("best_repeat_number"),
             "best_repeat_seed": best_trial.user_attrs.get("best_repeat_seed"),
@@ -398,6 +420,11 @@ def _summarize_study(
             if resolved_search_space is not None
             else {}
         ),
+        "grid_points": (
+            OmegaConf.to_container(resolved_grid_points, resolve=True)
+            if resolved_grid_points is not None
+            else []
+        ),
         "completed_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE),
         "pruned_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.PRUNED),
         "failed_trials": sum(1 for trial in study.trials if trial.state == optuna.trial.TrialState.FAIL),
@@ -421,7 +448,7 @@ def _build_study(
     tuning_cfg = config.tuning
     if mode == "grid":
         if not grid_search_space:
-            raise ValueError("Grid search mode requires a non-empty search space.")
+            raise ValueError("Grid search mode requires a non-empty search space or explicit points.")
         sampler = optuna.samplers.GridSampler(grid_search_space)
         pruner = (
             instantiate(tuning_cfg.pruner)
@@ -447,8 +474,6 @@ def main(config: DictConfig) -> None:
     tuning_cfg = config.tuning
     if not getattr(tuning_cfg, "enabled", False):
         raise ValueError("Tuning config is disabled. Use tuning=optuna or enable config.tuning.enabled.")
-    if not getattr(tuning_cfg, "search_space", None):
-        raise ValueError("config.tuning.search_space must be defined for tuning runs.")
 
     mode = _resolve_tuning_mode(tuning_cfg)
     direction = str(tuning_cfg.direction).lower()
@@ -456,9 +481,32 @@ def main(config: DictConfig) -> None:
     if direction not in {"minimize", "maximize"}:
         raise ValueError("config.tuning.direction must be either 'minimize' or 'maximize'.")
 
-    grid_search_space = build_grid_search_space(tuning_cfg.search_space) if mode == "grid" else None
+    search_space_cfg = getattr(tuning_cfg, "search_space", None)
+    grid_points = build_grid_points(getattr(tuning_cfg, "points", None)) if mode == "grid" else []
+    has_search_space = bool(search_space_cfg)
+    has_grid_points = bool(grid_points)
+
+    if mode == "optuna":
+        if not has_search_space:
+            raise ValueError("config.tuning.search_space must be defined for optuna tuning runs.")
+        if has_grid_points:
+            raise ValueError("config.tuning.points is only supported in grid mode.")
+    else:
+        if has_search_space == has_grid_points:
+            raise ValueError(
+                "Grid tuning requires exactly one of config.tuning.search_space or config.tuning.points."
+            )
+
+    grid_search_space = None
+    if mode == "grid":
+        if has_grid_points:
+            grid_search_space = build_point_grid_search_space(grid_points)
+        elif has_search_space:
+            grid_search_space = build_grid_search_space(search_space_cfg)
     effective_trials = (
-        count_grid_trials(grid_search_space)
+        len(grid_points)
+        if has_grid_points
+        else count_grid_trials(grid_search_space)
         if grid_search_space is not None
         else int(getattr(tuning_cfg, "n_trials", 1))
     )
@@ -495,7 +543,11 @@ def main(config: DictConfig) -> None:
         trial_total = effective_trials
         trial_config = _clone_config(config)
         if mode == "grid":
-            suggested_params = _apply_grid_search_space(trial, trial_config, grid_search_space or {})
+            if has_grid_points:
+                point_index, suggested_params = _apply_grid_points(trial, trial_config, grid_points)
+                trial.set_user_attr("grid_point_index", point_index)
+            else:
+                suggested_params = _apply_grid_search_space(trial, trial_config, grid_search_space or {})
         else:
             suggested_params = _apply_optuna_search_space(trial, trial_config, tuning_cfg.search_space)
         _update_trial_metadata(trial_config, tuning_cfg, trial)

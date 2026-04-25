@@ -1,0 +1,14 @@
+defaults:
+  - experiment: stg_cifar10_120
+  - tuning: stg_cifar10_missing_plus_lambda0_sigma05
+  - _self_
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra
+
+model:
+  backbone:
+    resnet_block:
+      sigma: 0.5

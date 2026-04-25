@@ -1,0 +1,46 @@
+# @package _global_
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "stg_cifar10_missing_plus_lambda0_sigma05"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 9
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points:
+    - "model.lambda_coef": 0.0
+      "model.backbone.resnet_block.init_mu": 0.25
+    - "model.lambda_coef": 0.0
+      "model.backbone.resnet_block.init_mu": 0.5
+    - "model.lambda_coef": 0.0
+      "model.backbone.resnet_block.init_mu": 0.75
+    - "model.lambda_coef": 0.0
+      "model.backbone.resnet_block.init_mu": "random"
+    - "model.lambda_coef": 0.6
+      "model.backbone.resnet_block.init_mu": 0.5
+    - "model.lambda_coef": 0.6
+      "model.backbone.resnet_block.init_mu": "random"
+    - "model.lambda_coef": 1.2
+      "model.backbone.resnet_block.init_mu": 0.25
+    - "model.lambda_coef": 2.4
+      "model.backbone.resnet_block.init_mu": 0.25
+    - "model.lambda_coef": 2.4
+      "model.backbone.resnet_block.init_mu": 0.5

@@ -5,6 +5,8 @@ from functools import reduce
 from operator import mul
 from typing import Any, Mapping
 
+GRID_POINT_INDEX_PARAM = "__grid_point_index__"
+
 
 def _get(spec: Any, key: str, default: Any = None) -> Any:
     if isinstance(spec, Mapping):
@@ -78,6 +80,31 @@ def build_grid_values(spec: Any) -> list[Any]:
 
 def build_grid_search_space(search_space: Mapping[str, Any]) -> dict[str, list[Any]]:
     return {str(path): build_grid_values(spec) for path, spec in search_space.items()}
+
+
+def build_grid_points(points: Any) -> list[dict[str, Any]]:
+    if points is None:
+        return []
+
+    resolved_points: list[dict[str, Any]] = []
+    for index, point in enumerate(points):
+        if not isinstance(point, Mapping):
+            raise ValueError(
+                "Each explicit grid point must be a mapping of config paths to values. "
+                f"Got {type(point).__name__} at index {index}."
+            )
+        normalized_point = {str(path): value for path, value in point.items()}
+        if not normalized_point:
+            raise ValueError(f"Explicit grid point at index {index} must not be empty.")
+        resolved_points.append(normalized_point)
+
+    return resolved_points
+
+
+def build_point_grid_search_space(grid_points: list[Mapping[str, Any]]) -> dict[str, list[int]]:
+    if not grid_points:
+        raise ValueError("Explicit grid points must not be empty.")
+    return {GRID_POINT_INDEX_PARAM: list(range(len(grid_points)))}
 
 
 def count_grid_trials(grid_search_space: Mapping[str, list[Any]]) -> int:
