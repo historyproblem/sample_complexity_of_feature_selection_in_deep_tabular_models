@@ -44,6 +44,32 @@ def test_stg_grid_tuning_config_uses_exact_45_point_search_space():
     assert count_grid_trials(grid_space) == 45
 
 
+def test_stg_150ep_narrow_grid_tuning_config_uses_exact_6_point_search_space():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "stg_lambda_initmu_grid_sigma05_150ep_narrow.yaml")
+
+    assert OmegaConf.select(cfg, "model.backbone.resnet_block.sigma") == 0.5
+    assert OmegaConf.select(cfg, "training_arguments.num_epochs") == 150
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "stg_lambda_initmu_grid_sigma05_150ep_narrow"
+    assert cfg.tuning.n_trials == 6
+    assert cfg.tuning.output_dir == "outputs/studies"
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert set(cfg.tuning.search_space.keys()) == {
+        "model.lambda_coef",
+        "model.backbone.resnet_block.init_mu",
+    }
+
+    grid_space = build_grid_search_space(
+        OmegaConf.to_container(cfg.tuning.search_space, resolve=True),
+    )
+
+    assert grid_space == {
+        "model.lambda_coef": [0.01, 0.03, 0.1],
+        "model.backbone.resnet_block.init_mu": [0.0, 0.1],
+    }
+    assert count_grid_trials(grid_space) == 6
+
+
 def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_default_valid_accuracy.yaml")
 
