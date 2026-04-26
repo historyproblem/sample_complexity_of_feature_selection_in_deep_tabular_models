@@ -94,7 +94,7 @@ def test_tune_entrypoint_routes_hydra_output_into_study_artifacts_dir():
     hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
 
     assert cfg.defaults[0]["experiment"] == "best_practice_resnet50_aig_on_cifar10"
-    assert cfg.defaults[1]["tuning"] == "aig_cifar10_optuna120"
+    assert cfg.defaults[1]["tuning"] == "aig_lambda_grid_150ep"
     assert hydra_cfg == {
         "run": {
             "dir": "${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}",
