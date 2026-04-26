@@ -6,6 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 import os
 from datetime import datetime
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +17,33 @@ class MLflowLogger:
         self.run_id = None
         self.experiment_name = None
         self.run_name = None
+        self.repo_root = Path(__file__).resolve().parents[3]
+
+    def _resolve_tracking_uri(self) -> str:
+        mlflow_cfg = getattr(self.config, "mlflow", None)
+        configured_uri = getattr(mlflow_cfg, "tracking_uri", None) if mlflow_cfg is not None else None
+        if configured_uri:
+            tracking_uri = str(configured_uri)
+            if "://" in tracking_uri or tracking_uri.startswith("databricks"):
+                return tracking_uri
+
+            tracking_path = Path(tracking_uri)
+            if not tracking_path.is_absolute():
+                tracking_path = self.repo_root / tracking_path
+
+            tracking_path = tracking_path.resolve()
+            if tracking_path.suffix == ".db":
+                return f"sqlite:///{tracking_path}"
+            return str(tracking_path)
+
+        default_db_path = (self.repo_root / "mlflow.db").resolve()
+        return f"sqlite:///{default_db_path}"
 
     def setup(self):
         """Initialize MLflow tracking"""
-        # Set tracking URI if provided
-        if hasattr(self.config, 'mlflow') and self.config.mlflow.tracking_uri:
-            mlflow.set_tracking_uri(self.config.mlflow.tracking_uri)
-            logger.info(
-                f"MLflow tracking URI set to: {self.config.mlflow.tracking_uri}")
+        tracking_uri = self._resolve_tracking_uri()
+        mlflow.set_tracking_uri(tracking_uri)
+        logger.info(f"MLflow tracking URI set to: {tracking_uri}")
 
         # 1. SET EXPERIMENT NAME
         if hasattr(self.config, 'mlflow') and hasattr(self.config.mlflow, 'experiment_name'):

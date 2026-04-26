@@ -26,12 +26,17 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
     def forward(self, X, y) -> ClassifModelOutput:
         logits = self.backbone(X)
         ce_loss = self.criterion(logits, y)
-        reg_loss = self.regularization_loss(self.backbone)
+        if float(self.lambda_coef) == 0.0:
+            reg_loss = logits.new_zeros(())
+            loss = ce_loss
+        else:
+            reg_loss = self.regularization_loss(self.backbone)
+            loss = ce_loss + self.lambda_coef*reg_loss
 
         return ClassifModelOutput(
             ce_loss=ce_loss,
             regularization_loss=reg_loss,
-            loss=ce_loss + self.lambda_coef*reg_loss,
+            loss=loss,
             logits=logits
         )
 
@@ -350,7 +355,7 @@ class AIGBottleneckLayer(Bottleneck):
         # todo: mb to register buffer?
         self.activations = w[:, 1].unsqueeze(1)
 
-        identity = x.clone()
+        identity = x
         x = self.relu(self.batch_norm1(self.conv1(x)))
 
         x = self.relu(self.batch_norm2(self.conv2(x)))
@@ -371,23 +376,27 @@ class AIGBottleneckLayer(Bottleneck):
 def parse_AIG_activations(model: nn.Module, buff=None, prefix: str = None):
     if buff is None:
         buff = {}
-    for name, module in model.named_modules():
-        if module is model:
-            continue
-        name = f'{prefix}.{name}' if prefix is not None else name
-        if isinstance(module, AIGBottleneckLayer):
-            buff[f'g_prob_{name}'] = (module.activations)
-        if module is not model:
-            parse_AIG_activations(module, buff, name)
+    for name, module in _get_aig_modules(model, buff={}, prefix=prefix).items():
+        activations = getattr(module, "activations", None)
+        if activations is not None:
+            buff[f'g_prob_{name}'] = activations
     return buff
 
 
 def get_AIG_regularization_loss(model: nn.Module):
-    activations_dict = parse_AIG_activations(model)
-    reg_loss = 0
-    for name, act in activations_dict.items():
+    aig_modules = _get_aig_modules(model)
+    activations = [
+        module.activations
+        for module in aig_modules.values()
+        if getattr(module, "activations", None) is not None
+    ]
+    if len(activations) == 0:
+        return 0.0
+
+    reg_loss = 0.0
+    for act in activations:
         reg_loss += act.mean()**2
-    reg_loss /= len(activations_dict)
+    reg_loss /= len(activations)
     return reg_loss
 
 
@@ -402,9 +411,35 @@ def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: 
     return buff
 
 
+def _get_cached_modules_by_type(model: nn.Module, cache_key: str, module_types):
+    cache_attr = "_net_complexity_module_cache"
+    cache = getattr(model, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(model, cache_attr, cache)
+
+    modules = cache.get(cache_key)
+    if modules is None:
+        modules = _collect_modules_by_type(model, module_types)
+        cache[cache_key] = modules
+    return modules
+
+
 # ACTUAL: helper used by the current main_gumbel pipeline to collect all Gumbel layers.
 def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
-    return _collect_modules_by_type(model, GumbelLayer, buff=buff, prefix=prefix)
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, GumbelLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "gumbel", GumbelLayer)
+
+
+def _get_aig_modules(model: nn.Module, buff=None, prefix: str = None):
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, AIGBottleneckLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "aig", AIGBottleneckLayer)
+
+
+def get_AIG_modules(model: nn.Module):
+    return _get_aig_modules(model)
 
 
 # ACTUAL: public wrapper used by the training/metrics pipeline after the recursive helper was internalized.
@@ -425,7 +460,9 @@ def get_gumbel_loss(model: nn.Module):
 
 
 def _get_stg_modules(model: nn.Module, buff=None, prefix: str = None):
-    return _collect_modules_by_type(model, STGChannelLayer, buff=buff, prefix=prefix)
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, STGChannelLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "stg", STGChannelLayer)
 
 
 def get_stg_modules(model: nn.Module):

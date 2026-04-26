@@ -1,9 +1,11 @@
 from functools import partial
 
 import torch
+import torch.nn as nn
 
 from net_complexity.models.feature_selection import (
     AIGBottleneckLayer,
+    ClassificationFeatureSelectionWrapper,
     ResNet50,
     get_AIG_regularization_loss,
     parse_AIG_activations,
@@ -50,3 +52,27 @@ def test_resnet50_supports_cifar_style_stem_without_maxpool():
     assert model.conv1.stride == (1, 1)
     assert model.conv1.padding == (1, 1)
     assert model.max_pool.__class__.__name__ == "Identity"
+
+
+def test_wrapper_skips_regularization_call_when_lambda_is_zero():
+    backbone = nn.Linear(4, 3)
+    targets = torch.tensor([1, 0])
+    inputs = torch.randn(2, 4)
+    calls = {"count": 0}
+
+    def _regularization_loss(_model):
+        calls["count"] += 1
+        return torch.tensor(7.0)
+
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.0,
+        criterion=nn.CrossEntropyLoss(),
+        regularization_loss=_regularization_loss,
+    )
+
+    output = wrapper(inputs, targets)
+
+    assert calls["count"] == 0
+    assert output.regularization_loss.item() == 0.0
+    torch.testing.assert_close(output.loss, output.ce_loss)
