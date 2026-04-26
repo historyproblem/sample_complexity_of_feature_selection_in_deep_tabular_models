@@ -145,15 +145,23 @@ def _log_trial_configuration(
     trial_number: int,
     trial_total: int,
 ) -> None:
-    lambda_coef = OmegaConf.select(config, "model.lambda_coef")
-    init_mu = OmegaConf.select(config, "model.backbone.resnet_block.init_mu")
-    sigma = OmegaConf.select(config, "model.backbone.resnet_block.sigma")
-    tqdm.write(
-        f"[trial {trial_number}/{trial_total}] params | "
-        f"model.lambda_coef={lambda_coef} | "
-        f"model.backbone.resnet_block.init_mu={init_mu} | "
-        f"model.backbone.resnet_block.sigma={sigma}"
+    tracked_paths = (
+        "model.lambda_coef",
+        "model.backbone.resnet_block.temperature",
+        "model.backbone.resnet_block.init_mu",
+        "model.backbone.resnet_block.sigma",
+        "optimizer.lr",
+        "optimizer.weight_decay",
+        "dataloaders.batch_size",
     )
+    parts: list[str] = []
+    for path in tracked_paths:
+        value = OmegaConf.select(config, path)
+        if value is not None:
+            parts.append(f"{path}={value}")
+    if not parts:
+        parts.append("no tracked params")
+    tqdm.write(f"[trial {trial_number}/{trial_total}] params | " + " | ".join(parts))
 
 
 def _update_repeat_metadata(

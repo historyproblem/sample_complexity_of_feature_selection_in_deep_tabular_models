@@ -1,0 +1,6 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  collapse_guard:
+    enabled: false

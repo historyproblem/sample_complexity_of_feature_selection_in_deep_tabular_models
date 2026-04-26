@@ -478,45 +478,135 @@ def replace_layers_by_regex(model, pattern, new_layer_factory):
     return model
 
 
-def ResNet50(num_classes, in_channels=3, resnet_block=Bottleneck):
-    return ResNet(resnet_block, [3, 4, 6, 3], num_classes, in_channels)
+def ResNet50(
+    num_classes,
+    in_channels=3,
+    resnet_block=Bottleneck,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
+    return ResNet(
+        resnet_block,
+        [3, 4, 6, 3],
+        num_classes,
+        in_channels,
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
+    )
 
 
-def ResNet101(num_classes, in_channels=3, resnet_block=Bottleneck):
-    return ResNet(resnet_block, [3, 4, 23, 3], num_classes, in_channels)
+def ResNet101(
+    num_classes,
+    in_channels=3,
+    resnet_block=Bottleneck,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
+    return ResNet(
+        resnet_block,
+        [3, 4, 23, 3],
+        num_classes,
+        in_channels,
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
+    )
 
 
-def ResNet152(num_classes, in_channels=3, resnet_block=Bottleneck):
-    return ResNet(resnet_block, [3, 8, 36, 3], num_classes, in_channels)
+def ResNet152(
+    num_classes,
+    in_channels=3,
+    resnet_block=Bottleneck,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
+    return ResNet(
+        resnet_block,
+        [3, 8, 36, 3],
+        num_classes,
+        in_channels,
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
+    )
 
 
-def STGResNet50(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+def STGResNet50(
+    num_classes,
+    in_channels=3,
+    sigma: float = 0.5,
+    resnet_block=STGBottleneckLayer,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
     return ResNet(
         partial(resnet_block, sigma=sigma),
         [3, 4, 6, 3],
         num_classes,
         in_channels,
         stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
     )
 
 
-def STGResNet101(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+def STGResNet101(
+    num_classes,
+    in_channels=3,
+    sigma: float = 0.5,
+    resnet_block=STGBottleneckLayer,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
     return ResNet(
         partial(resnet_block, sigma=sigma),
         [3, 4, 23, 3],
         num_classes,
         in_channels,
         stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
     )
 
 
-def STGResNet152(num_classes, in_channels=3, sigma: float = 0.5, resnet_block=STGBottleneckLayer):
+def STGResNet152(
+    num_classes,
+    in_channels=3,
+    sigma: float = 0.5,
+    resnet_block=STGBottleneckLayer,
+    stem_kernel_size: int = 7,
+    stem_stride: int = 2,
+    stem_padding: int = 3,
+    use_maxpool: bool = True,
+):
     return ResNet(
         partial(resnet_block, sigma=sigma),
         [3, 8, 36, 3],
         num_classes,
         in_channels,
         stem_feature_selector_factory=partial(STGChannelLayer, sigma=sigma),
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
     )
 
 

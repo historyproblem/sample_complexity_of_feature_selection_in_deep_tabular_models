@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: classification
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+mlflow:
+  run_name: "best_practice_resnet50_on_cifar10"
+  tags:
+    model_type: "ResNet50"
+    method: "plain"
+    recipe: "best_practice_resnet50_on_cifar10"

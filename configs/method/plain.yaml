@@ -1,0 +1,5 @@
+# @package _global_
+
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss

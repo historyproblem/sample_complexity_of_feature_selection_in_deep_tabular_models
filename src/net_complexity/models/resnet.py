@@ -120,6 +120,10 @@ class ResNet(nn.Module):
         num_classes,
         in_channels=3,
         stem_feature_selector_factory: Callable[[int], nn.Module] | None = None,
+        stem_kernel_size: int = 7,
+        stem_stride: int = 2,
+        stem_padding: int = 3,
+        use_maxpool: bool = True,
     ):
         super().__init__()
         self.in_channels = 64
@@ -128,9 +132,9 @@ class ResNet(nn.Module):
         self.conv1 = nn.Conv2d(
             in_channels,
             64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
+            kernel_size=stem_kernel_size,
+            stride=stem_stride,
+            padding=stem_padding,
             bias=False,
         )
         self.batch_norm1 = nn.BatchNorm2d(64)
@@ -140,7 +144,11 @@ class ResNet(nn.Module):
             if stem_feature_selector_factory is not None
             else nn.Identity()
         )
-        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.max_pool = (
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+            if use_maxpool
+            else nn.Identity()
+        )
 
         self.layer1 = self._make_layer(ResBlock, layer_list[0], planes=64)
         self.layer2 = self._make_layer(ResBlock, layer_list[1], planes=128, stride=2)
