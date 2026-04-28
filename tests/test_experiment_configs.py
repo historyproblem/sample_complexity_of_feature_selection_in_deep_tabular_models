@@ -213,6 +213,18 @@ def test_gumbel_resnet50_lambda_grid_150ep_includes_baseline_and_requested_lambd
     assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.05, 0.5]
 
 
+def test_gumbel_resnet50_lambda_grid_150ep_narrow_uses_requested_manual_lambda_points():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep_narrow.yaml")
+
+    assert cfg.training_arguments.num_epochs == 150
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep_narrow"
+    assert cfg.tuning.n_trials == 5
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.1, 0.2, 0.25, 0.3]
+
+
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10_120.yaml")
 
