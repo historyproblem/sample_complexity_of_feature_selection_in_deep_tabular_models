@@ -93,8 +93,8 @@ def test_tune_entrypoint_routes_hydra_output_into_study_artifacts_dir():
     cfg = OmegaConf.load(CONFIGS_DIR / "tune.yaml")
     hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
 
-    assert cfg.defaults[0]["experiment"] == "best_practice_resnet50_aig_on_cifar10"
-    assert cfg.defaults[1]["tuning"] == "aig_lambda_grid_150ep"
+    assert cfg.defaults[0]["experiment"] == "best_practice_resnet50_gumbel_on_cifar10"
+    assert cfg.defaults[1]["tuning"] == "gumbel_resnet50_lambda_grid_150ep"
     assert hydra_cfg == {
         "run": {
             "dir": "${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}",

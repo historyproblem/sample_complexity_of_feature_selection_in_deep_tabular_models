@@ -118,6 +118,27 @@ def test_best_practice_resnet50_aig_baseline_uses_full_cifar_recipe_with_zero_la
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_aig_on_cifar10"
 
 
+def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero_lambda():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_on_cifar10.yaml")
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_on_cifar10"
+
+
 def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet50_on_cifar10.yaml")
     model_cfg = OmegaConf.load(CONFIGS_DIR / "model" / "resnet50.yaml")
@@ -174,6 +195,18 @@ def test_aig_lambda_grid_150ep_includes_baseline_and_requested_lambda_values_wit
     assert cfg.training_arguments.num_epochs == 150
     assert cfg.tuning.mode == "grid"
     assert cfg.tuning.study_name == "aig_lambda_grid_150ep"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.05, 0.5]
+
+
+def test_gumbel_resnet50_lambda_grid_150ep_includes_baseline_and_requested_lambda_values_without_pruning():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep.yaml")
+
+    assert cfg.training_arguments.num_epochs == 150
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep"
     assert cfg.tuning.n_trials == 4
     assert cfg.tuning.sampler is None
     assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
