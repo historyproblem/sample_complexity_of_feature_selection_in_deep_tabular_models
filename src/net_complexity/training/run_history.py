@@ -14,6 +14,8 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from net_complexity.models.feature_selection import get_gumbel_modules
+
 from .channel_history import CHANNEL_HISTORY_FIELDNAMES, resolve_channel_history_collector
 
 
@@ -72,9 +74,13 @@ class RunHistory:
         self.history_path = self.run_dir / "history.csv"
         self.batch_history_path = self.run_dir / "batch_history.csv"
         self.channel_history_path = self.run_dir / "channel_history.csv.gz"
+        self.gate_history_path = self.run_dir / "gate_history.jsonl.gz"
         self.summary_path = self.run_dir / "summary.json"
         self.config_path = self.run_dir / "config_resolved.yaml"
         self.checkpoints_dir.mkdir(parents=True, exist_ok=False)
+        self._history_fieldnames = ["epoch"]
+        self._batch_fieldnames = ["global_batch_step", "stage", "stage_batch_step", "epoch", "batch_in_epoch"]
+        self._logged_gate_history_keys: set[tuple[int, str]] = set()
 
         self.channel_history_enabled = bool(
             getattr(run_history_cfg, "log_channel_history", False)
@@ -84,12 +90,18 @@ class RunHistory:
             if self.channel_history_enabled
             else None
         )
+        self.gate_history_enabled = bool(
+            getattr(run_history_cfg, "log_gate_history", False)
+        )
 
         OmegaConf.save(config=OmegaConf.create(resolved_config), f=str(self.config_path))
         if self.channel_history_enabled:
             with gzip.open(self.channel_history_path, "wt", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=CHANNEL_HISTORY_FIELDNAMES)
                 writer.writeheader()
+        if self.gate_history_enabled:
+            with gzip.open(self.gate_history_path, "wt", encoding="utf-8"):
+                pass
         self._write_json(
             self.run_dir / "run_info.json",
             {
@@ -120,6 +132,14 @@ class RunHistory:
 
     def _write_json(self, path: Path, payload: Mapping[str, Any]) -> None:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _append_csv_record(self, path: Path, fieldnames: list[str], record: Mapping[str, Any]) -> None:
+        needs_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(record)
 
     def _relative_to_run_dir(self, path: Path) -> str:
         return str(path.relative_to(self.run_dir))
@@ -173,14 +193,8 @@ class RunHistory:
         if not self.history_records:
             return
 
-        fieldnames = ["epoch"]
-        for record in self.history_records:
-            for key in record:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-
         with self.history_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=self._history_fieldnames)
             writer.writeheader()
             writer.writerows(self.history_records)
 
@@ -188,14 +202,8 @@ class RunHistory:
         if not self.batch_records:
             return
 
-        fieldnames = ["global_batch_step", "stage", "stage_batch_step", "epoch", "batch_in_epoch"]
-        for record in self.batch_records:
-            for key in record:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-
         with self.batch_history_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=self._batch_fieldnames)
             writer.writeheader()
             writer.writerows(self.batch_records)
 
@@ -204,6 +212,7 @@ class RunHistory:
         epoch: int,
         train_metrics: Mapping[str, Any],
         valid_metrics: Mapping[str, Any],
+        extra_metrics: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.last_train_metrics = dict(train_metrics)
         self.last_valid_metrics = dict(valid_metrics)
@@ -211,15 +220,28 @@ class RunHistory:
             "epoch": int(epoch),
             **self.last_train_metrics,
             **self.last_valid_metrics,
+            **dict(extra_metrics or {}),
         }
         self.history_records.append(record)
-        self._rewrite_history()
+        schema_changed = False
+        for key in record:
+            if key not in self._history_fieldnames:
+                self._history_fieldnames.append(key)
+                schema_changed = True
+
+        if schema_changed:
+            self._rewrite_history()
+        else:
+            self._append_csv_record(self.history_path, self._history_fieldnames, record)
         return record
 
     def update_last_epoch(self, extra_metrics: Mapping[str, Any]) -> None:
         if not self.history_records:
             return
         self.history_records[-1].update(dict(extra_metrics))
+        for key in self.history_records[-1]:
+            if key not in self._history_fieldnames:
+                self._history_fieldnames.append(key)
         self._rewrite_history()
 
     def log_batch(
@@ -242,7 +264,16 @@ class RunHistory:
             **dict(metrics),
         }
         self.batch_records.append(record)
-        self._rewrite_batch_history()
+        schema_changed = False
+        for key in record:
+            if key not in self._batch_fieldnames:
+                self._batch_fieldnames.append(key)
+                schema_changed = True
+
+        if schema_changed:
+            self._rewrite_batch_history()
+        else:
+            self._append_csv_record(self.batch_history_path, self._batch_fieldnames, record)
         return record
 
     def resolve_monitor(self, valid_metrics: Mapping[str, Any]) -> tuple[str | None, str]:
@@ -299,6 +330,52 @@ class RunHistory:
         with gzip.open(self.channel_history_path, "at", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=CHANNEL_HISTORY_FIELDNAMES)
             writer.writerows(rows)
+        return len(rows)
+
+    def log_gate_history(self, epoch: int, split: str, model: torch.nn.Module) -> int:
+        if not self.gate_history_enabled:
+            return 0
+
+        snapshot_key = (int(epoch), str(split))
+        if snapshot_key in self._logged_gate_history_keys:
+            return 0
+
+        gumbel_modules = get_gumbel_modules(model)
+        if not gumbel_modules:
+            return 0
+
+        rows: list[dict[str, Any]] = []
+        for layer_name, module in gumbel_modules.items():
+            probs_tensor = module.get_selection_probs().detach().cpu()
+            probs = [float(value) for value in probs_tensor.tolist()]
+            polarized_active_mask = [int(value > 0.5) for value in probs]
+            logits = module.logits.detach().cpu()
+            logit_off = [float(value) for value in logits[:, 0].tolist()]
+            logit_on = [float(value) for value in logits[:, 1].tolist()]
+
+            rows.append({
+                "epoch": int(epoch),
+                "split": str(split),
+                "layer_name": layer_name,
+                "num_channels": len(probs),
+                "temperature": float(module.temperature),
+                "selection_probs": probs,
+                "zero_probs": [float(1.0 - value) for value in probs],
+                "polarized_active_mask": polarized_active_mask,
+                "polarized_active_count": int(sum(polarized_active_mask)),
+                "logit_off": logit_off,
+                "logit_on": logit_on,
+                "logit_margin": [
+                    float(on_value - off_value)
+                    for off_value, on_value in zip(logit_off, logit_on, strict=False)
+                ],
+            })
+
+        with gzip.open(self.gate_history_path, "at", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+        self._logged_gate_history_keys.add(snapshot_key)
         return len(rows)
 
     def save_checkpoint(
@@ -359,6 +436,7 @@ class RunHistory:
                 "config_resolved": self._existing_relative_to_run_dir(self.config_path),
                 "history": self._existing_relative_to_run_dir(self.history_path),
                 "channel_history": self._existing_relative_to_run_dir(self.channel_history_path),
+                "gate_history": self._existing_relative_to_run_dir(self.gate_history_path),
                 "summary": self._relative_to_run_dir(self.summary_path),
                 "checkpoints": {
                     "best": self._existing_relative_to_run_dir(self.checkpoints_dir / "best.pt"),

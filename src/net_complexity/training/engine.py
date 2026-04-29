@@ -427,8 +427,6 @@ def train(model: nn.Module,
             **valid_metrics,
         }
         if run_history is not None:
-            run_history.log_epoch(epoch_num, train_metrics, valid_metrics)
-            run_history.log_channel_history(epoch_num, model)
             run_history.save_checkpoint(
                 "last.pt",
                 model=model,
@@ -444,11 +442,18 @@ def train(model: nn.Module,
                     epoch=epoch_num,
                     metrics=epoch_metrics,
                 )
-            run_history.update_last_epoch({
+            run_history.log_channel_history(epoch_num, model)
+            run_history.log_gate_history(epoch_num, "valid", model)
+            run_history.log_epoch(
+                epoch_num,
+                train_metrics,
+                valid_metrics,
+                extra_metrics={
                 "train_time_sec": float(train_time),
                 "valid_time_sec": float(valid_time),
                 "epoch_time_sec": float(perf_counter() - epoch_started_at),
-            })
+                },
+            )
 
         if epoch_end_callback is not None:
             epoch_end_callback(
@@ -618,6 +623,7 @@ def log_run_artifacts(config: DictConfig, run_history: RunHistory, mlflow_logger
         (run_history.config_path, "run_history"),
         (run_history.history_path, "run_history"),
         (run_history.channel_history_path, "run_history"),
+        (run_history.gate_history_path, "run_history"),
         (run_history.batch_history_path, "run_history"),
         (run_history.summary_path, "run_history"),
         (run_history.checkpoints_dir / "last.pt", "run_history/checkpoints"),
@@ -639,7 +645,9 @@ def run_training(
     optimizer = instantiate(config.optimizer, params=model.parameters())
     scheduler_state = _build_scheduler(config, optimizer)
     metrics = prepare_metrics(instantiate(config.metrics))
-    mlflow_logger = MLflowLogger(config) if getattr(config, "mlflow", None) is not None else None
+    mlflow_cfg = getattr(config, "mlflow", None)
+    mlflow_enabled = bool(getattr(mlflow_cfg, "enabled", True)) if mlflow_cfg is not None else False
+    mlflow_logger = MLflowLogger(config) if mlflow_enabled else None
     run_history = RunHistory(config)
 
     result: dict[str, Any]

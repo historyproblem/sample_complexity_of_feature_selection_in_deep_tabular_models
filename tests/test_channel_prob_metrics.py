@@ -211,6 +211,45 @@ def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
     assert summary["artifacts"]["channel_history"] == "channel_history.csv.gz"
 
 
+def test_run_history_logs_gumbel_gate_history_as_jsonl_without_duplicates(tmp_path):
+    model = TinyResNet20LikeGumbelModel()
+    with torch.no_grad():
+        model.backbone.layer1[0].gumbel_layer.logits.copy_(
+            torch.tensor([[0.0, 2.0], [1.0, 0.0], [-1.0, 1.0]])
+        )
+
+    config = OmegaConf.create(
+        {
+            "run_history": {
+                "root_dir": str(tmp_path),
+                "run_name": "gate_history_test",
+                "log_gate_history": True,
+            },
+        }
+    )
+    run_history = RunHistory(config)
+
+    assert run_history.log_gate_history(1, "valid", model) == 1
+    assert run_history.log_gate_history(1, "valid", model) == 0
+
+    with gzip.open(run_history.gate_history_path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+
+    assert len(rows) == 1
+    assert rows[0]["epoch"] == 1
+    assert rows[0]["split"] == "valid"
+    assert rows[0]["layer_name"] == "backbone.layer1.0.gumbel_layer"
+    assert rows[0]["num_channels"] == 3
+    assert rows[0]["polarized_active_mask"] == [1, 0, 1]
+    assert rows[0]["polarized_active_count"] == 2
+    assert len(rows[0]["selection_probs"]) == 3
+    assert len(rows[0]["logit_margin"]) == 3
+
+    run_history.save_summary(test_metrics={"test_accuracy": 0.7})
+    summary = json.loads(run_history.summary_path.read_text(encoding="utf-8"))
+    assert summary["artifacts"]["gate_history"] == "gate_history.jsonl.gz"
+
+
 def test_epoch_log_line_includes_zero_probability_summary():
     line = _build_epoch_log_line(
         epoch=3,

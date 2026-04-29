@@ -7,7 +7,7 @@ defaults:
   - /train: resnet50_best_practice
   - /optimizer: sgd_resnet50
   - /scheduler: cosine_200
-  - /metrics: gumbel
+  - /metrics: gumbel_resnet50
   - /run_history: valid_accuracy_max
   - /tracking: default
   - _self_
@@ -22,7 +22,11 @@ model:
       _partial_: true
       temperature: 1.0
 
+run_history:
+  log_gate_history: true
+
 mlflow:
+  enabled: false
   run_name: "best_practice_resnet50_gumbel_on_cifar10_lambda_${model.lambda_coef}_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_Gumbel"

@@ -128,7 +128,7 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
         {"/train": "resnet50_best_practice"},
         {"/optimizer": "sgd_resnet50"},
         {"/scheduler": "cosine_200"},
-        {"/metrics": "gumbel"},
+        {"/metrics": "gumbel_resnet50"},
         {"/run_history": "valid_accuracy_max"},
         {"/tracking": "default"},
         "_self_",
@@ -136,7 +136,17 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
     assert cfg.model.lambda_coef == 0.0
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_on_cifar10"
+
+
+def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():
+    cfg = OmegaConf.load(CONFIGS_DIR / "metrics" / "gumbel_resnet50.yaml")
+
+    assert cfg.metrics.train_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.valid_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.test_metrics[2].log_channel_zero_probs is False
 
 
 def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_recipe():
