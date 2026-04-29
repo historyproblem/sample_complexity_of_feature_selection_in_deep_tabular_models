@@ -237,7 +237,7 @@ def test_gumbel_resnet50_lambda_grid_150ep_narrow_uses_requested_manual_lambda_p
     assert cfg.tuning.n_trials == 5
     assert cfg.tuning.sampler is None
     assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
-    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.1, 0.2, 0.25, 0.3]
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.2, 0.25, 0.3]
 
 
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
