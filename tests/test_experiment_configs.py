@@ -23,6 +23,7 @@ def test_gumbel_cifar10_uses_article_training_stack_with_original_lambda():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.mlflow.tags.recipe == "gumbel_cifar10"
 
 
@@ -65,6 +66,7 @@ def test_before_refactor_gumbel_cifar10_preserves_old_recipe():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.mlflow.tags.recipe == "before_refactor_gumbel_cifar10"
 
 
@@ -134,6 +136,7 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
         "_self_",
     ]
     assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
     assert cfg.run_history.log_gate_history is True
@@ -215,6 +218,7 @@ def test_gumbel_resnet50_lambda_grid_150ep_includes_baseline_and_requested_lambd
     cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep.yaml")
 
     assert cfg.training_arguments.num_epochs == 150
+    assert cfg.scheduler.T_max == 150
     assert cfg.tuning.mode == "grid"
     assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep"
     assert cfg.tuning.n_trials == 4
@@ -227,6 +231,7 @@ def test_gumbel_resnet50_lambda_grid_150ep_narrow_uses_requested_manual_lambda_p
     cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep_narrow.yaml")
 
     assert cfg.training_arguments.num_epochs == 150
+    assert cfg.scheduler.T_max == 150
     assert cfg.tuning.mode == "grid"
     assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep_narrow"
     assert cfg.tuning.n_trials == 5

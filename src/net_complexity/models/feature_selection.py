@@ -15,13 +15,16 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
     def __init__(self,
                  backbone: nn.Module,
                  lambda_coef: float = 0.01,
+                 gumbel_init_mode: str = "auto",
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
         self.backbone = backbone
         self.criterion = criterion
         self.lambda_coef = lambda_coef
+        self.gumbel_init_mode = gumbel_init_mode
         self.regularization_loss = regularization_loss
+        self._initialize_gumbel_layers()
 
     def forward(self, X, y) -> ClassifModelOutput:
         logits = self.backbone(X)
@@ -39,6 +42,23 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             loss=loss,
             logits=logits
         )
+
+    def _resolve_gumbel_init_mode(self) -> str:
+        mode = str(self.gumbel_init_mode).lower()
+        if mode == "auto":
+            return "fully_open" if float(self.lambda_coef) == 0.0 else "paper"
+        if mode in {"paper", "fully_open"}:
+            return mode
+        raise ValueError(
+            "gumbel_init_mode must be one of: 'auto', 'paper', 'fully_open'."
+        )
+
+    def _initialize_gumbel_layers(self) -> None:
+        init_mode = self._resolve_gumbel_init_mode()
+        bypass_gumbel = float(self.lambda_coef) == 0.0
+        for module in get_gumbel_modules(self.backbone).values():
+            module.reset_parameters(init_mode=init_mode)
+            module.set_bypass(bypass_gumbel)
 
 
 # LEGACY: old custom Gumbel-Softmax helper used only by legacy paths, not by the main_gumbel pipeline.
@@ -120,23 +140,57 @@ class GumbelLayer(nn.Module):
     Fixed implementation: Properly handles batch dimension and sampling.
     """
 
+    PAPER_INIT_OFF_LOGIT = 0.1
+    PAPER_INIT_ON_LOGIT = 2.0
+    PAPER_INIT_NOISE_SCALE = 0.02
+    FULLY_OPEN_OFF_LOGIT = -10.0
+    FULLY_OPEN_ON_LOGIT = 10.0
+    FULLY_OPEN_NOISE_SCALE = 0.0
+
     def __init__(self, input_dim: int, temperature: float = 1.0):
         super().__init__()
-        # Initialize with bias toward "off" state (first column larger)
-        # This encourages sparsity initially
-        # self.logits = nn.Parameter(torch.zeros(input_dim, 2))
-        self.logits = torch.empty(input_dim, 2)
-        self.logits[:, 1] = 2.0
-        self.logits[:, 0] = 0.1
-        self.logits = self.logits + torch.randn_like(self.logits)*0.02
-        self.logits = nn.Parameter(self.logits)
-        # self.logits.data[:, 0] = 1.0  # Bias toward off state
+        self.logits = nn.Parameter(torch.empty(input_dim, 2))
         self.temperature = temperature
+        self._bypass = False
+        self.reset_parameters()
+
+    def reset_parameters(self, init_mode: str = "paper") -> None:
+        mode = str(init_mode).lower()
+        if mode == "paper":
+            off_logit = self.PAPER_INIT_OFF_LOGIT
+            on_logit = self.PAPER_INIT_ON_LOGIT
+            noise_scale = self.PAPER_INIT_NOISE_SCALE
+        elif mode == "fully_open":
+            off_logit = self.FULLY_OPEN_OFF_LOGIT
+            on_logit = self.FULLY_OPEN_ON_LOGIT
+            noise_scale = self.FULLY_OPEN_NOISE_SCALE
+        else:
+            raise ValueError(
+                "init_mode must be one of: 'paper', 'fully_open'."
+            )
+
+        with torch.no_grad():
+            self.logits[:, 0].fill_(float(off_logit))
+            self.logits[:, 1].fill_(float(on_logit))
+            if float(noise_scale) > 0.0:
+                self.logits.add_(torch.randn_like(self.logits) * float(noise_scale))
+
+    def set_bypass(self, enabled: bool) -> None:
+        self._bypass = bool(enabled)
+
+    @property
+    def bypass(self) -> bool:
+        return self._bypass
 
 
     # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         batch_size = x.shape[0]
+        if self._bypass:
+            gates = x.new_ones((batch_size, self.logits.shape[0]))
+            while len(gates.shape) < len(x.shape):
+                gates = gates.unsqueeze(-1)
+            return gates
         if self.training:
             logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
             sampled = F.gumbel_softmax(
@@ -160,12 +214,16 @@ class GumbelLayer(nn.Module):
     # ACTUAL: regularizer used by the current main_gumbel training loss.
     def regularization_loss(self) -> torch.Tensor:
         """Compute regularization: sum of "on" state probabilities."""
+        if self._bypass:
+            return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
         return torch.mean(probs)
 
     # ACTUAL: probability readout used by current metrics/logging in the main_gumbel pipeline.
     def get_selection_probs(self) -> torch.Tensor:
         """Get selection probabilities for each feature."""
+        if self._bypass:
+            return torch.ones(self.logits.shape[0], device=self.logits.device)
         return F.softmax(self.logits, dim=1)[:, 1].detach()
 
     # ACTUAL: temperature control hook for the current Gumbel layer implementation.

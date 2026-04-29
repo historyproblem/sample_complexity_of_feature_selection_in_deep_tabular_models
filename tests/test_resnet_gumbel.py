@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from net_complexity.models.feature_selection import (
+    ClassificationFeatureSelectionWrapper,
     GumbelBottleneckLayer,
     ResNet50,
     get_gumbel_loss,
@@ -18,12 +19,20 @@ def _close_all_gates(block: GumbelBottleneckLayer) -> None:
         block.gumbel_layer.logits[:, 1] = 0.0
 
 
-def test_resnet50_accepts_partial_gumbel_blocks_and_collects_channel_masks():
-    model = ResNet50(
+def _build_wrapped_resnet50(lambda_coef: float) -> ClassificationFeatureSelectionWrapper:
+    backbone = ResNet50(
         num_classes=5,
         in_channels=3,
         resnet_block=partial(GumbelBottleneckLayer, temperature=0.75),
     )
+    return ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=lambda_coef,
+    )
+
+
+def test_resnet50_accepts_partial_gumbel_blocks_and_collects_channel_masks():
+    model = _build_wrapped_resnet50(lambda_coef=0.5).backbone
     model.train()
 
     logits = model(torch.randn(2, 3, 64, 64))
@@ -35,6 +44,44 @@ def test_resnet50_accepts_partial_gumbel_blocks_and_collects_channel_masks():
     assert isinstance(reg_loss, torch.Tensor)
     assert reg_loss.ndim == 0
     assert reg_loss.item() > 0
+
+
+def test_wrapper_uses_fully_open_gumbel_init_when_lambda_is_zero():
+    wrapper = _build_wrapped_resnet50(lambda_coef=0.0)
+
+    gumbel_modules = get_gumbel_modules(wrapper.backbone)
+    selection_probs = torch.cat(
+        [module.get_selection_probs() for module in gumbel_modules.values()]
+    )
+
+    assert torch.all(selection_probs == 1.0)
+    assert all(module.bypass for module in gumbel_modules.values())
+
+
+def test_wrapper_uses_paper_gumbel_init_when_lambda_is_positive():
+    wrapper = _build_wrapped_resnet50(lambda_coef=0.5)
+
+    gumbel_modules = get_gumbel_modules(wrapper.backbone)
+    selection_probs = torch.cat(
+        [module.get_selection_probs() for module in gumbel_modules.values()]
+    )
+    mean_selection_prob = float(selection_probs.mean().item())
+
+    assert 0.84 < mean_selection_prob < 0.90
+    assert all(not module.bypass for module in gumbel_modules.values())
+
+
+def test_bypassed_gumbel_layer_returns_identity():
+    layer = GumbelBottleneckLayer(256, 64, stride=1)
+    layer.train()
+    layer.gumbel_layer.set_bypass(True)
+
+    x = torch.randn(2, 256, 8, 8)
+
+    with torch.no_grad():
+        gated = layer.gumbel_layer(x)
+
+    torch.testing.assert_close(gated, x)
 
 
 def test_closed_gumbel_bottleneck_preserves_identity_shortcut():

@@ -3,6 +3,9 @@
 training_arguments:
   num_epochs: 150
 
+scheduler:
+  T_max: 150
+
 tuning:
   enabled: true
   mode: "grid"
