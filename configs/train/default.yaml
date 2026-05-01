@@ -2,6 +2,12 @@
 
 training_arguments:
   num_epochs: 120
+  lambda_warmup:
+    enabled: false
+    start_epoch: 30
+    initial_lambda_coef: 0.0
+    target_lambda_coef: 0.0
+    bypass_during_warmup: true
   collapse_guard:
     enabled: false
     min_epoch: 35

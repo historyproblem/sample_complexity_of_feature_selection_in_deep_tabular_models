@@ -6,7 +6,7 @@ from time import perf_counter
 import torch
 import torch.nn as nn
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from typing import Any, Callable, Mapping
 
@@ -25,6 +25,7 @@ EpochEndCallback = Callable[
     None,
 ]
 ProgressContext = Mapping[str, Any]
+LAMBDA_CONFIG_PATH = "model.lambda_coef"
 
 
 @dataclass
@@ -105,6 +106,134 @@ def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _resolve_lambda_value(config: DictConfig) -> float | None:
+    value = OmegaConf.select(config, LAMBDA_CONFIG_PATH)
+    return None if value is None else float(value)
+
+
+def _resolve_expected_run_name(config: DictConfig) -> str | None:
+    resolved_config = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(resolved_config, dict):
+        return None
+    return (
+        resolved_config.get("mlflow", {}).get("run_name")
+        or resolved_config.get("run_history", {}).get("run_name")
+    )
+
+
+def _build_runtime_debug_snapshot(
+    config: DictConfig,
+    model: nn.Module,
+    run_history: RunHistory,
+    progress_context: ProgressContext | None = None,
+) -> dict[str, Any]:
+    progress_context = progress_context or {}
+    display_trial_idx = progress_context.get("display_trial_idx", progress_context.get("trial_number"))
+    trial_total = progress_context.get("trial_total")
+    repeat_number = progress_context.get("repeat_number")
+    repeat_total = progress_context.get("repeat_total")
+    attempt_number = progress_context.get("attempt_number")
+    attempt_total = progress_context.get("attempt_total")
+    grid_params = progress_context.get("grid_params") or {}
+    trial_params = progress_context.get("optuna_trial_params") or {}
+
+    return {
+        "display_trial": (
+            f"{display_trial_idx}/{trial_total}"
+            if display_trial_idx is not None and trial_total is not None
+            else None
+        ),
+        "optuna_trial_number": progress_context.get("optuna_trial_number"),
+        "repeat": (
+            f"{repeat_number}/{repeat_total}"
+            if repeat_number is not None and repeat_total is not None
+            else None
+        ),
+        "attempt": (
+            f"{attempt_number}/{attempt_total}"
+            if attempt_number is not None and attempt_total is not None
+            else None
+        ),
+        "grid_model_lambda_coef": (
+            None
+            if LAMBDA_CONFIG_PATH not in grid_params
+            else float(grid_params[LAMBDA_CONFIG_PATH])
+        ),
+        "trial_params_model_lambda_coef": (
+            None
+            if LAMBDA_CONFIG_PATH not in trial_params
+            else float(trial_params[LAMBDA_CONFIG_PATH])
+        ),
+        "cfg_model_lambda_coef": _resolve_lambda_value(config),
+        "model_lambda_coef": _resolve_model_lambda_coef(model),
+        "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+        "run_name": str(run_history.run_name),
+        "run_dir": str(run_history.run_dir),
+    }
+
+
+def _assert_runtime_lambda_consistency(
+    config: DictConfig,
+    model: nn.Module,
+    run_history: RunHistory,
+    progress_context: ProgressContext | None = None,
+) -> dict[str, Any]:
+    cfg_lambda = _resolve_lambda_value(config)
+    model_lambda = _resolve_model_lambda_coef(model)
+    assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
+    assert model_lambda is not None, "Instantiated model is missing lambda_coef."
+    assert abs(float(cfg_lambda) - float(model_lambda)) < 1e-12, (
+        f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match model.lambda_coef={model_lambda}."
+    )
+
+    progress_context = progress_context or {}
+    grid_params = progress_context.get("grid_params") or {}
+    if LAMBDA_CONFIG_PATH in grid_params:
+        grid_lambda = float(grid_params[LAMBDA_CONFIG_PATH])
+        assert abs(float(cfg_lambda) - grid_lambda) < 1e-12, (
+            f"grid_params['{LAMBDA_CONFIG_PATH}']={grid_lambda} does not match "
+            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+        )
+
+    trial_params = progress_context.get("optuna_trial_params") or {}
+    if LAMBDA_CONFIG_PATH in trial_params:
+        trial_lambda = float(trial_params[LAMBDA_CONFIG_PATH])
+        assert abs(float(cfg_lambda) - trial_lambda) < 1e-12, (
+            f"trial.params['{LAMBDA_CONFIG_PATH}']={trial_lambda} does not match "
+            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+        )
+
+    expected_run_name = _resolve_expected_run_name(config)
+    if expected_run_name is not None:
+        assert str(run_history.run_name) == str(expected_run_name), (
+            f"run_history.run_name={run_history.run_name} does not match resolved run_name={expected_run_name}."
+        )
+
+    return _build_runtime_debug_snapshot(
+        config,
+        model,
+        run_history,
+        progress_context=progress_context,
+    )
+
+
+def _log_runtime_debug_snapshot(snapshot: Mapping[str, Any]) -> None:
+    parts = [
+        f"display_trial={snapshot.get('display_trial')}",
+        f"optuna_trial_number={snapshot.get('optuna_trial_number')}",
+        f"repeat={snapshot.get('repeat')}",
+        f"attempt={snapshot.get('attempt')}",
+        f"grid_params['{LAMBDA_CONFIG_PATH}']={snapshot.get('grid_model_lambda_coef')}",
+        f"trial.params['{LAMBDA_CONFIG_PATH}']={snapshot.get('trial_params_model_lambda_coef')}",
+        f"cfg.{LAMBDA_CONFIG_PATH}={snapshot.get('cfg_model_lambda_coef')}",
+        f"model.lambda_coef={snapshot.get('model_lambda_coef')}",
+        f"gumbel_bypass_enabled={snapshot.get('gumbel_bypass_enabled')}",
+        f"run_name={snapshot.get('run_name')}",
+        f"run_dir={snapshot.get('run_dir')}",
+    ]
+    print(" | ".join(parts))
 
 
 def collect_batch_metrics(output, targets, model: nn.Module | None = None) -> dict[str, float]:
@@ -188,21 +317,83 @@ class EarlyStoppingState:
         return epoch >= self.min_epochs and self.bad_epochs >= self.patience
 
 
+@dataclass
+class LambdaWarmupState:
+    start_epoch: int
+    initial_lambda_coef: float
+    target_lambda_coef: float
+    bypass_during_warmup: bool = True
+    activated: bool = False
+
+    def apply_initial_state(self, model: nn.Module) -> None:
+        _set_model_lambda_coef(
+            model,
+            self.initial_lambda_coef,
+            bypass_gumbel=self.bypass_during_warmup,
+        )
+
+    def maybe_activate(self, epoch: int, model: nn.Module) -> bool:
+        if self.activated or int(epoch) < self.start_epoch:
+            return False
+        _set_model_lambda_coef(
+            model,
+            self.target_lambda_coef,
+            bypass_gumbel=False,
+        )
+        self.activated = True
+        print(
+            f"Lambda warmup activated at epoch {epoch} | "
+            f"lambda_coef={self.target_lambda_coef:.12g} | gumbel_bypass=False"
+        )
+        return True
+
+
+def _set_model_lambda_coef(
+    model: nn.Module,
+    lambda_coef: float,
+    *,
+    bypass_gumbel: bool | None = None,
+) -> None:
+    if hasattr(model, "set_lambda_coef"):
+        model.set_lambda_coef(float(lambda_coef), bypass_gumbel=bypass_gumbel)
+        return
+    if not hasattr(model, "lambda_coef"):
+        raise AttributeError("Configured lambda warmup requires a model with lambda_coef.")
+    model.lambda_coef = float(lambda_coef)
+    if bypass_gumbel is not None:
+        for module in get_gumbel_modules(model).values():
+            module.set_bypass(bool(bypass_gumbel))
+
+
+def _resolve_model_lambda_coef(model: nn.Module) -> float | None:
+    return _to_float(getattr(model, "lambda_coef", None))
+
+
+def _resolve_model_gumbel_bypass(model: nn.Module) -> float | None:
+    gumbel_modules = get_gumbel_modules(model)
+    if not gumbel_modules:
+        return None
+    return float(any(module.bypass for module in gumbel_modules.values()))
+
+
 def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
     parts: list[str] = []
     if progress_context is not None:
-        trial_number = progress_context.get("trial_number")
+        trial_number = progress_context.get("display_trial_idx", progress_context.get("trial_number"))
         trial_total = progress_context.get("trial_total")
         if trial_number is not None and trial_total is not None:
-            parts.append(f"Trial {trial_number}/{trial_total}")
+            parts.append(f"display_trial={trial_number}/{trial_total}")
+        optuna_trial_number = progress_context.get("optuna_trial_number")
+        if optuna_trial_number is not None:
+            parts.append(f"optuna_trial_number={optuna_trial_number}")
         repeat_number = progress_context.get("repeat_number")
         repeat_total = progress_context.get("repeat_total")
         if repeat_number is not None and repeat_total is not None:
-            parts.append(f"Repeat {repeat_number}/{repeat_total}")
+            parts.append(f"repeat={repeat_number}/{repeat_total}")
         attempt_number = progress_context.get("attempt_number")
         attempt_total = progress_context.get("attempt_total")
         if attempt_number is not None and attempt_total is not None:
-            parts.append(f"Attempt {attempt_number}/{attempt_total}")
+            parts.append(f"attempt={attempt_number}/{attempt_total}")
     return " | ".join(parts) if parts else None
 
 
@@ -296,6 +487,23 @@ def _build_early_stopping(
     )
 
 
+def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | None:
+    cfg = getattr(training_arguments, "lambda_warmup", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    start_epoch = int(getattr(cfg, "start_epoch"))
+    if start_epoch <= 0:
+        raise ValueError("training_arguments.lambda_warmup.start_epoch must be >= 1.")
+
+    return LambdaWarmupState(
+        start_epoch=start_epoch,
+        initial_lambda_coef=float(getattr(cfg, "initial_lambda_coef", 0.0)),
+        target_lambda_coef=float(getattr(cfg, "target_lambda_coef")),
+        bypass_during_warmup=bool(getattr(cfg, "bypass_during_warmup", True)),
+    )
+
+
 def _build_collapse_guard(training_arguments: DictConfig) -> CollapseGuard | None:
     cfg = getattr(training_arguments, "collapse_guard", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -376,12 +584,15 @@ def train(model: nn.Module,
     last_valid_metrics: dict[str, float] = {}
     total_epochs = int(training_arguments.num_epochs)
     early_stopping = _build_early_stopping(training_arguments, run_history)
+    lambda_warmup = _build_lambda_warmup(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
+        if lambda_warmup is not None:
+            lambda_warmup.maybe_activate(epoch_num, model)
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
@@ -452,6 +663,8 @@ def train(model: nn.Module,
                 "train_time_sec": float(train_time),
                 "valid_time_sec": float(valid_time),
                 "epoch_time_sec": float(perf_counter() - epoch_started_at),
+                "model_lambda_coef": _resolve_model_lambda_coef(model),
+                "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
                 },
             )
 
@@ -593,6 +806,7 @@ def log_training_metadata(
     run_history: RunHistory,
     mlflow_logger: MLflowLogger | None,
     config: DictConfig | None = None,
+    runtime_snapshot: Mapping[str, Any] | None = None,
 ) -> None:
     if mlflow_logger is None:
         return
@@ -601,7 +815,7 @@ def log_training_metadata(
     trainable_params = sum(
         p.numel() for p in model.parameters() if p.requires_grad
     )
-    mlflow_logger.log_params({
+    params = {
         "run_history.run_id": run_history.run_id,
         "run_history.run_dir": str(run_history.run_dir),
         "model.total_parameters": total_params,
@@ -610,6 +824,22 @@ def log_training_metadata(
         "optimizer.lr": optimizer.param_groups[0].get("lr"),
         "optimizer.weight_decay": optimizer.param_groups[0].get("weight_decay", 0.0),
         "seed": getattr(config, "seed", None) if config is not None else None,
+    }
+    if runtime_snapshot is not None:
+        params.update({
+            "runtime.display_trial": runtime_snapshot.get("display_trial"),
+            "runtime.optuna_trial_number": runtime_snapshot.get("optuna_trial_number"),
+            "runtime.repeat": runtime_snapshot.get("repeat"),
+            "runtime.attempt": runtime_snapshot.get("attempt"),
+            "runtime.grid_model_lambda_coef": runtime_snapshot.get("grid_model_lambda_coef"),
+            "runtime.trial_params_model_lambda_coef": runtime_snapshot.get("trial_params_model_lambda_coef"),
+            "runtime.cfg_model_lambda_coef": runtime_snapshot.get("cfg_model_lambda_coef"),
+            "runtime.model_lambda_coef": runtime_snapshot.get("model_lambda_coef"),
+            "runtime.gumbel_bypass_enabled": runtime_snapshot.get("gumbel_bypass_enabled"),
+            "runtime.run_name": runtime_snapshot.get("run_name"),
+        })
+    mlflow_logger.log_params({
+        key: value for key, value in params.items() if value is not None
     })
 
 
@@ -641,6 +871,9 @@ def run_training(
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
+    lambda_warmup = _build_lambda_warmup(config.training_arguments)
+    if lambda_warmup is not None:
+        lambda_warmup.apply_initial_state(model)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
     scheduler_state = _build_scheduler(config, optimizer)
@@ -649,11 +882,26 @@ def run_training(
     mlflow_enabled = bool(getattr(mlflow_cfg, "enabled", True)) if mlflow_cfg is not None else False
     mlflow_logger = MLflowLogger(config) if mlflow_enabled else None
     run_history = RunHistory(config)
+    runtime_snapshot = _assert_runtime_lambda_consistency(
+        config,
+        model,
+        run_history,
+        progress_context=progress_context,
+    )
+    run_history.set_runtime_metadata(runtime_snapshot)
+    _log_runtime_debug_snapshot(runtime_snapshot)
 
     result: dict[str, Any]
     if mlflow_logger is not None:
         mlflow_logger.setup()
-        log_training_metadata(model, optimizer, run_history, mlflow_logger, config=config)
+        log_training_metadata(
+            model,
+            optimizer,
+            run_history,
+            mlflow_logger,
+            config=config,
+            runtime_snapshot=runtime_snapshot,
+        )
 
     try:
         result = train(

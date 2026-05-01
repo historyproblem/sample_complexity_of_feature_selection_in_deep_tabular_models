@@ -40,6 +40,7 @@ CONFIGS_PATH = str(Path(__file__).resolve().parents[3] / "configs")
 
 
 CLI_TUNING_OVERRIDES: dict[str, Any] = {}
+LAMBDA_CONFIG_PATH = "model.lambda_coef"
 
 
 def initialize_cli_flags() -> None:
@@ -49,6 +50,40 @@ def initialize_cli_flags() -> None:
 
 def _clone_config(config: DictConfig) -> DictConfig:
     return OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+
+
+def _format_tuning_progress(
+    *,
+    display_trial_idx: int,
+    trial_total: int,
+    optuna_trial_number: int,
+    repeat_number: int | None = None,
+    repeat_total: int | None = None,
+    attempt_number: int | None = None,
+    attempt_total: int | None = None,
+) -> str:
+    parts = [
+        f"display_trial={display_trial_idx}/{trial_total}",
+        f"optuna_trial_number={optuna_trial_number}",
+    ]
+    if repeat_number is not None and repeat_total is not None:
+        parts.append(f"repeat={repeat_number}/{repeat_total}")
+    if attempt_number is not None and attempt_total is not None:
+        parts.append(f"attempt={attempt_number}/{attempt_total}")
+    return " | ".join(parts)
+
+
+def _assert_lambda_matches_config(
+    config: DictConfig,
+    lambda_value: Any,
+    *,
+    source: str,
+) -> None:
+    cfg_lambda = OmegaConf.select(config, LAMBDA_CONFIG_PATH)
+    assert cfg_lambda is not None, f"{LAMBDA_CONFIG_PATH} is missing in config while checking {source}."
+    assert abs(float(cfg_lambda) - float(lambda_value)) < 1e-12, (
+        f"{source}={lambda_value} does not match cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+    )
 
 
 def _suggest_value(trial: optuna.Trial, name: str, spec: DictConfig) -> Any:
@@ -142,8 +177,9 @@ def _update_trial_metadata(config: DictConfig, tuning_cfg: DictConfig, trial: op
 def _log_trial_configuration(
     config: DictConfig,
     *,
-    trial_number: int,
+    display_trial_idx: int,
     trial_total: int,
+    optuna_trial_number: int,
 ) -> None:
     tracked_paths = (
         "model.lambda_coef",
@@ -161,7 +197,15 @@ def _log_trial_configuration(
             parts.append(f"{path}={value}")
     if not parts:
         parts.append("no tracked params")
-    tqdm.write(f"[trial {trial_number}/{trial_total}] params | " + " | ".join(parts))
+    tqdm.write(
+        _format_tuning_progress(
+            display_trial_idx=display_trial_idx,
+            trial_total=trial_total,
+            optuna_trial_number=optuna_trial_number,
+        )
+        + " | params | "
+        + " | ".join(parts)
+    )
 
 
 def _update_repeat_metadata(
@@ -547,7 +591,7 @@ def main(config: DictConfig) -> None:
     study = _build_study(config, mode=mode, grid_search_space=grid_search_space)
 
     def objective(trial: optuna.Trial) -> float:
-        trial_number = trial.number + 1
+        display_trial_idx = trial.number + 1
         trial_total = effective_trials
         trial_config = _clone_config(config)
         if mode == "grid":
@@ -558,15 +602,29 @@ def main(config: DictConfig) -> None:
                 suggested_params = _apply_grid_search_space(trial, trial_config, grid_search_space or {})
         else:
             suggested_params = _apply_optuna_search_space(trial, trial_config, tuning_cfg.search_space)
+        if LAMBDA_CONFIG_PATH in suggested_params:
+            _assert_lambda_matches_config(
+                trial_config,
+                suggested_params[LAMBDA_CONFIG_PATH],
+                source=f"grid_params['{LAMBDA_CONFIG_PATH}']",
+            )
+        if LAMBDA_CONFIG_PATH in trial.params:
+            _assert_lambda_matches_config(
+                trial_config,
+                trial.params[LAMBDA_CONFIG_PATH],
+                source=f"trial.params['{LAMBDA_CONFIG_PATH}']",
+            )
         _update_trial_metadata(trial_config, tuning_cfg, trial)
         _set_trial_run_history_root(trial_config, study_dir)
         _log_trial_configuration(
             trial_config,
-            trial_number=trial_number,
+            display_trial_idx=display_trial_idx,
             trial_total=trial_total,
+            optuna_trial_number=trial.number,
         )
 
         trial.set_user_attr("suggested_params", suggested_params)
+        trial.set_user_attr("display_trial_idx", display_trial_idx)
         repeat_results: list[dict[str, Any]] = []
         repeat_failures: list[dict[str, Any]] = []
         repeat_restarts: list[dict[str, Any]] = []
@@ -604,12 +662,16 @@ def main(config: DictConfig) -> None:
                     direction=direction,
                 ) if restart_guard_enabled else None
                 progress_context = {
-                    "trial_number": trial_number,
+                    "trial_number": display_trial_idx,
+                    "display_trial_idx": display_trial_idx,
                     "trial_total": trial_total,
+                    "optuna_trial_number": trial.number,
                     "repeat_number": repeat_index,
                     "repeat_total": repeats_per_trial,
                     "attempt_number": attempt_index,
                     "attempt_total": restart_max_attempts,
+                    "grid_params": dict(suggested_params),
+                    "optuna_trial_params": dict(trial.params),
                 }
                 epoch_callback = _compose_epoch_end_callbacks(repeat_observer, repeat_guard)
 
@@ -633,8 +695,16 @@ def main(config: DictConfig) -> None:
                     }
                     repeat_restarts.append(restart_event)
                     tqdm.write(
-                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial} "
-                        f"attempt {attempt_index}/{restart_max_attempts}] restart | "
+                        _format_tuning_progress(
+                            display_trial_idx=display_trial_idx,
+                            trial_total=trial_total,
+                            optuna_trial_number=trial.number,
+                            repeat_number=repeat_index,
+                            repeat_total=repeats_per_trial,
+                            attempt_number=attempt_index,
+                            attempt_total=restart_max_attempts,
+                        )
+                        + " | restart | "
                         f"{exc.metric_name}={exc.value:.6f} at epoch {exc.epoch} | "
                         f"threshold={exc.threshold:.6f} | seed={attempt_seed}"
                     )
@@ -652,14 +722,26 @@ def main(config: DictConfig) -> None:
                         trial.set_user_attr("best_epoch", repeat_observer.best_epoch)
                         trial.set_user_attr("best_objective_value", repeat_observer.best_value)
                         tqdm.write(
-                            f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                            f"pruned | best {objective_metric}={repeat_observer.best_value:.6f} | "
+                            _format_tuning_progress(
+                                display_trial_idx=display_trial_idx,
+                                trial_total=trial_total,
+                                optuna_trial_number=trial.number,
+                                repeat_number=repeat_index,
+                                repeat_total=repeats_per_trial,
+                            )
+                            + f" | pruned | best {objective_metric}={repeat_observer.best_value:.6f} | "
                             f"epoch={repeat_observer.best_epoch}"
                         )
                     else:
                         tqdm.write(
-                            f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                            "pruned before first valid metric"
+                            _format_tuning_progress(
+                                display_trial_idx=display_trial_idx,
+                                trial_total=trial_total,
+                                optuna_trial_number=trial.number,
+                                repeat_number=repeat_index,
+                                repeat_total=repeats_per_trial,
+                            )
+                            + " | pruned before first valid metric"
                         )
                     raise
                 except Exception as exc:
@@ -671,8 +753,14 @@ def main(config: DictConfig) -> None:
                         "reason": "exception",
                     })
                     tqdm.write(
-                        f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                        f"failed | seed={attempt_seed} | error={exc}"
+                        _format_tuning_progress(
+                            display_trial_idx=display_trial_idx,
+                            trial_total=trial_total,
+                            optuna_trial_number=trial.number,
+                            repeat_number=repeat_index,
+                            repeat_total=repeats_per_trial,
+                        )
+                        + f" | failed | seed={attempt_seed} | error={exc}"
                     )
                     break
                 finally:
@@ -701,8 +789,14 @@ def main(config: DictConfig) -> None:
                 }
                 repeat_results.append(repeat_result)
                 tqdm.write(
-                    f"[trial {trial_number}/{trial_total} repeat {repeat_index}/{repeats_per_trial}] "
-                    f"completed | best {objective_metric}={objective_value:.6f} | "
+                    _format_tuning_progress(
+                        display_trial_idx=display_trial_idx,
+                        trial_total=trial_total,
+                        optuna_trial_number=trial.number,
+                        repeat_number=repeat_index,
+                        repeat_total=repeats_per_trial,
+                    )
+                    + f" | completed | best {objective_metric}={objective_value:.6f} | "
                     f"epoch={repeat_observer.best_epoch} | "
                     f"seed={attempt_seed} | run_dir={result.get('run_dir')}"
                 )
@@ -714,7 +808,7 @@ def main(config: DictConfig) -> None:
                 f"seed={failure['seed']} error={failure['error']}"
                 for failure in repeat_failures
             )
-            raise RuntimeError(f"All repeats failed for trial {trial_number}: {error_summary}")
+            raise RuntimeError(f"All repeats failed for display trial {display_trial_idx}: {error_summary}")
 
         best_repeat = select_best_repeat(direction, repeat_results)
         trial.set_user_attr("run_id", best_repeat.get("run_id"))
@@ -733,8 +827,13 @@ def main(config: DictConfig) -> None:
         )
         trial.set_user_attr("repeat_run_dirs", [result["run_dir"] for result in repeat_results])
         tqdm.write(
-            f"[trial {trial_number}/{trial_total}] selected repeat {best_repeat['repeat_number']}/"
-            f"{repeats_per_trial} | best {objective_metric}={best_repeat['objective_value']:.6f} | "
+            _format_tuning_progress(
+                display_trial_idx=display_trial_idx,
+                trial_total=trial_total,
+                optuna_trial_number=trial.number,
+            )
+            + f" | selected repeat {best_repeat['repeat_number']}/{repeats_per_trial} | "
+            f"best {objective_metric}={best_repeat['objective_value']:.6f} | "
             f"seed={best_repeat['seed']} | run_dir={best_repeat.get('run_dir')}"
         )
         return float(best_repeat["objective_value"])

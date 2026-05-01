@@ -60,6 +60,16 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             module.reset_parameters(init_mode=init_mode)
             module.set_bypass(bypass_gumbel)
 
+    def set_gumbel_bypass(self, enabled: bool) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_bypass(enabled)
+
+    def set_lambda_coef(self, lambda_coef: float, *, bypass_gumbel: bool | None = None) -> None:
+        self.lambda_coef = float(lambda_coef)
+        if bypass_gumbel is None:
+            bypass_gumbel = float(self.lambda_coef) == 0.0
+        self.set_gumbel_bypass(bool(bypass_gumbel))
+
 
 # LEGACY: old custom Gumbel-Softmax helper used only by legacy paths, not by the main_gumbel pipeline.
 class GumbleSoftmax(torch.nn.Module):

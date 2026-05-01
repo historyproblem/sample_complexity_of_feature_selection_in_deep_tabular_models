@@ -40,6 +40,7 @@ class RunHistory:
         self.last_train_metrics: dict[str, Any] = {}
         self.last_valid_metrics: dict[str, Any] = {}
         self.best_valid_metrics: dict[str, Any] = {}
+        self.runtime_metadata: dict[str, Any] = {}
 
         resolved_config = OmegaConf.to_container(config, resolve=True)
         run_name = "run"
@@ -177,6 +178,9 @@ class RunHistory:
             "git_commit": commit_hash,
             "git_dirty": git_dirty,
         }
+
+    def set_runtime_metadata(self, metadata: Mapping[str, Any]) -> None:
+        self.runtime_metadata = dict(metadata)
 
     def _to_cpu(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -408,6 +412,8 @@ class RunHistory:
     ) -> None:
         finished_at = datetime.now()
         duration_sec = (finished_at - self.started_at).total_seconds()
+        cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
+        warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
         summary = {
             "schema_version": 2,
             "identity": {
@@ -416,6 +422,15 @@ class RunHistory:
                 "seed": getattr(self.config, "seed", None),
                 "run_dir": str(self.run_dir),
             },
+            "tracked_config": {
+                "model.lambda_coef": cfg_lambda,
+                "training_arguments.lambda_warmup": (
+                    OmegaConf.to_container(warmup_cfg, resolve=True)
+                    if warmup_cfg is not None
+                    else None
+                ),
+            },
+            "runtime": dict(self.runtime_metadata),
             "timing": {
                 "started_at": self.started_at.isoformat(timespec="seconds"),
                 "finished_at": finished_at.isoformat(timespec="seconds"),
@@ -447,4 +462,19 @@ class RunHistory:
         }
         if stop_info is not None:
             summary["stop_info"] = dict(stop_info)
+        summary_lambda = summary["tracked_config"].get("model.lambda_coef")
+        if cfg_lambda is not None and summary_lambda is not None:
+            assert abs(float(cfg_lambda) - float(summary_lambda)) < 1e-12, (
+                f"summary tracked lambda {summary_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
+        runtime_cfg_lambda = summary["runtime"].get("cfg_model_lambda_coef")
+        if cfg_lambda is not None and runtime_cfg_lambda is not None:
+            assert abs(float(cfg_lambda) - float(runtime_cfg_lambda)) < 1e-12, (
+                f"summary runtime cfg lambda {runtime_cfg_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
+        runtime_model_lambda = summary["runtime"].get("model_lambda_coef")
+        if cfg_lambda is not None and runtime_model_lambda is not None:
+            assert abs(float(cfg_lambda) - float(runtime_model_lambda)) < 1e-12, (
+                f"summary runtime model lambda {runtime_model_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
         self._write_json(self.summary_path, summary)
