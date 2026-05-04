@@ -16,6 +16,8 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 build_grid_search_space = MODULE.build_grid_search_space
+build_grid_points = MODULE.build_grid_points
+build_point_grid_search_space = MODULE.build_point_grid_search_space
 count_grid_trials = MODULE.count_grid_trials
 
 
@@ -68,6 +70,44 @@ def test_stg_150ep_narrow_grid_tuning_config_uses_exact_6_point_search_space():
         "model.backbone.resnet_block.init_mu": [0.0, 0.1],
     }
     assert count_grid_trials(grid_space) == 6
+
+
+def test_gumbel_resnet50_mask_mode_triplet_uses_exact_three_manual_points():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_mask_mode_triplet.yaml")
+
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_mask_mode_triplet"
+    assert cfg.tuning.n_trials == 3
+    assert cfg.tuning.output_dir == "outputs/studies"
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    grid_points = build_grid_points(
+        OmegaConf.to_container(cfg.tuning.points, resolve=True),
+    )
+    grid_space = build_point_grid_search_space(grid_points)
+
+    assert grid_points == [
+        {
+            "model.lambda_coef": 0.0,
+            "model.backbone.resnet_block.force_ones_mask": True,
+            "model.backbone.resnet_block.deterministic_soft_mask": False,
+            "model.backbone.resnet_block.deterministic_hard_mask": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.force_ones_mask": False,
+            "model.backbone.resnet_block.deterministic_soft_mask": True,
+            "model.backbone.resnet_block.deterministic_hard_mask": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.force_ones_mask": False,
+            "model.backbone.resnet_block.deterministic_soft_mask": False,
+            "model.backbone.resnet_block.deterministic_hard_mask": True,
+        },
+    ]
+    assert grid_space == {"__grid_point_index__": [0, 1, 2]}
+    assert count_grid_trials(grid_space) == 3
 
 
 def test_stg_experiment_recipe_is_composed_from_layered_config_groups():

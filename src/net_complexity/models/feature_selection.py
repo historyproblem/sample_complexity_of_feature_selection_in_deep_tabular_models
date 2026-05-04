@@ -162,10 +162,29 @@ class GumbelLayer(nn.Module):
     FULLY_OPEN_ON_LOGIT = 10.0
     FULLY_OPEN_NOISE_SCALE = 0.0
 
-    def __init__(self, input_dim: int, temperature: float = 1.0):
+    def __init__(
+        self,
+        input_dim: int,
+        temperature: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+    ):
         super().__init__()
         self.logits = nn.Parameter(torch.empty(input_dim, 2))
         self.temperature = temperature
+        self.force_ones_mask = bool(force_ones_mask)
+        self.deterministic_soft_mask = bool(deterministic_soft_mask)
+        self.deterministic_hard_mask = bool(deterministic_hard_mask)
+        active_mask_modes = [
+            self.force_ones_mask,
+            self.deterministic_soft_mask,
+            self.deterministic_hard_mask,
+        ]
+        if sum(bool(flag) for flag in active_mask_modes) > 1:
+            raise ValueError(
+                "force_ones_mask, deterministic_soft_mask, and deterministic_hard_mask are mutually exclusive."
+            )
         self._bypass = False
         self.reset_parameters()
 
@@ -206,7 +225,16 @@ class GumbelLayer(nn.Module):
             while len(gates.shape) < len(x.shape):
                 gates = gates.unsqueeze(-1)
             return gates
-        if self.training:
+        if self.force_ones_mask:
+            gates = x.new_ones((batch_size, self.logits.shape[0]))
+        elif self.deterministic_soft_mask:
+            gates = F.softmax(self.logits, dim=1)[:, 1].unsqueeze(0)
+            gates = gates.expand(batch_size, -1)
+        elif self.deterministic_hard_mask:
+            probs_on = F.softmax(self.logits, dim=1)[:, 1]
+            gates = (probs_on > 0.5).float().unsqueeze(0)
+            gates = gates.expand(batch_size, -1)
+        elif self.training:
             logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
             sampled = F.gumbel_softmax(
                 logits,
@@ -364,11 +392,17 @@ class GumbelBottleneckLayer(Bottleneck):
         i_downsample=None,
         stride=1,
         temperature: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
     ):
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
         self.gumbel_layer = GumbelLayer(
             input_dim=out_channels * self.expansion,
             temperature=temperature,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
         )
 
     def forward(self, x):
@@ -389,11 +423,24 @@ class GumbelBottleneckLayer(Bottleneck):
 
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
-    def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        temperature: float = 1,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+    ):
         super().__init__(in_planes, planes, stride=stride, option=option)
         self.gumbel_layer = GumbelLayer(
             input_dim=planes * self.expansion,
             temperature=temperature,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
         )
 
     def forward(self, x):

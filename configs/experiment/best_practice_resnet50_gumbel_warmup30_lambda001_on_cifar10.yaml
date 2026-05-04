@@ -29,14 +29,15 @@ training_arguments:
     start_epoch: 30
     initial_lambda_coef: 0.0
     target_lambda_coef: 0.01
-    bypass_during_warmup: true
+    ramp_epochs: 30
+    bypass_during_warmup: false
 
 run_history:
   log_gate_history: true
 
 mlflow:
   enabled: false
-  run_name: "best_practice_resnet50_gumbel_warmup30_lambda_0.01_on_cifar10_temp_${model.backbone.resnet_block.temperature}"
+  run_name: "best_practice_resnet50_gumbel_warmup30_ramp30_lambda_0.01_on_cifar10_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_Gumbel"
     method: "gumbel"

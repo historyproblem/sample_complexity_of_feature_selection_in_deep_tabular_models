@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from net_complexity.models.feature_selection import (
     ClassificationFeatureSelectionWrapper,
     GumbelBottleneckLayer,
+    GumbelLayer,
     ResNet50,
     get_gumbel_loss,
     get_gumbel_modules,
@@ -116,6 +117,75 @@ def test_bypassed_gumbel_layer_returns_identity():
         gated = layer.gumbel_layer(x)
 
     torch.testing.assert_close(gated, x)
+
+
+def test_force_ones_mask_returns_identity_without_bypass():
+    layer = GumbelLayer(input_dim=256, temperature=0.75, force_ones_mask=True)
+    layer.train()
+
+    x = torch.randn(2, 256, 8, 8)
+
+    with torch.no_grad():
+        gated = layer(x)
+
+    assert layer.bypass is False
+    torch.testing.assert_close(gated, x)
+
+
+def test_deterministic_soft_mask_uses_on_probability_without_gumbel_sampling():
+    layer = GumbelLayer(input_dim=3, temperature=0.75, deterministic_soft_mask=True)
+    layer.train()
+    with torch.no_grad():
+        layer.logits.copy_(torch.tensor([
+            [0.0, 0.0],
+            [0.0, 2.0],
+            [2.0, 0.0],
+        ]))
+
+    x = torch.ones(2, 3, 4, 4)
+
+    with torch.no_grad():
+        gated = layer(x)
+
+    expected = F.softmax(layer.logits, dim=1)[:, 1].view(1, 3, 1, 1).expand_as(x)
+
+    assert layer.bypass is False
+    torch.testing.assert_close(gated, expected)
+
+
+def test_deterministic_hard_mask_thresholds_on_probability_without_gumbel_sampling():
+    layer = GumbelLayer(input_dim=3, temperature=0.75, deterministic_hard_mask=True)
+    layer.train()
+    with torch.no_grad():
+        layer.logits.copy_(torch.tensor([
+            [0.0, 0.0],
+            [0.0, 2.0],
+            [2.0, 0.0],
+        ]))
+
+    x = torch.ones(2, 3, 4, 4)
+
+    with torch.no_grad():
+        gated = layer(x)
+
+    expected = torch.tensor([0.0, 1.0, 0.0]).view(1, 3, 1, 1).expand_as(x)
+
+    assert layer.bypass is False
+    torch.testing.assert_close(gated, expected)
+
+
+def test_gumbel_layer_rejects_conflicting_mask_modes():
+    try:
+        GumbelLayer(
+            input_dim=3,
+            force_ones_mask=True,
+            deterministic_soft_mask=True,
+            deterministic_hard_mask=True,
+        )
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("Expected mutually exclusive mask modes to raise ValueError.")
 
 
 def test_closed_gumbel_bottleneck_preserves_identity_shortcut():

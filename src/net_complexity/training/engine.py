@@ -322,28 +322,73 @@ class LambdaWarmupState:
     start_epoch: int
     initial_lambda_coef: float
     target_lambda_coef: float
+    ramp_epochs: int = 1
     bypass_during_warmup: bool = True
-    activated: bool = False
+    last_applied_lambda_coef: float | None = None
+    last_applied_bypass: bool | None = None
 
     def apply_initial_state(self, model: nn.Module) -> None:
-        _set_model_lambda_coef(
+        self._apply(
             model,
-            self.initial_lambda_coef,
+            lambda_coef=self.initial_lambda_coef,
             bypass_gumbel=self.bypass_during_warmup,
+            reason="init",
         )
 
-    def maybe_activate(self, epoch: int, model: nn.Module) -> bool:
-        if self.activated or int(epoch) < self.start_epoch:
+    def step(self, epoch: int, model: nn.Module) -> bool:
+        lambda_coef, bypass_gumbel, phase = self.resolve_epoch_state(epoch)
+        return self._apply(
+            model,
+            lambda_coef=lambda_coef,
+            bypass_gumbel=bypass_gumbel,
+            reason=f"epoch={epoch} phase={phase}",
+        )
+
+    def resolve_epoch_state(self, epoch: int) -> tuple[float, bool, str]:
+        epoch = int(epoch)
+        if epoch < self.start_epoch:
+            return self.initial_lambda_coef, self.bypass_during_warmup, "warmup"
+
+        if self.ramp_epochs <= 1:
+            return self.target_lambda_coef, False, "active"
+
+        progress_steps = min(epoch - self.start_epoch + 1, self.ramp_epochs)
+        progress = float(progress_steps) / float(self.ramp_epochs)
+        lambda_coef = (
+            self.initial_lambda_coef
+            + (self.target_lambda_coef - self.initial_lambda_coef) * progress
+        )
+        phase = "ramp" if progress_steps < self.ramp_epochs else "active"
+        return float(lambda_coef), False, phase
+
+    def _apply(
+        self,
+        model: nn.Module,
+        *,
+        lambda_coef: float,
+        bypass_gumbel: bool,
+        reason: str,
+    ) -> bool:
+        lambda_coef = float(lambda_coef)
+        bypass_gumbel = bool(bypass_gumbel)
+        if (
+            self.last_applied_lambda_coef is not None
+            and self.last_applied_bypass is not None
+            and abs(self.last_applied_lambda_coef - lambda_coef) < 1e-12
+            and self.last_applied_bypass == bypass_gumbel
+        ):
             return False
+
         _set_model_lambda_coef(
             model,
-            self.target_lambda_coef,
-            bypass_gumbel=False,
+            lambda_coef,
+            bypass_gumbel=bypass_gumbel,
         )
-        self.activated = True
+        self.last_applied_lambda_coef = lambda_coef
+        self.last_applied_bypass = bypass_gumbel
         print(
-            f"Lambda warmup activated at epoch {epoch} | "
-            f"lambda_coef={self.target_lambda_coef:.12g} | gumbel_bypass=False"
+            f"Lambda warmup update | {reason} | "
+            f"lambda_coef={lambda_coef:.12g} | gumbel_bypass={bypass_gumbel}"
         )
         return True
 
@@ -500,6 +545,7 @@ def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | 
         start_epoch=start_epoch,
         initial_lambda_coef=float(getattr(cfg, "initial_lambda_coef", 0.0)),
         target_lambda_coef=float(getattr(cfg, "target_lambda_coef")),
+        ramp_epochs=max(1, int(getattr(cfg, "ramp_epochs", 1))),
         bypass_during_warmup=bool(getattr(cfg, "bypass_during_warmup", True)),
     )
 
@@ -592,7 +638,7 @@ def train(model: nn.Module,
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
         if lambda_warmup is not None:
-            lambda_warmup.maybe_activate(epoch_num, model)
+            lambda_warmup.step(epoch_num, model)
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()

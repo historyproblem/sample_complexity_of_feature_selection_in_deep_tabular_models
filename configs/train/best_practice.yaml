@@ -7,6 +7,7 @@ training_arguments:
     start_epoch: 30
     initial_lambda_coef: 0.0
     target_lambda_coef: 0.0
+    ramp_epochs: 1
     bypass_during_warmup: true
   early_stopping:
     enabled: false  # Skip the per-epoch early stopping check for this recipe.

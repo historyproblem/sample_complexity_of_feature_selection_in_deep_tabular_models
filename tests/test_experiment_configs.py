@@ -96,6 +96,9 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
 
     assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.model.bypass_on_zero_lambda is True
+    assert cfg.model.backbone.resnet_block.force_ones_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
 
 
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
