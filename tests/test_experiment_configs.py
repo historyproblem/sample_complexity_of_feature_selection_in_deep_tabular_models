@@ -91,6 +91,13 @@ def test_before_refactor_stg_cifar10_preserves_old_recipe():
     assert cfg.mlflow.tags.recipe == "before_refactor_stg_cifar10"
 
 
+def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
+    cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel.yaml")
+
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.bypass_on_zero_lambda is True
+
+
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "optuna.yaml")
 

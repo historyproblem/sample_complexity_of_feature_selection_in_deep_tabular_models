@@ -2,6 +2,7 @@
 
 model:
   gumbel_init_mode: auto
+  bypass_on_zero_lambda: true
   criterion:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:

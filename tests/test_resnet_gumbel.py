@@ -19,7 +19,11 @@ def _close_all_gates(block: GumbelBottleneckLayer) -> None:
         block.gumbel_layer.logits[:, 1] = 0.0
 
 
-def _build_wrapped_resnet50(lambda_coef: float) -> ClassificationFeatureSelectionWrapper:
+def _build_wrapped_resnet50(
+    lambda_coef: float,
+    *,
+    bypass_on_zero_lambda: bool = True,
+) -> ClassificationFeatureSelectionWrapper:
     backbone = ResNet50(
         num_classes=5,
         in_channels=3,
@@ -28,6 +32,7 @@ def _build_wrapped_resnet50(lambda_coef: float) -> ClassificationFeatureSelectio
     return ClassificationFeatureSelectionWrapper(
         backbone=backbone,
         lambda_coef=lambda_coef,
+        bypass_on_zero_lambda=bypass_on_zero_lambda,
     )
 
 
@@ -58,6 +63,22 @@ def test_wrapper_uses_fully_open_gumbel_init_when_lambda_is_zero():
     assert all(module.bypass for module in gumbel_modules.values())
 
 
+def test_wrapper_can_disable_zero_lambda_bypass():
+    wrapper = _build_wrapped_resnet50(
+        lambda_coef=0.0,
+        bypass_on_zero_lambda=False,
+    )
+
+    gumbel_modules = get_gumbel_modules(wrapper.backbone)
+    selection_probs = torch.cat(
+        [module.get_selection_probs() for module in gumbel_modules.values()]
+    )
+    mean_selection_prob = float(selection_probs.mean().item())
+
+    assert 0.84 < mean_selection_prob < 0.90
+    assert all(not module.bypass for module in gumbel_modules.values())
+
+
 def test_wrapper_uses_paper_gumbel_init_when_lambda_is_positive():
     wrapper = _build_wrapped_resnet50(lambda_coef=0.5)
 
@@ -68,6 +89,19 @@ def test_wrapper_uses_paper_gumbel_init_when_lambda_is_positive():
     mean_selection_prob = float(selection_probs.mean().item())
 
     assert 0.84 < mean_selection_prob < 0.90
+    assert all(not module.bypass for module in gumbel_modules.values())
+
+
+def test_set_lambda_coef_respects_disabled_zero_lambda_bypass():
+    wrapper = _build_wrapped_resnet50(
+        lambda_coef=0.5,
+        bypass_on_zero_lambda=False,
+    )
+
+    wrapper.set_lambda_coef(0.0)
+
+    gumbel_modules = get_gumbel_modules(wrapper.backbone)
+
     assert all(not module.bypass for module in gumbel_modules.values())
 
 

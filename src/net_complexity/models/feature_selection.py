@@ -16,6 +16,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  backbone: nn.Module,
                  lambda_coef: float = 0.01,
                  gumbel_init_mode: str = "auto",
+                 bypass_on_zero_lambda: bool = True,
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -23,6 +24,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.criterion = criterion
         self.lambda_coef = lambda_coef
         self.gumbel_init_mode = gumbel_init_mode
+        self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
 
@@ -43,10 +45,13 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             logits=logits
         )
 
+    def _should_bypass_gumbel(self) -> bool:
+        return self.bypass_on_zero_lambda and float(self.lambda_coef) == 0.0
+
     def _resolve_gumbel_init_mode(self) -> str:
         mode = str(self.gumbel_init_mode).lower()
         if mode == "auto":
-            return "fully_open" if float(self.lambda_coef) == 0.0 else "paper"
+            return "fully_open" if self._should_bypass_gumbel() else "paper"
         if mode in {"paper", "fully_open"}:
             return mode
         raise ValueError(
@@ -55,7 +60,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
 
     def _initialize_gumbel_layers(self) -> None:
         init_mode = self._resolve_gumbel_init_mode()
-        bypass_gumbel = float(self.lambda_coef) == 0.0
+        bypass_gumbel = self._should_bypass_gumbel()
         for module in get_gumbel_modules(self.backbone).values():
             module.reset_parameters(init_mode=init_mode)
             module.set_bypass(bypass_gumbel)
@@ -67,7 +72,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
     def set_lambda_coef(self, lambda_coef: float, *, bypass_gumbel: bool | None = None) -> None:
         self.lambda_coef = float(lambda_coef)
         if bypass_gumbel is None:
-            bypass_gumbel = float(self.lambda_coef) == 0.0
+            bypass_gumbel = self._should_bypass_gumbel()
         self.set_gumbel_bypass(bool(bypass_gumbel))
 
 
