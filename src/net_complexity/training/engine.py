@@ -188,6 +188,133 @@ class EarlyStoppingState:
         return epoch >= self.min_epochs and self.bad_epochs >= self.patience
 
 
+@dataclass
+class BatchNormRecalibrationState:
+    num_batches: int = 200
+    reset_running_stats: bool = True
+    deterministic_gumbel: bool = True
+
+    def __post_init__(self) -> None:
+        self.num_batches = int(self.num_batches)
+        if self.num_batches <= 0:
+            raise ValueError("training_arguments.batchnorm_recalibration.num_batches must be >= 1.")
+
+    def apply(
+        self,
+        model: nn.Module,
+        dataloader: DataLoader,
+        *,
+        device: str,
+        progress_context: ProgressContext | None = None,
+    ) -> dict[str, Any]:
+        batchnorm_modules = [
+            module
+            for module in model.modules()
+            if isinstance(module, nn.modules.batchnorm._BatchNorm)
+        ]
+        gumbel_modules = list(get_gumbel_modules(model).values())
+
+        if not batchnorm_modules:
+            return self._log_and_build_info(
+                progress_context=progress_context,
+                applied=False,
+                batches_processed=0,
+                examples_processed=0,
+                num_batchnorm_modules=0,
+                num_gumbel_modules=len(gumbel_modules),
+                reason="no_batchnorm_modules",
+            )
+        if not gumbel_modules:
+            return self._log_and_build_info(
+                progress_context=progress_context,
+                applied=False,
+                batches_processed=0,
+                examples_processed=0,
+                num_batchnorm_modules=len(batchnorm_modules),
+                num_gumbel_modules=0,
+                reason="no_gumbel_modules",
+            )
+
+        original_training = bool(model.training)
+        original_gumbel_training = [bool(module.training) for module in gumbel_modules]
+        batches_processed = 0
+        examples_processed = 0
+
+        try:
+            if self.reset_running_stats:
+                for module in batchnorm_modules:
+                    module.reset_running_stats()
+
+            model.train()
+            if self.deterministic_gumbel:
+                _set_gumbel_modules_training_mode(gumbel_modules, training=False)
+
+            with torch.no_grad():
+                for batch in dataloader:
+                    X, y = _extract_batch_tensors(batch)
+                    X, y = X.to(device), y.to(device)
+                    model(X, y)
+                    batches_processed += 1
+                    examples_processed += int(X.shape[0])
+                    if batches_processed >= self.num_batches:
+                        break
+        finally:
+            model.train(original_training)
+            for module, was_training in zip(gumbel_modules, original_gumbel_training):
+                module.train(was_training)
+
+        return self._log_and_build_info(
+            progress_context=progress_context,
+            applied=True,
+            batches_processed=batches_processed,
+            examples_processed=examples_processed,
+            num_batchnorm_modules=len(batchnorm_modules),
+            num_gumbel_modules=len(gumbel_modules),
+        )
+
+    def _log_and_build_info(
+        self,
+        *,
+        progress_context: ProgressContext | None,
+        applied: bool,
+        batches_processed: int,
+        examples_processed: int,
+        num_batchnorm_modules: int,
+        num_gumbel_modules: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        info = {
+            "enabled": True,
+            "applied": bool(applied),
+            "num_batches_requested": self.num_batches,
+            "num_batches_processed": int(batches_processed),
+            "num_examples_processed": int(examples_processed),
+            "num_batchnorm_modules": int(num_batchnorm_modules),
+            "num_gumbel_modules": int(num_gumbel_modules),
+            "reset_running_stats": bool(self.reset_running_stats),
+            "deterministic_gumbel": bool(self.deterministic_gumbel),
+        }
+        if reason is not None:
+            info["reason"] = str(reason)
+
+        parts: list[str] = []
+        progress_prefix = _progress_prefix(progress_context)
+        if progress_prefix is not None:
+            parts.append(progress_prefix)
+        parts.append(
+            "BatchNorm recalibration"
+            f" | applied={info['applied']}"
+            f" | batches={batches_processed}/{self.num_batches}"
+            f" | examples={examples_processed}"
+            f" | bn_modules={num_batchnorm_modules}"
+            f" | gumbel_modules={num_gumbel_modules}"
+            f" | deterministic_gumbel={self.deterministic_gumbel}"
+            + (f" | reason={reason}" if reason is not None else "")
+        )
+        print(" | ".join(parts))
+        return info
+
+
 def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
     parts: list[str] = []
     if progress_context is not None:
@@ -255,6 +382,22 @@ def _build_epoch_log_line(
     return " | ".join(parts)
 
 
+def _extract_batch_tensors(batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+        raise TypeError(
+            "Expected dataloader batch to be a tuple/list of at least (inputs, targets)."
+        )
+    X, y = batch[0], batch[1]
+    if not isinstance(X, torch.Tensor) or not isinstance(y, torch.Tensor):
+        raise TypeError("BatchNorm recalibration expects tensor inputs and tensor targets.")
+    return X, y
+
+
+def _set_gumbel_modules_training_mode(gumbel_modules: list[nn.Module], *, training: bool) -> None:
+    for module in gumbel_modules:
+        module.train(training)
+
+
 def _build_early_stopping(
     training_arguments: DictConfig,
     run_history: RunHistory | None,
@@ -293,6 +436,20 @@ def _build_early_stopping(
         patience=patience,
         min_epochs=int(getattr(cfg, "min_epochs", 0)),
         min_delta=float(getattr(cfg, "min_delta", 0.0)),
+    )
+
+
+def _build_batchnorm_recalibration(
+    training_arguments: DictConfig,
+) -> BatchNormRecalibrationState | None:
+    cfg = getattr(training_arguments, "batchnorm_recalibration", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    return BatchNormRecalibrationState(
+        num_batches=int(getattr(cfg, "num_batches", 200)),
+        reset_running_stats=bool(getattr(cfg, "reset_running_stats", True)),
+        deterministic_gumbel=bool(getattr(cfg, "deterministic_gumbel", True)),
     )
 
 
@@ -376,9 +533,11 @@ def train(model: nn.Module,
     last_valid_metrics: dict[str, float] = {}
     total_epochs = int(training_arguments.num_epochs)
     early_stopping = _build_early_stopping(training_arguments, run_history)
+    batchnorm_recalibration = _build_batchnorm_recalibration(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
+    recalibration_info: dict[str, Any] | None = None
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
@@ -526,6 +685,25 @@ def train(model: nn.Module,
         if should_stop:
             break
 
+    if batchnorm_recalibration is not None:
+        recalibration_info = batchnorm_recalibration.apply(
+            model,
+            dataloaders.train_dataloader,
+            device=device,
+            progress_context=progress_context,
+        )
+        if run_history is not None and recalibration_info.get("applied"):
+            run_history.save_checkpoint(
+                "last.pt",
+                model=model,
+                optimizer=optimizer,
+                epoch=completed_epochs or total_epochs,
+                metrics={
+                    **last_train_metrics,
+                    **last_valid_metrics,
+                },
+            )
+
     final_epoch = completed_epochs or total_epochs
     evaluate(
         model,
@@ -558,6 +736,8 @@ def train(model: nn.Module,
         "last_valid_metrics": last_valid_metrics,
         "test_metrics": dict(test_metrics),
     }
+    if recalibration_info is not None:
+        result["batchnorm_recalibration"] = recalibration_info
     if stop_info is not None:
         result.update(stop_info)
     return result

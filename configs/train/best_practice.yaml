@@ -2,6 +2,11 @@
 
 training_arguments:
   num_epochs: 250
+  batchnorm_recalibration:
+    enabled: true
+    num_batches: 200
+    reset_running_stats: true
+    deterministic_gumbel: true
   early_stopping:
     enabled: false  # Skip the per-epoch early stopping check for this recipe.
     patience: 40

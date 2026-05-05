@@ -2,5 +2,10 @@
 
 training_arguments:
   num_epochs: 200
+  batchnorm_recalibration:
+    enabled: true
+    num_batches: 200
+    reset_running_stats: true
+    deterministic_gumbel: true
   collapse_guard:
     enabled: false
