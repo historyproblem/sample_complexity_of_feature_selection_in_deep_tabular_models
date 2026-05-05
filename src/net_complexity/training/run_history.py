@@ -363,6 +363,7 @@ class RunHistory:
                 "layer_name": layer_name,
                 "num_channels": len(probs),
                 "temperature": float(module.temperature),
+                "beta": float(module.beta),
                 "selection_probs": probs,
                 "zero_probs": [float(1.0 - value) for value in probs],
                 "polarized_active_mask": polarized_active_mask,

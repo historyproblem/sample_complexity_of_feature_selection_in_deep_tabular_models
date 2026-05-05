@@ -24,6 +24,7 @@ def test_gumbel_cifar10_uses_article_training_stack_with_original_lambda():
     ]
     assert cfg.model.lambda_coef == 1.479470
     assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.mlflow.tags.recipe == "gumbel_cifar10"
 
 
@@ -96,6 +97,7 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
 
     assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.model.bypass_on_zero_lambda is True
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.model.backbone.resnet_block.force_ones_mask is False
     assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
     assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
@@ -165,6 +167,7 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
     assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.run_history.log_gate_history is True
     assert cfg.mlflow.enabled is False
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_on_cifar10"
@@ -192,6 +195,7 @@ def test_best_practice_resnet50_gumbel_paper_init_lambda0_disables_bypass_and_wa
     assert cfg.model.bypass_on_zero_lambda is False
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.training_arguments.lambda_warmup.enabled is False
     assert cfg.run_history.log_gate_history is True
     assert cfg.mlflow.enabled is False
@@ -220,6 +224,7 @@ def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_
     assert cfg.model.bypass_on_zero_lambda is False
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.training_arguments.lambda_warmup.enabled is False
     assert cfg.training_arguments.gate_mode_schedule.enabled is False
     assert cfg.run_history.log_gate_history is True
@@ -251,6 +256,7 @@ def test_best_practice_resnet50_gumbel_bn_recalibration_lambda001_uses_requested
     assert cfg.model.bypass_on_zero_lambda is False
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.training_arguments.lambda_warmup.enabled is False
     assert cfg.training_arguments.gate_mode_schedule.enabled is False
     assert cfg.training_arguments.batchnorm_recalibration.enabled is True

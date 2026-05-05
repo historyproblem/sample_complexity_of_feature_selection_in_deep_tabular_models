@@ -12,6 +12,7 @@ model:
     resnet_block:
       _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
       _partial_: true
+      beta: 1.0
       force_ones_mask: false
       deterministic_soft_mask: false
       deterministic_hard_mask: false

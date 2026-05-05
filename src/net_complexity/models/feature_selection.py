@@ -185,6 +185,7 @@ class GumbelLayer(nn.Module):
         self,
         input_dim: int,
         temperature: float = 1.0,
+        beta: float = 1.0,
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
@@ -193,8 +194,11 @@ class GumbelLayer(nn.Module):
         gate_threshold: float = 0.5,
     ):
         super().__init__()
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
         self.logits = nn.Parameter(torch.empty(input_dim, 2))
         self.temperature = temperature
+        self.beta = float(beta)
         self.gate_threshold = float(gate_threshold)
         if not 0.0 <= self.gate_threshold <= 1.0:
             raise ValueError("gate_threshold must be within [0.0, 1.0].")
@@ -326,6 +330,20 @@ class GumbelLayer(nn.Module):
         probs_on = self._selection_probs(batch_size)
         return (probs_on > self.gate_threshold).float()
 
+    def _sample_gumbel_like(self, template_tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+        uniform_samples = torch.rand_like(template_tensor)
+        uniform_samples = uniform_samples.clamp_(min=eps, max=1.0 - eps)
+        return -torch.log(-torch.log(uniform_samples))
+
+    def _sample_gumbel_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        gumbel_noise = self._sample_gumbel_like(logits) * self.beta
+        return F.softmax((logits + gumbel_noise) / self.temperature, dim=-1)
+
+    def _straight_through_hard_sample(self, soft_samples: torch.Tensor) -> torch.Tensor:
+        max_value_indexes = soft_samples.argmax(dim=-1, keepdim=True)
+        hard_samples = torch.zeros_like(soft_samples).scatter_(-1, max_value_indexes, 1.0)
+        return hard_samples - soft_samples.detach() + soft_samples
+
     def _compute_mode_gates(self, mode: str, batch_size: int) -> torch.Tensor:
         if mode == "ones":
             return self.logits.new_ones((batch_size, self.logits.shape[0]))
@@ -339,12 +357,8 @@ class GumbelLayer(nn.Module):
             return hard_mask.detach() - soft_mask.detach() + soft_mask
         if mode == "gumbel_hard":
             logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
-            sampled = F.gumbel_softmax(
-                logits,
-                tau=self.temperature,
-                hard=True,
-                dim=-1,
-            )
+            soft_samples = self._sample_gumbel_softmax(logits)
+            sampled = self._straight_through_hard_sample(soft_samples)
             return sampled[..., 1]
         raise AssertionError(f"Unhandled gate mode: {mode}")
 
@@ -385,6 +399,12 @@ class GumbelLayer(nn.Module):
     def set_temperature(self, temperature: float):
         """Update temperature for annealing schedule."""
         self.temperature = temperature
+
+    def set_beta(self, beta: float):
+        """Update the Gumbel noise scale."""
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
+        self.beta = float(beta)
 
 
 class STGChannelLayer(nn.Module):
@@ -504,6 +524,7 @@ class GumbelBottleneckLayer(Bottleneck):
         i_downsample=None,
         stride=1,
         temperature: float = 1.0,
+        beta: float = 1.0,
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
@@ -515,6 +536,7 @@ class GumbelBottleneckLayer(Bottleneck):
         self.gumbel_layer = GumbelLayer(
             input_dim=out_channels * self.expansion,
             temperature=temperature,
+            beta=beta,
             force_ones_mask=force_ones_mask,
             deterministic_soft_mask=deterministic_soft_mask,
             deterministic_hard_mask=deterministic_hard_mask,
@@ -548,6 +570,7 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         stride=1,
         option: str = "A",
         temperature: float = 1,
+        beta: float = 1.0,
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
@@ -559,6 +582,7 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         self.gumbel_layer = GumbelLayer(
             input_dim=planes * self.expansion,
             temperature=temperature,
+            beta=beta,
             force_ones_mask=force_ones_mask,
             deterministic_soft_mask=deterministic_soft_mask,
             deterministic_hard_mask=deterministic_hard_mask,
