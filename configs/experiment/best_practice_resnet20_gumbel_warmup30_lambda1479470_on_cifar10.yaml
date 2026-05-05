@@ -1,0 +1,35 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: cifar_resnet20
+  - /method: gumbel
+  - /train: best_practice
+  - /optimizer: sgd_resnet20
+  - /scheduler: multistep_91_136
+  - /metrics: gumbel
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+  gumbel_init_mode: fully_open
+
+training_arguments:
+  lambda_warmup:
+    enabled: true
+    start_epoch: 30
+    initial_lambda_coef: 0.0
+    target_lambda_coef: 1.479470
+    ramp_epochs: 30
+    bypass_during_warmup: false
+
+mlflow:
+  run_name: "best_practice_resnet20_gumbel_warmup30_ramp30_lambda_1.479470_on_cifar10"
+  tags:
+    model_type: "CIFARResNet20_Gumbel"
+    method: "gumbel"
+    recipe: "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10"

@@ -271,6 +271,39 @@ def test_best_practice_resnet50_gumbel_bn_recalibration_lambda001_uses_requested
     )
 
 
+def test_best_practice_resnet20_gumbel_warmup30_lambda1479470_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "cifar_resnet20"},
+        {"/method": "gumbel"},
+        {"/train": "best_practice"},
+        {"/optimizer": "sgd_resnet20"},
+        {"/scheduler": "multistep_91_136"},
+        {"/metrics": "gumbel"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 30
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 1.479470
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10"
+    )
+
+
 def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():
     cfg = OmegaConf.load(CONFIGS_DIR / "metrics" / "gumbel_resnet50.yaml")
 
