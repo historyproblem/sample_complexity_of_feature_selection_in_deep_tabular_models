@@ -460,6 +460,130 @@ class GateModeScheduleState:
         return True
 
 
+@dataclass
+class BatchNormRecalibrationState:
+    num_batches: int = 200
+    reset_running_stats: bool = True
+    train_gate_mode: str | None = "deterministic_hard"
+    eval_gate_mode: str | None = "deterministic_hard"
+
+    def __post_init__(self) -> None:
+        self.num_batches = int(self.num_batches)
+        if self.num_batches <= 0:
+            raise ValueError("training_arguments.batchnorm_recalibration.num_batches must be >= 1.")
+
+    def apply(
+        self,
+        model: nn.Module,
+        dataloader: DataLoader,
+        *,
+        device: str,
+        progress_context: ProgressContext | None = None,
+    ) -> dict[str, Any]:
+        batchnorm_modules = [
+            module
+            for module in model.modules()
+            if isinstance(module, nn.modules.batchnorm._BatchNorm)
+        ]
+        if not batchnorm_modules:
+            info = {
+                "enabled": True,
+                "applied": False,
+                "num_batches_requested": self.num_batches,
+                "num_batches_processed": 0,
+                "num_examples_processed": 0,
+                "num_batchnorm_modules": 0,
+                "reset_running_stats": bool(self.reset_running_stats),
+                "train_gate_mode": self.train_gate_mode,
+                "eval_gate_mode": self.eval_gate_mode,
+                "reason": "no_batchnorm_modules",
+            }
+            parts: list[str] = []
+            progress_prefix = _progress_prefix(progress_context)
+            if progress_prefix is not None:
+                parts.append(progress_prefix)
+            parts.append(
+                "BatchNorm recalibration"
+                " | applied=False"
+                f" | batches=0/{self.num_batches}"
+                " | examples=0"
+                " | bn_modules=0"
+                " | reason=no_batchnorm_modules"
+            )
+            print(" | ".join(parts))
+            return info
+
+        gumbel_modules = get_gumbel_modules(model)
+        original_training = bool(model.training)
+        original_train_gate_mode, original_eval_gate_mode = _resolve_model_gumbel_gate_modes(model)
+        batches_processed = 0
+        examples_processed = 0
+
+        try:
+            if self.reset_running_stats:
+                for module in batchnorm_modules:
+                    module.reset_running_stats()
+
+            if gumbel_modules and (self.train_gate_mode is not None or self.eval_gate_mode is not None):
+                _set_model_gumbel_gate_modes(
+                    model,
+                    train_gate_mode=self.train_gate_mode,
+                    eval_gate_mode=self.eval_gate_mode,
+                )
+
+            model.train()
+
+            with torch.no_grad():
+                for batch in dataloader:
+                    X, y = _extract_batch_tensors(batch)
+                    X, y = X.to(device), y.to(device)
+                    model(X, y)
+                    batches_processed += 1
+                    examples_processed += int(X.shape[0])
+                    if batches_processed >= self.num_batches:
+                        break
+        finally:
+            if gumbel_modules and (original_train_gate_mode is not None or original_eval_gate_mode is not None):
+                _set_model_gumbel_gate_modes(
+                    model,
+                    train_gate_mode=original_train_gate_mode,
+                    eval_gate_mode=original_eval_gate_mode,
+                )
+
+            if original_training:
+                model.train()
+            else:
+                model.eval()
+
+        info = {
+            "enabled": True,
+            "applied": True,
+            "num_batches_requested": self.num_batches,
+            "num_batches_processed": batches_processed,
+            "num_examples_processed": examples_processed,
+            "num_batchnorm_modules": len(batchnorm_modules),
+            "reset_running_stats": bool(self.reset_running_stats),
+            "train_gate_mode": self.train_gate_mode,
+            "eval_gate_mode": self.eval_gate_mode,
+        }
+
+        parts: list[str] = []
+        progress_prefix = _progress_prefix(progress_context)
+        if progress_prefix is not None:
+            parts.append(progress_prefix)
+        parts.append(
+            "BatchNorm recalibration"
+            f" | applied={info['applied']}"
+            f" | batches={batches_processed}/{self.num_batches}"
+            f" | examples={examples_processed}"
+            f" | bn_modules={len(batchnorm_modules)}"
+            f" | train_gate_mode={self.train_gate_mode}"
+            f" | eval_gate_mode={self.eval_gate_mode}"
+        )
+        print(" | ".join(parts))
+        return info
+
+
 def _set_model_lambda_coef(
     model: nn.Module,
     lambda_coef: float,
@@ -592,6 +716,17 @@ def _build_epoch_log_line(
     return " | ".join(parts)
 
 
+def _extract_batch_tensors(batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+        raise TypeError(
+            "Expected dataloader batch to be a tuple/list of at least (inputs, targets)."
+        )
+    X, y = batch[0], batch[1]
+    if not isinstance(X, torch.Tensor) or not isinstance(y, torch.Tensor):
+        raise TypeError("BatchNorm recalibration expects tensor inputs and tensor targets.")
+    return X, y
+
+
 def _build_early_stopping(
     training_arguments: DictConfig,
     run_history: RunHistory | None,
@@ -678,6 +813,37 @@ def _build_gate_mode_schedule(training_arguments: DictConfig) -> GateModeSchedul
     )
 
 
+def _build_batchnorm_recalibration(
+    training_arguments: DictConfig,
+) -> BatchNormRecalibrationState | None:
+    cfg = getattr(training_arguments, "batchnorm_recalibration", None)
+    if cfg is not None and not bool(getattr(cfg, "enabled", True)):
+        return None
+
+    return BatchNormRecalibrationState(
+        num_batches=(
+            200
+            if cfg is None
+            else int(getattr(cfg, "num_batches", 200))
+        ),
+        reset_running_stats=(
+            True
+            if cfg is None
+            else bool(getattr(cfg, "reset_running_stats", True))
+        ),
+        train_gate_mode=(
+            "deterministic_hard"
+            if cfg is None
+            else getattr(cfg, "train_gate_mode", "deterministic_hard")
+        ),
+        eval_gate_mode=(
+            "deterministic_hard"
+            if cfg is None
+            else getattr(cfg, "eval_gate_mode", "deterministic_hard")
+        ),
+    )
+
+
 def _build_collapse_guard(training_arguments: DictConfig) -> CollapseGuard | None:
     cfg = getattr(training_arguments, "collapse_guard", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -760,9 +926,11 @@ def train(model: nn.Module,
     early_stopping = _build_early_stopping(training_arguments, run_history)
     lambda_warmup = _build_lambda_warmup(training_arguments)
     gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
+    batchnorm_recalibration = _build_batchnorm_recalibration(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
+    recalibration_info: dict[str, Any] | None = None
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
@@ -921,6 +1089,29 @@ def train(model: nn.Module,
         if should_stop:
             break
 
+    if batchnorm_recalibration is not None:
+        recalibration_info = batchnorm_recalibration.apply(
+            model,
+            dataloaders.train_dataloader,
+            device=device,
+            progress_context=progress_context,
+        )
+        if run_history is not None:
+            runtime_metadata = dict(run_history.runtime_metadata)
+            runtime_metadata["batchnorm_recalibration"] = recalibration_info
+            run_history.set_runtime_metadata(runtime_metadata)
+            if recalibration_info.get("applied"):
+                run_history.save_checkpoint(
+                    "last.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=completed_epochs or total_epochs,
+                    metrics={
+                        **last_train_metrics,
+                        **last_valid_metrics,
+                    },
+                )
+
     final_epoch = completed_epochs or total_epochs
     evaluate(
         model,
@@ -953,6 +1144,8 @@ def train(model: nn.Module,
         "last_valid_metrics": last_valid_metrics,
         "test_metrics": dict(test_metrics),
     }
+    if recalibration_info is not None:
+        result["batchnorm_recalibration"] = recalibration_info
     if stop_info is not None:
         result.update(stop_info)
     return result

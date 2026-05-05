@@ -415,6 +415,10 @@ class RunHistory:
         cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
         warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
         gate_mode_schedule_cfg = OmegaConf.select(self.config, "training_arguments.gate_mode_schedule")
+        batchnorm_recalibration_cfg = OmegaConf.select(
+            self.config,
+            "training_arguments.batchnorm_recalibration",
+        )
         summary = {
             "schema_version": 2,
             "identity": {
@@ -433,6 +437,11 @@ class RunHistory:
                 "training_arguments.gate_mode_schedule": (
                     OmegaConf.to_container(gate_mode_schedule_cfg, resolve=True)
                     if gate_mode_schedule_cfg is not None
+                    else None
+                ),
+                "training_arguments.batchnorm_recalibration": (
+                    OmegaConf.to_container(batchnorm_recalibration_cfg, resolve=True)
+                    if batchnorm_recalibration_cfg is not None
                     else None
                 ),
             },

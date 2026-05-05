@@ -9,6 +9,12 @@ training_arguments:
     target_lambda_coef: 0.0
     ramp_epochs: 1
     bypass_during_warmup: true
+  batchnorm_recalibration:
+    enabled: true
+    num_batches: 200
+    reset_running_stats: true
+    train_gate_mode: deterministic_hard
+    eval_gate_mode: deterministic_hard
   early_stopping:
     enabled: false  # Skip the per-epoch early stopping check for this recipe.
     patience: 40
