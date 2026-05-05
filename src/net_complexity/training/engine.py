@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
-from net_complexity.models.feature_selection import get_gumbel_modules
+from net_complexity.models.feature_selection import get_gumbel_modules, get_stg_modules
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
@@ -26,6 +26,21 @@ EpochEndCallback = Callable[
 ]
 ProgressContext = Mapping[str, Any]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
+
+
+@dataclass(frozen=True)
+class OptimizerBuildInfo:
+    gate_weight_decay_scale: float | None = None
+    gate_weight_decay: float | None = None
+    gate_param_group_enabled: bool = False
+    num_gates: int = 0
+    num_gate_param_tensors: int = 0
+
+
+@dataclass(frozen=True)
+class GateParameterSpec:
+    parameter: nn.Parameter
+    num_gates: int
 
 
 @dataclass
@@ -95,6 +110,103 @@ def _build_scheduler(config: DictConfig, optimizer: torch.optim.Optimizer) -> Sc
         interval=str(getattr(scheduler_cfg, "interval", "epoch")),
         monitor=getattr(scheduler_cfg, "monitor", None),
         frequency=int(getattr(scheduler_cfg, "frequency", 1)),
+    )
+
+
+def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
+    gate_specs: list[GateParameterSpec] = []
+    seen_parameter_ids: set[int] = set()
+
+    for module in get_gumbel_modules(model).values():
+        parameter = module.logits
+        parameter_id = id(parameter)
+        if parameter.requires_grad and parameter_id not in seen_parameter_ids:
+            gate_specs.append(
+                GateParameterSpec(
+                    parameter=parameter,
+                    num_gates=int(parameter.shape[0]),
+                )
+            )
+            seen_parameter_ids.add(parameter_id)
+
+    for module in get_stg_modules(model).values():
+        parameter = module.mu
+        parameter_id = id(parameter)
+        if parameter.requires_grad and parameter_id not in seen_parameter_ids:
+            gate_specs.append(
+                GateParameterSpec(
+                    parameter=parameter,
+                    num_gates=int(parameter.numel()),
+                )
+            )
+            seen_parameter_ids.add(parameter_id)
+
+    return gate_specs
+
+
+def _build_optimizer(
+    config: DictConfig,
+    model: nn.Module,
+) -> tuple[torch.optim.Optimizer, OptimizerBuildInfo]:
+    optimizer_cfg = getattr(config, "optimizer", None)
+    if optimizer_cfg is None:
+        raise ValueError("optimizer config must be defined.")
+
+    optimizer_kwargs = {
+        key: value
+        for key, value in optimizer_cfg.items()
+        if key != "gate_weight_decay_scale"
+    }
+    gate_weight_decay_scale = getattr(optimizer_cfg, "gate_weight_decay_scale", None)
+    if gate_weight_decay_scale is None:
+        return (
+            instantiate(optimizer_kwargs, params=model.parameters(), _convert_="all"),
+            OptimizerBuildInfo(),
+        )
+
+    gate_weight_decay_scale = float(gate_weight_decay_scale)
+    if gate_weight_decay_scale < 0.0:
+        raise ValueError("optimizer.gate_weight_decay_scale must be >= 0.")
+
+    gate_specs = _iter_gate_parameter_specs(model)
+    num_gates = sum(spec.num_gates for spec in gate_specs)
+    if num_gates <= 0:
+        return (
+            instantiate(optimizer_kwargs, params=model.parameters(), _convert_="all"),
+            OptimizerBuildInfo(gate_weight_decay_scale=gate_weight_decay_scale),
+        )
+
+    gate_parameter_ids = {id(spec.parameter) for spec in gate_specs}
+    base_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in gate_parameter_ids
+    ]
+    gate_parameters = [spec.parameter for spec in gate_specs]
+
+    base_weight_decay = float(getattr(optimizer_cfg, "weight_decay", 0.0))
+    gate_weight_decay = base_weight_decay * gate_weight_decay_scale / float(num_gates)
+    param_groups: list[dict[str, Any]] = []
+    if base_parameters:
+        param_groups.append({
+            "params": base_parameters,
+            "weight_decay": base_weight_decay,
+        })
+    param_groups.append({
+        "params": gate_parameters,
+        "weight_decay": gate_weight_decay,
+    })
+
+    optimizer = instantiate(optimizer_kwargs, params=param_groups, _convert_="all")
+    return (
+        optimizer,
+        OptimizerBuildInfo(
+            gate_weight_decay_scale=gate_weight_decay_scale,
+            gate_weight_decay=gate_weight_decay,
+            gate_param_group_enabled=True,
+            num_gates=num_gates,
+            num_gate_param_tensors=len(gate_parameters),
+        ),
     )
 
 
@@ -1177,6 +1289,7 @@ def log_training_metadata(
     mlflow_logger: MLflowLogger | None,
     config: DictConfig | None = None,
     runtime_snapshot: Mapping[str, Any] | None = None,
+    optimizer_build_info: OptimizerBuildInfo | None = None,
 ) -> None:
     if mlflow_logger is None:
         return
@@ -1207,6 +1320,14 @@ def log_training_metadata(
             "runtime.model_lambda_coef": runtime_snapshot.get("model_lambda_coef"),
             "runtime.gumbel_bypass_enabled": runtime_snapshot.get("gumbel_bypass_enabled"),
             "runtime.run_name": runtime_snapshot.get("run_name"),
+        })
+    if optimizer_build_info is not None and optimizer_build_info.gate_weight_decay_scale is not None:
+        params.update({
+            "optimizer.gate_weight_decay_scale": optimizer_build_info.gate_weight_decay_scale,
+            "optimizer.gate_param_group_enabled": optimizer_build_info.gate_param_group_enabled,
+            "optimizer.num_gates": optimizer_build_info.num_gates,
+            "optimizer.num_gate_param_tensors": optimizer_build_info.num_gate_param_tensors,
+            "optimizer.gate_weight_decay": optimizer_build_info.gate_weight_decay,
         })
     mlflow_logger.log_params({
         key: value for key, value in params.items() if value is not None
@@ -1248,7 +1369,7 @@ def run_training(
     if gate_mode_schedule is not None:
         gate_mode_schedule.apply_initial_state(model)
     dataloaders = instantiate(config.dataloaders)
-    optimizer = instantiate(config.optimizer, params=model.parameters())
+    optimizer, optimizer_build_info = _build_optimizer(config, model)
     scheduler_state = _build_scheduler(config, optimizer)
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_cfg = getattr(config, "mlflow", None)
@@ -1274,6 +1395,7 @@ def run_training(
             mlflow_logger,
             config=config,
             runtime_snapshot=runtime_snapshot,
+            optimizer_build_info=optimizer_build_info,
         )
 
     try:

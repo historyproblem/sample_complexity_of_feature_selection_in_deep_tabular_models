@@ -95,6 +95,7 @@ def test_before_refactor_stg_cifar10_preserves_old_recipe():
 def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel.yaml")
 
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
     assert cfg.model.gumbel_init_mode == "auto"
     assert cfg.model.bypass_on_zero_lambda is True
     assert cfg.model.backbone.resnet_block.beta == 1.0
@@ -301,6 +302,119 @@ def test_best_practice_resnet20_gumbel_warmup30_lambda1479470_uses_requested_rec
     assert (
         cfg.mlflow.tags.recipe
         == "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 0.15
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 30
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+    assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 0.15
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+    assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_baseline_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_baseline_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_baseline_lambda001_on_cifar10"
     )
 
 

@@ -1,5 +1,8 @@
 # @package _global_
 
+optimizer:
+  gate_weight_decay_scale: 20.0
+
 model:
   gumbel_init_mode: auto
   bypass_on_zero_lambda: true
