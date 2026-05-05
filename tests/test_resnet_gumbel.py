@@ -20,6 +20,15 @@ def _close_all_gates(block: GumbelBottleneckLayer) -> None:
         block.gumbel_layer.logits[:, 1] = 0.0
 
 
+def _set_reference_logits(layer: GumbelLayer) -> None:
+    with torch.no_grad():
+        layer.logits.copy_(torch.tensor([
+            [0.0, 0.0],
+            [0.0, 2.0],
+            [2.0, 0.0],
+        ]))
+
+
 def _build_wrapped_resnet50(
     lambda_coef: float,
     *,
@@ -135,12 +144,7 @@ def test_force_ones_mask_returns_identity_without_bypass():
 def test_deterministic_soft_mask_uses_on_probability_without_gumbel_sampling():
     layer = GumbelLayer(input_dim=3, temperature=0.75, deterministic_soft_mask=True)
     layer.train()
-    with torch.no_grad():
-        layer.logits.copy_(torch.tensor([
-            [0.0, 0.0],
-            [0.0, 2.0],
-            [2.0, 0.0],
-        ]))
+    _set_reference_logits(layer)
 
     x = torch.ones(2, 3, 4, 4)
 
@@ -156,12 +160,7 @@ def test_deterministic_soft_mask_uses_on_probability_without_gumbel_sampling():
 def test_deterministic_hard_mask_thresholds_on_probability_without_gumbel_sampling():
     layer = GumbelLayer(input_dim=3, temperature=0.75, deterministic_hard_mask=True)
     layer.train()
-    with torch.no_grad():
-        layer.logits.copy_(torch.tensor([
-            [0.0, 0.0],
-            [0.0, 2.0],
-            [2.0, 0.0],
-        ]))
+    _set_reference_logits(layer)
 
     x = torch.ones(2, 3, 4, 4)
 
@@ -172,6 +171,54 @@ def test_deterministic_hard_mask_thresholds_on_probability_without_gumbel_sampli
 
     assert layer.bypass is False
     torch.testing.assert_close(gated, expected)
+
+
+def test_train_eval_gate_modes_support_soft_train_hard_eval():
+    layer = GumbelLayer(
+        input_dim=3,
+        temperature=0.75,
+        train_gate_mode="deterministic_soft",
+        eval_gate_mode="deterministic_hard",
+    )
+    _set_reference_logits(layer)
+    x = torch.ones(2, 3, 4, 4)
+
+    layer.train()
+    with torch.no_grad():
+        train_gated = layer(x)
+
+    layer.eval()
+    with torch.no_grad():
+        eval_gated = layer(x)
+
+    expected_train = F.softmax(layer.logits, dim=1)[:, 1].view(1, 3, 1, 1).expand_as(x)
+    expected_eval = torch.tensor([0.0, 1.0, 0.0]).view(1, 3, 1, 1).expand_as(x)
+
+    torch.testing.assert_close(train_gated, expected_train)
+    torch.testing.assert_close(eval_gated, expected_eval)
+
+
+def test_ste_hard_uses_hard_forward_and_soft_backward():
+    layer = GumbelLayer(
+        input_dim=3,
+        temperature=0.75,
+        train_gate_mode="ste_hard",
+        eval_gate_mode="deterministic_hard",
+    )
+    _set_reference_logits(layer)
+    x = torch.ones(2, 3, 4, 4, requires_grad=True)
+
+    layer.train()
+    gated = layer(x)
+    expected_forward = torch.tensor([0.0, 1.0, 0.0]).view(1, 3, 1, 1).expand_as(gated)
+
+    torch.testing.assert_close(gated.detach(), expected_forward)
+
+    loss = gated.sum()
+    loss.backward()
+
+    assert layer.logits.grad is not None
+    assert float(layer.logits.grad.abs().sum().item()) > 0.0
 
 
 def test_gumbel_layer_rejects_conflicting_mask_modes():
@@ -186,6 +233,19 @@ def test_gumbel_layer_rejects_conflicting_mask_modes():
         assert "mutually exclusive" in str(error)
     else:
         raise AssertionError("Expected mutually exclusive mask modes to raise ValueError.")
+
+
+def test_gumbel_layer_rejects_mixing_legacy_flags_with_explicit_modes():
+    try:
+        GumbelLayer(
+            input_dim=3,
+            deterministic_soft_mask=True,
+            train_gate_mode="ste_hard",
+        )
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("Expected legacy flags mixed with explicit modes to raise ValueError.")
 
 
 def test_closed_gumbel_bottleneck_preserves_identity_shortcut():

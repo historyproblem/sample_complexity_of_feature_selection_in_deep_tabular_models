@@ -99,6 +99,9 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
     assert cfg.model.backbone.resnet_block.force_ones_mask is False
     assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
     assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
+    assert cfg.model.backbone.resnet_block.train_gate_mode is None
+    assert cfg.model.backbone.resnet_block.eval_gate_mode is None
+    assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
 
 
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
@@ -180,6 +183,35 @@ def test_best_practice_resnet50_gumbel_paper_init_lambda0_disables_bypass_and_wa
     assert cfg.run_history.log_gate_history is True
     assert cfg.mlflow.enabled is False
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_paper_init_lambda0_on_cifar10"
+
+
+def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_gate_modes_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.01
+    assert cfg.model.gumbel_init_mode == "paper"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.gate_mode_schedule.enabled is False
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_gate_modes_lambda001_on_cifar10"
 
 
 def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():

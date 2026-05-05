@@ -414,6 +414,7 @@ class RunHistory:
         duration_sec = (finished_at - self.started_at).total_seconds()
         cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
         warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
+        gate_mode_schedule_cfg = OmegaConf.select(self.config, "training_arguments.gate_mode_schedule")
         summary = {
             "schema_version": 2,
             "identity": {
@@ -427,6 +428,11 @@ class RunHistory:
                 "training_arguments.lambda_warmup": (
                     OmegaConf.to_container(warmup_cfg, resolve=True)
                     if warmup_cfg is not None
+                    else None
+                ),
+                "training_arguments.gate_mode_schedule": (
+                    OmegaConf.to_container(gate_mode_schedule_cfg, resolve=True)
+                    if gate_mode_schedule_cfg is not None
                     else None
                 ),
             },

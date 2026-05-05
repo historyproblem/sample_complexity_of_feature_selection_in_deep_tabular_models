@@ -151,6 +151,22 @@ def _apply_grid_points(
     return point_index, suggested_params
 
 
+def _apply_grid_points_in_order(
+    trial: optuna.Trial,
+    config: DictConfig,
+    grid_points: list[dict[str, Any]],
+) -> tuple[int, dict[str, Any]]:
+    point_index = int(trial.number)
+    if point_index < 0 or point_index >= len(grid_points):
+        raise IndexError(
+            f"Ordered grid point index {point_index} is out of range for {len(grid_points)} points."
+        )
+    suggested_params = dict(grid_points[point_index])
+    for path, value in suggested_params.items():
+        OmegaConf.update(config, path, value, merge=False)
+    return point_index, suggested_params
+
+
 def _update_trial_metadata(config: DictConfig, tuning_cfg: DictConfig, trial: optuna.Trial) -> None:
     base_run_name = OmegaConf.select(config, "mlflow.run_name")
     if base_run_name is None:
@@ -496,12 +512,13 @@ def _build_study(
     *,
     mode: str,
     grid_search_space: dict[str, list[Any]] | None = None,
+    points_in_order: bool = False,
 ) -> optuna.Study:
     tuning_cfg = config.tuning
     if mode == "grid":
         if not grid_search_space:
             raise ValueError("Grid search mode requires a non-empty search space or explicit points.")
-        sampler = optuna.samplers.GridSampler(grid_search_space)
+        sampler = None if points_in_order else optuna.samplers.GridSampler(grid_search_space)
         pruner = (
             instantiate(tuning_cfg.pruner)
             if getattr(tuning_cfg, "pruner", None)
@@ -537,6 +554,7 @@ def main(config: DictConfig) -> None:
     grid_points = build_grid_points(getattr(tuning_cfg, "points", None)) if mode == "grid" else []
     has_search_space = bool(search_space_cfg)
     has_grid_points = bool(grid_points)
+    points_in_order = bool(getattr(tuning_cfg, "points_in_order", False))
 
     if mode == "optuna":
         if not has_search_space:
@@ -548,6 +566,10 @@ def main(config: DictConfig) -> None:
             raise ValueError(
                 "Grid tuning requires exactly one of config.tuning.search_space or config.tuning.points."
             )
+        if points_in_order and not has_grid_points:
+            raise ValueError("config.tuning.points_in_order is only supported with config.tuning.points.")
+        if points_in_order and int(getattr(tuning_cfg, "n_jobs", 1)) != 1:
+            raise ValueError("config.tuning.points_in_order requires config.tuning.n_jobs == 1.")
 
     grid_search_space = None
     if mode == "grid":
@@ -584,11 +606,16 @@ def main(config: DictConfig) -> None:
     if mode == "grid":
         print(
             f"Grid search artifacts and trial runs: {study_dir} | points={effective_trials} | "
-            f"repeats={repeats_per_trial}"
+            f"repeats={repeats_per_trial} | ordered_points={points_in_order}"
         )
     else:
         print(f"Optuna artifacts and trial runs: {study_dir} | repeats={repeats_per_trial}")
-    study = _build_study(config, mode=mode, grid_search_space=grid_search_space)
+    study = _build_study(
+        config,
+        mode=mode,
+        grid_search_space=grid_search_space,
+        points_in_order=points_in_order,
+    )
 
     def objective(trial: optuna.Trial) -> float:
         display_trial_idx = trial.number + 1
@@ -596,7 +623,14 @@ def main(config: DictConfig) -> None:
         trial_config = _clone_config(config)
         if mode == "grid":
             if has_grid_points:
-                point_index, suggested_params = _apply_grid_points(trial, trial_config, grid_points)
+                if points_in_order:
+                    point_index, suggested_params = _apply_grid_points_in_order(
+                        trial,
+                        trial_config,
+                        grid_points,
+                    )
+                else:
+                    point_index, suggested_params = _apply_grid_points(trial, trial_config, grid_points)
                 trial.set_user_attr("grid_point_index", point_index)
             else:
                 suggested_params = _apply_grid_search_space(trial, trial_config, grid_search_space or {})
@@ -666,6 +700,7 @@ def main(config: DictConfig) -> None:
                     "display_trial_idx": display_trial_idx,
                     "trial_total": trial_total,
                     "optuna_trial_number": trial.number,
+                    "grid_point_index": trial.user_attrs.get("grid_point_index"),
                     "repeat_number": repeat_index,
                     "repeat_total": repeats_per_trial,
                     "attempt_number": attempt_index,

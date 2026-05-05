@@ -1,0 +1,49 @@
+# @package _global_
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "gumbel_resnet50_gate_mode_abc_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 3
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.01
+      model.backbone.resnet_block.train_gate_mode: deterministic_soft
+      model.backbone.resnet_block.eval_gate_mode: deterministic_hard
+      mlflow.tags.mask_mode_variant: variant_a_soft_train_hard_prune
+      training_arguments.gate_mode_schedule.enabled: false
+    - model.lambda_coef: 0.01
+      model.backbone.resnet_block.train_gate_mode: ste_hard
+      model.backbone.resnet_block.eval_gate_mode: deterministic_hard
+      mlflow.tags.mask_mode_variant: variant_b_hard_forward_soft_backward_ste
+      training_arguments.gate_mode_schedule.enabled: false
+    - model.lambda_coef: 0.01
+      model.backbone.resnet_block.train_gate_mode: gumbel_hard
+      model.backbone.resnet_block.eval_gate_mode: deterministic_hard
+      mlflow.tags.mask_mode_variant: variant_c_delayed_gumbel
+      training_arguments.gate_mode_schedule.enabled: true
+      training_arguments.gate_mode_schedule.start_epoch: 31
+      training_arguments.gate_mode_schedule.initial_train_gate_mode: deterministic_soft
+      training_arguments.gate_mode_schedule.initial_eval_gate_mode: deterministic_soft
+      training_arguments.gate_mode_schedule.target_train_gate_mode: gumbel_hard
+      training_arguments.gate_mode_schedule.target_eval_gate_mode: deterministic_hard

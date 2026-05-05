@@ -146,6 +146,7 @@ def _build_runtime_debug_snapshot(
             else None
         ),
         "optuna_trial_number": progress_context.get("optuna_trial_number"),
+        "grid_point_index": progress_context.get("grid_point_index"),
         "repeat": (
             f"{repeat_number}/{repeat_total}"
             if repeat_number is not None and repeat_total is not None
@@ -169,6 +170,8 @@ def _build_runtime_debug_snapshot(
         "cfg_model_lambda_coef": _resolve_lambda_value(config),
         "model_lambda_coef": _resolve_model_lambda_coef(model),
         "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+        "gumbel_train_gate_mode": _resolve_model_gumbel_gate_modes(model)[0],
+        "gumbel_eval_gate_mode": _resolve_model_gumbel_gate_modes(model)[1],
         "run_name": str(run_history.run_name),
         "run_dir": str(run_history.run_dir),
     }
@@ -223,6 +226,7 @@ def _log_runtime_debug_snapshot(snapshot: Mapping[str, Any]) -> None:
     parts = [
         f"display_trial={snapshot.get('display_trial')}",
         f"optuna_trial_number={snapshot.get('optuna_trial_number')}",
+        f"grid_point_index={snapshot.get('grid_point_index')}",
         f"repeat={snapshot.get('repeat')}",
         f"attempt={snapshot.get('attempt')}",
         f"grid_params['{LAMBDA_CONFIG_PATH}']={snapshot.get('grid_model_lambda_coef')}",
@@ -230,6 +234,8 @@ def _log_runtime_debug_snapshot(snapshot: Mapping[str, Any]) -> None:
         f"cfg.{LAMBDA_CONFIG_PATH}={snapshot.get('cfg_model_lambda_coef')}",
         f"model.lambda_coef={snapshot.get('model_lambda_coef')}",
         f"gumbel_bypass_enabled={snapshot.get('gumbel_bypass_enabled')}",
+        f"gumbel_train_gate_mode={snapshot.get('gumbel_train_gate_mode')}",
+        f"gumbel_eval_gate_mode={snapshot.get('gumbel_eval_gate_mode')}",
         f"run_name={snapshot.get('run_name')}",
         f"run_dir={snapshot.get('run_dir')}",
     ]
@@ -393,6 +399,67 @@ class LambdaWarmupState:
         return True
 
 
+@dataclass
+class GateModeScheduleState:
+    start_epoch: int
+    initial_train_gate_mode: str
+    target_train_gate_mode: str
+    initial_eval_gate_mode: str
+    target_eval_gate_mode: str
+    last_applied_train_gate_mode: str | None = None
+    last_applied_eval_gate_mode: str | None = None
+
+    def apply_initial_state(self, model: nn.Module) -> None:
+        self._apply(
+            model,
+            train_gate_mode=self.initial_train_gate_mode,
+            eval_gate_mode=self.initial_eval_gate_mode,
+            reason="init",
+        )
+
+    def step(self, epoch: int, model: nn.Module) -> bool:
+        train_gate_mode, eval_gate_mode, phase = self.resolve_epoch_state(epoch)
+        return self._apply(
+            model,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            reason=f"epoch={epoch} phase={phase}",
+        )
+
+    def resolve_epoch_state(self, epoch: int) -> tuple[str, str, str]:
+        epoch = int(epoch)
+        if epoch < self.start_epoch:
+            return self.initial_train_gate_mode, self.initial_eval_gate_mode, "warmup"
+        return self.target_train_gate_mode, self.target_eval_gate_mode, "active"
+
+    def _apply(
+        self,
+        model: nn.Module,
+        *,
+        train_gate_mode: str,
+        eval_gate_mode: str,
+        reason: str,
+    ) -> bool:
+        if (
+            self.last_applied_train_gate_mode == str(train_gate_mode)
+            and self.last_applied_eval_gate_mode == str(eval_gate_mode)
+        ):
+            return False
+
+        _set_model_gumbel_gate_modes(
+            model,
+            train_gate_mode=str(train_gate_mode),
+            eval_gate_mode=str(eval_gate_mode),
+        )
+        self.last_applied_train_gate_mode = str(train_gate_mode)
+        self.last_applied_eval_gate_mode = str(eval_gate_mode)
+        print(
+            f"Gate mode schedule update | {reason} | "
+            f"train_gate_mode={train_gate_mode} | eval_gate_mode={eval_gate_mode}"
+        )
+        return True
+
+
 def _set_model_lambda_coef(
     model: nn.Module,
     lambda_coef: float,
@@ -410,6 +477,29 @@ def _set_model_lambda_coef(
             module.set_bypass(bool(bypass_gumbel))
 
 
+def _set_model_gumbel_gate_modes(
+    model: nn.Module,
+    *,
+    train_gate_mode: str | None = None,
+    eval_gate_mode: str | None = None,
+) -> None:
+    if hasattr(model, "set_gumbel_gate_modes"):
+        model.set_gumbel_gate_modes(
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+        )
+        return
+
+    gumbel_modules = get_gumbel_modules(model)
+    if not gumbel_modules:
+        raise AttributeError("Configured gate mode schedule requires a model with Gumbel modules.")
+    for module in gumbel_modules.values():
+        module.set_gate_modes(
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+        )
+
+
 def _resolve_model_lambda_coef(model: nn.Module) -> float | None:
     return _to_float(getattr(model, "lambda_coef", None))
 
@@ -419,6 +509,17 @@ def _resolve_model_gumbel_bypass(model: nn.Module) -> float | None:
     if not gumbel_modules:
         return None
     return float(any(module.bypass for module in gumbel_modules.values()))
+
+
+def _resolve_model_gumbel_gate_modes(model: nn.Module) -> tuple[str | None, str | None]:
+    gumbel_modules = get_gumbel_modules(model)
+    if not gumbel_modules:
+        return None, None
+    first_module = next(iter(gumbel_modules.values()))
+    return (
+        str(getattr(first_module, "train_gate_mode", None)),
+        str(getattr(first_module, "eval_gate_mode", None)),
+    )
 
 
 def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
@@ -550,6 +651,33 @@ def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | 
     )
 
 
+def _build_gate_mode_schedule(training_arguments: DictConfig) -> GateModeScheduleState | None:
+    cfg = getattr(training_arguments, "gate_mode_schedule", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    start_epoch = int(getattr(cfg, "start_epoch"))
+    if start_epoch <= 0:
+        raise ValueError("training_arguments.gate_mode_schedule.start_epoch must be >= 1.")
+
+    initial_train_gate_mode = str(getattr(cfg, "initial_train_gate_mode"))
+    target_train_gate_mode = str(getattr(cfg, "target_train_gate_mode"))
+    initial_eval_gate_mode = str(
+        getattr(cfg, "initial_eval_gate_mode", getattr(cfg, "initial_train_gate_mode"))
+    )
+    target_eval_gate_mode = str(
+        getattr(cfg, "target_eval_gate_mode", getattr(cfg, "target_train_gate_mode"))
+    )
+
+    return GateModeScheduleState(
+        start_epoch=start_epoch,
+        initial_train_gate_mode=initial_train_gate_mode,
+        target_train_gate_mode=target_train_gate_mode,
+        initial_eval_gate_mode=initial_eval_gate_mode,
+        target_eval_gate_mode=target_eval_gate_mode,
+    )
+
+
 def _build_collapse_guard(training_arguments: DictConfig) -> CollapseGuard | None:
     cfg = getattr(training_arguments, "collapse_guard", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -631,6 +759,7 @@ def train(model: nn.Module,
     total_epochs = int(training_arguments.num_epochs)
     early_stopping = _build_early_stopping(training_arguments, run_history)
     lambda_warmup = _build_lambda_warmup(training_arguments)
+    gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
@@ -639,6 +768,8 @@ def train(model: nn.Module,
         epoch_num = epoch + 1
         if lambda_warmup is not None:
             lambda_warmup.step(epoch_num, model)
+        if gate_mode_schedule is not None:
+            gate_mode_schedule.step(epoch_num, model)
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
@@ -920,6 +1051,9 @@ def run_training(
     lambda_warmup = _build_lambda_warmup(config.training_arguments)
     if lambda_warmup is not None:
         lambda_warmup.apply_initial_state(model)
+    gate_mode_schedule = _build_gate_mode_schedule(config.training_arguments)
+    if gate_mode_schedule is not None:
+        gate_mode_schedule.apply_initial_state(model)
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
     scheduler_state = _build_scheduler(config, optimizer)

@@ -69,6 +69,18 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         for module in get_gumbel_modules(self.backbone).values():
             module.set_bypass(enabled)
 
+    def set_gumbel_gate_modes(
+        self,
+        *,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+    ) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_gate_modes(
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+            )
+
     def set_lambda_coef(self, lambda_coef: float, *, bypass_gumbel: bool | None = None) -> None:
         self.lambda_coef = float(lambda_coef)
         if bypass_gumbel is None:
@@ -161,6 +173,13 @@ class GumbelLayer(nn.Module):
     FULLY_OPEN_OFF_LOGIT = -10.0
     FULLY_OPEN_ON_LOGIT = 10.0
     FULLY_OPEN_NOISE_SCALE = 0.0
+    VALID_GATE_MODES = {
+        "gumbel_hard",
+        "deterministic_soft",
+        "deterministic_hard",
+        "ste_hard",
+        "ones",
+    }
 
     def __init__(
         self,
@@ -169,24 +188,87 @@ class GumbelLayer(nn.Module):
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
     ):
         super().__init__()
         self.logits = nn.Parameter(torch.empty(input_dim, 2))
         self.temperature = temperature
-        self.force_ones_mask = bool(force_ones_mask)
-        self.deterministic_soft_mask = bool(deterministic_soft_mask)
-        self.deterministic_hard_mask = bool(deterministic_hard_mask)
-        active_mask_modes = [
+        self.gate_threshold = float(gate_threshold)
+        if not 0.0 <= self.gate_threshold <= 1.0:
+            raise ValueError("gate_threshold must be within [0.0, 1.0].")
+        (
             self.force_ones_mask,
             self.deterministic_soft_mask,
             self.deterministic_hard_mask,
-        ]
-        if sum(bool(flag) for flag in active_mask_modes) > 1:
+            self.train_gate_mode,
+            self.eval_gate_mode,
+        ) = self._resolve_gate_mode_configuration(
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+        )
+        self._bypass = False
+        self.reset_parameters()
+
+    @classmethod
+    def _normalize_gate_mode(cls, mode: str | None) -> str | None:
+        if mode is None:
+            return None
+        normalized = str(mode).strip().lower()
+        if normalized not in cls.VALID_GATE_MODES:
+            allowed = ", ".join(sorted(cls.VALID_GATE_MODES))
+            raise ValueError(f"gate mode must be one of: {allowed}. Got: {mode!r}")
+        return normalized
+
+    @classmethod
+    def _resolve_gate_mode_configuration(
+        cls,
+        *,
+        force_ones_mask: bool,
+        deterministic_soft_mask: bool,
+        deterministic_hard_mask: bool,
+        train_gate_mode: str | None,
+        eval_gate_mode: str | None,
+    ) -> tuple[bool, bool, bool, str, str]:
+        legacy_flags = {
+            "ones": bool(force_ones_mask),
+            "deterministic_soft": bool(deterministic_soft_mask),
+            "deterministic_hard": bool(deterministic_hard_mask),
+        }
+        enabled_legacy_modes = [mode for mode, enabled in legacy_flags.items() if enabled]
+        normalized_train = cls._normalize_gate_mode(train_gate_mode)
+        normalized_eval = cls._normalize_gate_mode(eval_gate_mode)
+
+        if enabled_legacy_modes and (normalized_train is not None or normalized_eval is not None):
+            raise ValueError(
+                "Legacy mask flags and explicit train/eval gate modes are mutually exclusive."
+            )
+        if len(enabled_legacy_modes) > 1:
             raise ValueError(
                 "force_ones_mask, deterministic_soft_mask, and deterministic_hard_mask are mutually exclusive."
             )
-        self._bypass = False
-        self.reset_parameters()
+
+        if enabled_legacy_modes:
+            legacy_mode = enabled_legacy_modes[0]
+            normalized_train = legacy_mode
+            normalized_eval = legacy_mode
+
+        if normalized_train is None:
+            normalized_train = "gumbel_hard"
+        if normalized_eval is None:
+            normalized_eval = "deterministic_hard"
+
+        return (
+            bool(force_ones_mask),
+            bool(deterministic_soft_mask),
+            bool(deterministic_hard_mask),
+            normalized_train,
+            normalized_eval,
+        )
 
     def reset_parameters(self, init_mode: str = "paper") -> None:
         mode = str(init_mode).lower()
@@ -212,10 +294,59 @@ class GumbelLayer(nn.Module):
     def set_bypass(self, enabled: bool) -> None:
         self._bypass = bool(enabled)
 
+    def set_gate_modes(
+        self,
+        *,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+    ) -> None:
+        if train_gate_mode is not None:
+            self.train_gate_mode = self._normalize_gate_mode(train_gate_mode)
+        if eval_gate_mode is not None:
+            self.eval_gate_mode = self._normalize_gate_mode(eval_gate_mode)
+        self.force_ones_mask = self.train_gate_mode == "ones" and self.eval_gate_mode == "ones"
+        self.deterministic_soft_mask = (
+            self.train_gate_mode == "deterministic_soft"
+            and self.eval_gate_mode == "deterministic_soft"
+        )
+        self.deterministic_hard_mask = (
+            self.train_gate_mode == "deterministic_hard"
+            and self.eval_gate_mode == "deterministic_hard"
+        )
+
     @property
     def bypass(self) -> bool:
         return self._bypass
 
+    def _selection_probs(self, batch_size: int) -> torch.Tensor:
+        probs_on = F.softmax(self.logits, dim=1)[:, 1].unsqueeze(0)
+        return probs_on.expand(batch_size, -1)
+
+    def _hard_threshold_mask(self, batch_size: int) -> torch.Tensor:
+        probs_on = self._selection_probs(batch_size)
+        return (probs_on > self.gate_threshold).float()
+
+    def _compute_mode_gates(self, mode: str, batch_size: int) -> torch.Tensor:
+        if mode == "ones":
+            return self.logits.new_ones((batch_size, self.logits.shape[0]))
+        if mode == "deterministic_soft":
+            return self._selection_probs(batch_size)
+        if mode == "deterministic_hard":
+            return self._hard_threshold_mask(batch_size)
+        if mode == "ste_hard":
+            soft_mask = self._selection_probs(batch_size)
+            hard_mask = self._hard_threshold_mask(batch_size)
+            return hard_mask.detach() - soft_mask.detach() + soft_mask
+        if mode == "gumbel_hard":
+            logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
+            sampled = F.gumbel_softmax(
+                logits,
+                tau=self.temperature,
+                hard=True,
+                dim=-1,
+            )
+            return sampled[..., 1]
+        raise AssertionError(f"Unhandled gate mode: {mode}")
 
     # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
@@ -225,27 +356,8 @@ class GumbelLayer(nn.Module):
             while len(gates.shape) < len(x.shape):
                 gates = gates.unsqueeze(-1)
             return gates
-        if self.force_ones_mask:
-            gates = x.new_ones((batch_size, self.logits.shape[0]))
-        elif self.deterministic_soft_mask:
-            gates = F.softmax(self.logits, dim=1)[:, 1].unsqueeze(0)
-            gates = gates.expand(batch_size, -1)
-        elif self.deterministic_hard_mask:
-            probs_on = F.softmax(self.logits, dim=1)[:, 1]
-            gates = (probs_on > 0.5).float().unsqueeze(0)
-            gates = gates.expand(batch_size, -1)
-        elif self.training:
-            logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
-            sampled = F.gumbel_softmax(
-                logits,
-                tau=self.temperature,
-                hard=True,
-                dim=-1
-            )
-            gates = sampled[..., 1]
-        else:
-            gates = (self.logits[:, 1] > self.logits[:, 0]).float().unsqueeze(0)
-            gates = gates.expand(batch_size, -1)
+        active_mode = self.train_gate_mode if self.training else self.eval_gate_mode
+        gates = self._compute_mode_gates(active_mode, batch_size)
         while len(gates.shape) < len(x.shape):
             gates = gates.unsqueeze(-1)
         return gates
@@ -395,6 +507,9 @@ class GumbelBottleneckLayer(Bottleneck):
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
     ):
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
         self.gumbel_layer = GumbelLayer(
@@ -403,6 +518,9 @@ class GumbelBottleneckLayer(Bottleneck):
             force_ones_mask=force_ones_mask,
             deterministic_soft_mask=deterministic_soft_mask,
             deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
         )
 
     def forward(self, x):
@@ -433,6 +551,9 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         force_ones_mask: bool = False,
         deterministic_soft_mask: bool = False,
         deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
     ):
         super().__init__(in_planes, planes, stride=stride, option=option)
         self.gumbel_layer = GumbelLayer(
@@ -441,6 +562,9 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
             force_ones_mask=force_ones_mask,
             deterministic_soft_mask=deterministic_soft_mask,
             deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
         )
 
     def forward(self, x):

@@ -15,3 +15,6 @@ model:
       force_ones_mask: false
       deterministic_soft_mask: false
       deterministic_hard_mask: false
+      train_gate_mode: null
+      eval_gate_mode: null
+      gate_threshold: 0.5
