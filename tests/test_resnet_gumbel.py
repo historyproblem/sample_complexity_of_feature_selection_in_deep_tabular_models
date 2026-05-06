@@ -33,6 +33,7 @@ def _build_wrapped_resnet50(
     lambda_coef: float,
     *,
     bypass_on_zero_lambda: bool = True,
+    gumbel_init_mode: str = "auto",
 ) -> ClassificationFeatureSelectionWrapper:
     backbone = ResNet50(
         num_classes=5,
@@ -42,6 +43,7 @@ def _build_wrapped_resnet50(
     return ClassificationFeatureSelectionWrapper(
         backbone=backbone,
         lambda_coef=lambda_coef,
+        gumbel_init_mode=gumbel_init_mode,
         bypass_on_zero_lambda=bypass_on_zero_lambda,
     )
 
@@ -99,6 +101,23 @@ def test_wrapper_uses_paper_gumbel_init_when_lambda_is_positive():
     mean_selection_prob = float(selection_probs.mean().item())
 
     assert 0.84 < mean_selection_prob < 0.90
+    assert all(not module.bypass for module in gumbel_modules.values())
+
+
+def test_wrapper_supports_resnet50_specific_paper_init_mode():
+    wrapper = _build_wrapped_resnet50(
+        lambda_coef=0.0,
+        bypass_on_zero_lambda=False,
+        gumbel_init_mode="paper_resnet50",
+    )
+
+    gumbel_modules = get_gumbel_modules(wrapper.backbone)
+    selection_probs = torch.cat(
+        [module.get_selection_probs() for module in gumbel_modules.values()]
+    )
+    mean_selection_prob = float(selection_probs.mean().item())
+
+    assert 0.97 < mean_selection_prob < 0.99
     assert all(not module.bypass for module in gumbel_modules.values())
 
 

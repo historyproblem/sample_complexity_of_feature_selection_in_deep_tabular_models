@@ -52,10 +52,10 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         mode = str(self.gumbel_init_mode).lower()
         if mode == "auto":
             return "fully_open" if self._should_bypass_gumbel() else "paper"
-        if mode in {"paper", "fully_open"}:
+        if mode in {"paper", "paper_resnet50", "fully_open"}:
             return mode
         raise ValueError(
-            "gumbel_init_mode must be one of: 'auto', 'paper', 'fully_open'."
+            "gumbel_init_mode must be one of: 'auto', 'paper', 'paper_resnet50', 'fully_open'."
         )
 
     def _initialize_gumbel_layers(self) -> None:
@@ -170,6 +170,9 @@ class GumbelLayer(nn.Module):
     PAPER_INIT_OFF_LOGIT = 0.1
     PAPER_INIT_ON_LOGIT = 2.0
     PAPER_INIT_NOISE_SCALE = 0.02
+    PAPER_RESNET50_INIT_OFF_LOGIT = 0.1
+    PAPER_RESNET50_INIT_ON_LOGIT = 4.0
+    PAPER_RESNET50_INIT_NOISE_SCALE = 0.02
     FULLY_OPEN_OFF_LOGIT = -10.0
     FULLY_OPEN_ON_LOGIT = 10.0
     FULLY_OPEN_NOISE_SCALE = 0.0
@@ -280,13 +283,17 @@ class GumbelLayer(nn.Module):
             off_logit = self.PAPER_INIT_OFF_LOGIT
             on_logit = self.PAPER_INIT_ON_LOGIT
             noise_scale = self.PAPER_INIT_NOISE_SCALE
+        elif mode == "paper_resnet50":
+            off_logit = self.PAPER_RESNET50_INIT_OFF_LOGIT
+            on_logit = self.PAPER_RESNET50_INIT_ON_LOGIT
+            noise_scale = self.PAPER_RESNET50_INIT_NOISE_SCALE
         elif mode == "fully_open":
             off_logit = self.FULLY_OPEN_OFF_LOGIT
             on_logit = self.FULLY_OPEN_ON_LOGIT
             noise_scale = self.FULLY_OPEN_NOISE_SCALE
         else:
             raise ValueError(
-                "init_mode must be one of: 'paper', 'fully_open'."
+                "init_mode must be one of: 'paper', 'paper_resnet50', 'fully_open'."
             )
 
         with torch.no_grad():

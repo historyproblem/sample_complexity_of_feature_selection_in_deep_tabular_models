@@ -203,6 +203,80 @@ def test_best_practice_resnet50_gumbel_paper_init_lambda0_disables_bypass_and_wa
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_paper_init_lambda0_on_cifar10"
 
 
+def test_best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_uses_resnet50_specific_init():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_starts_ramp_from_epoch_one():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 1
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_on_cifar10"
+    )
+
+
 def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():
     cfg = OmegaConf.load(
         CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_gate_modes_lambda001_on_cifar10.yaml"

@@ -790,6 +790,13 @@ def _format_metric(value: Any) -> str:
     return "n/a"
 
 
+def _prefix_metric_keys(metrics: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    normalized_prefix = str(prefix).strip()
+    if not normalized_prefix:
+        return dict(metrics)
+    return {f"{normalized_prefix}_{key}": value for key, value in metrics.items()}
+
+
 def _build_epoch_log_line(
     epoch: int,
     total_epochs: int,
@@ -820,6 +827,32 @@ def _build_epoch_log_line(
     train_zero_prob = train_metrics.get("train_average_zero_prob")
     if train_zero_prob is not None:
         parts.append(f"train_zero={_format_metric(train_zero_prob)}")
+
+    valid_zero_prob = valid_metrics.get("valid_average_zero_prob")
+    if valid_zero_prob is not None:
+        parts.append(f"val_zero={_format_metric(valid_zero_prob)}")
+
+    return " | ".join(parts)
+
+
+def _build_post_recalibration_valid_log_line(
+    valid_metrics: Mapping[str, Any],
+    valid_time: float,
+    progress_context: ProgressContext | None = None,
+) -> str:
+    parts: list[str] = []
+    progress_prefix = _progress_prefix(progress_context)
+    if progress_prefix is not None:
+        parts.append(progress_prefix)
+
+    parts.extend(
+        [
+            "Post-recalibration valid",
+            f"val_loss={_format_metric(valid_metrics.get('valid_loss', valid_metrics.get('valid_ce_loss')))}",
+            f"val_acc={_format_metric(valid_metrics.get('valid_accuracy'))}",
+            f"val_time={valid_time:.2f}s",
+        ]
+    )
 
     valid_zero_prob = valid_metrics.get("valid_average_zero_prob")
     if valid_zero_prob is not None:
@@ -1201,6 +1234,7 @@ def train(model: nn.Module,
         if should_stop:
             break
 
+    final_epoch = completed_epochs or total_epochs
     if batchnorm_recalibration is not None:
         recalibration_info = batchnorm_recalibration.apply(
             model,
@@ -1208,23 +1242,65 @@ def train(model: nn.Module,
             device=device,
             progress_context=progress_context,
         )
+        if recalibration_info.get("applied"):
+            recalibrated_valid_started_at = perf_counter()
+            evaluate(
+                model,
+                dataloaders.valid_dataloader,
+                metrics.valid_metrics,
+                device,
+                total_epochs=final_epoch,
+                stage="valid",
+                epoch=final_epoch,
+                run_history=run_history,
+                progress_context=progress_context,
+            )
+            recalibrated_valid_time = perf_counter() - recalibrated_valid_started_at
+            recalibrated_valid_metrics = dict(metrics.valid_metrics.compute())
+            metrics.valid_metrics.reset()
+            last_valid_metrics = recalibrated_valid_metrics
+            recalibration_info["post_recalibration_valid_metrics"] = dict(
+                recalibrated_valid_metrics
+            )
+            recalibration_info["post_recalibration_valid_time_sec"] = float(
+                recalibrated_valid_time
+            )
+            print(
+                _build_post_recalibration_valid_log_line(
+                    recalibrated_valid_metrics,
+                    recalibrated_valid_time,
+                    progress_context=progress_context,
+                )
+            )
+            if mlflow_logger is not None:
+                mlflow_logger.log_metrics(
+                    _prefix_metric_keys(recalibrated_valid_metrics, "recalibrated"),
+                    step=final_epoch,
+                )
         if run_history is not None:
             runtime_metadata = dict(run_history.runtime_metadata)
             runtime_metadata["batchnorm_recalibration"] = recalibration_info
             run_history.set_runtime_metadata(runtime_metadata)
             if recalibration_info.get("applied"):
+                run_history.update_last_epoch(
+                    {
+                        **_prefix_metric_keys(last_valid_metrics, "recalibrated"),
+                        "recalibrated_valid_time_sec": float(
+                            recalibration_info.get("post_recalibration_valid_time_sec", 0.0)
+                        ),
+                    }
+                )
                 run_history.save_checkpoint(
                     "last.pt",
                     model=model,
                     optimizer=optimizer,
-                    epoch=completed_epochs or total_epochs,
+                    epoch=final_epoch,
                     metrics={
                         **last_train_metrics,
                         **last_valid_metrics,
                     },
                 )
 
-    final_epoch = completed_epochs or total_epochs
     evaluate(
         model,
         dataloaders.test_dataloader,
