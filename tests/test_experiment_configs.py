@@ -588,6 +588,29 @@ def test_gumbel_resnet50_lambda_grid_150ep_narrow_uses_requested_manual_lambda_p
     assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.2, 0.25, 0.3]
 
 
+def test_gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_uses_requested_manual_lambda_points():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_5_15_25_35.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_5_15_25_35"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert (
+        cfg.tuning.search_space["training_arguments.lambda_warmup.target_lambda_coef"].choices
+        == [5.0, 15.0, 25.0, 35.0]
+    )
+
+
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10_120.yaml")
 
