@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
 from net_complexity.models.feature_selection import get_gumbel_modules, get_stg_modules
+from net_complexity.training.adaptive_lambda import AdaptiveLambdaController
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
@@ -223,6 +224,11 @@ def _to_float(value: Any) -> float | None:
 def _resolve_lambda_value(config: DictConfig) -> float | None:
     value = OmegaConf.select(config, LAMBDA_CONFIG_PATH)
     return None if value is None else float(value)
+
+
+def _adaptive_lambda_enabled(training_arguments: DictConfig) -> bool:
+    cfg = getattr(training_arguments, "adaptive_lambda", None)
+    return bool(getattr(cfg, "enabled", False)) if cfg is not None else False
 
 
 def _resolve_expected_run_name(config: DictConfig) -> str | None:
@@ -805,6 +811,7 @@ def _build_epoch_log_line(
     train_time: float,
     valid_time: float,
     epoch_time: float,
+    extra_metrics: Mapping[str, Any] | None = None,
     progress_context: ProgressContext | None = None,
 ) -> str:
     parts: list[str] = []
@@ -831,6 +838,19 @@ def _build_epoch_log_line(
     valid_zero_prob = valid_metrics.get("valid_average_zero_prob")
     if valid_zero_prob is not None:
         parts.append(f"val_zero={_format_metric(valid_zero_prob)}")
+
+    extra_metrics = extra_metrics or {}
+    lambda_coef = extra_metrics.get("lambda_coef")
+    if lambda_coef is not None:
+        parts.append(f"lambda={_format_metric(lambda_coef)}")
+
+    adaptive_step = extra_metrics.get("adaptive_lambda_step")
+    if adaptive_step is not None:
+        parts.append(f"lambda_step={_format_metric(adaptive_step)}")
+
+    adaptive_action = extra_metrics.get("adaptive_lambda_action")
+    if adaptive_action:
+        parts.append(f"lambda_action={adaptive_action}")
 
     return " | ".join(parts)
 
@@ -928,6 +948,45 @@ def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | 
         target_lambda_coef=float(getattr(cfg, "target_lambda_coef")),
         ramp_epochs=max(1, int(getattr(cfg, "ramp_epochs", 1))),
         bypass_during_warmup=bool(getattr(cfg, "bypass_during_warmup", True)),
+    )
+
+
+def _build_adaptive_lambda(
+    training_arguments: DictConfig,
+    model: nn.Module,
+) -> AdaptiveLambdaController | None:
+    cfg = getattr(training_arguments, "adaptive_lambda", None)
+    if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        return None
+
+    lambda_warmup_cfg = getattr(training_arguments, "lambda_warmup", None)
+    if lambda_warmup_cfg is not None and bool(getattr(lambda_warmup_cfg, "enabled", False)):
+        raise ValueError("adaptive_lambda and lambda_warmup cannot be enabled at the same time.")
+
+    initial_lambda_coef = _resolve_model_lambda_coef(model)
+    if initial_lambda_coef is None:
+        raise ValueError("adaptive_lambda requires a model with a numeric lambda_coef.")
+
+    return AdaptiveLambdaController(
+        initial_lambda_coef=initial_lambda_coef,
+        warmup_epochs=int(getattr(cfg, "warmup_epochs", 10)),
+        update_every_epochs=int(getattr(cfg, "update_every_epochs", 3)),
+        acc_window=int(getattr(cfg, "acc_window", 3)),
+        lambda_min=float(getattr(cfg, "lambda_min", 1e-8)),
+        lambda_max=float(getattr(cfg, "lambda_max", 80.0)),
+        log_step_init=float(getattr(cfg, "log_step_init", 0.6931471805599453)),
+        log_step_min=float(getattr(cfg, "log_step_min", 0.04879016416943205)),
+        soft_drop=float(getattr(cfg, "soft_drop", 0.02)),
+        hard_drop=float(getattr(cfg, "hard_drop", 0.05)),
+        soft_step_shrink=float(getattr(cfg, "soft_step_shrink", 0.5)),
+        hard_step_shrink=float(getattr(cfg, "hard_step_shrink", 0.25)),
+        collapse_acc_threshold=float(getattr(cfg, "collapse_acc_threshold", 0.15)),
+        collapse_loss_threshold=float(getattr(cfg, "collapse_loss_threshold", 2.15)),
+        collapse_zero_prob_threshold=float(getattr(cfg, "collapse_zero_prob_threshold", 0.90)),
+        collapse_acc_drop_threshold=float(getattr(cfg, "collapse_acc_drop_threshold", 0.40)),
+        rollback_on_collapse=bool(getattr(cfg, "rollback_on_collapse", True)),
+        max_rollbacks=int(getattr(cfg, "max_rollbacks", 6)),
+        freeze_on_rollback_limit=bool(getattr(cfg, "freeze_on_rollback_limit", True)),
     )
 
 
@@ -1073,9 +1132,23 @@ def train(model: nn.Module,
     gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
     batchnorm_recalibration = _build_batchnorm_recalibration(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
+    adaptive_lambda = _build_adaptive_lambda(training_arguments, model)
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
     recalibration_info: dict[str, Any] | None = None
+
+    def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
+        _set_model_lambda_coef(target_model, lambda_coef, bypass_gumbel=False)
+
+    if adaptive_lambda is not None:
+        adaptive_lambda.apply_initial_state(
+            model,
+            apply_lambda=_apply_adaptive_lambda,
+        )
+        if run_history is not None:
+            runtime_metadata = dict(run_history.runtime_metadata)
+            runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
+            run_history.set_runtime_metadata(runtime_metadata)
 
     for epoch in range(total_epochs):
         epoch_num = epoch + 1
@@ -1119,43 +1192,94 @@ def train(model: nn.Module,
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
-        if mlflow_logger is not None:
-            mlflow_logger.log_metrics(train_metrics, step=epoch_num)
-            mlflow_logger.log_metrics(valid_metrics, step=epoch_num)
-
-        epoch_metrics = {
+        observed_epoch_metrics = {
             **train_metrics,
             **valid_metrics,
         }
+
+        best_checkpoint_extra_state = {
+            "model_lambda_coef": _resolve_model_lambda_coef(model),
+            "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+        }
+
+        if run_history is not None:
+            run_history.log_channel_history(epoch_num, model)
+            run_history.log_gate_history(epoch_num, "valid", model)
+
+        if scheduler_state is not None and scheduler_state.interval == "epoch":
+            scheduler_state.step(observed_epoch_metrics)
+
+        if run_history is not None and run_history.should_update_best(epoch_num, valid_metrics):
+            run_history.save_checkpoint(
+                "best.pt",
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch_num,
+                metrics=observed_epoch_metrics,
+                scheduler_state=scheduler_state,
+                extra_state=best_checkpoint_extra_state,
+            )
+
+        controller_metrics: dict[str, Any] = {}
+        adaptive_collapse_handled = False
+        if adaptive_lambda is not None:
+            adaptive_step_result = adaptive_lambda.on_epoch_end(
+                epoch=epoch_num,
+                model=model,
+                optimizer=optimizer,
+                valid_metrics=valid_metrics,
+                scheduler_state=scheduler_state,
+                scaler=None,
+                apply_lambda=_apply_adaptive_lambda,
+            )
+            controller_metrics = dict(adaptive_step_result.metrics)
+            adaptive_collapse_handled = (
+                adaptive_step_result.collapse_detected
+                and adaptive_step_result.action in {"collapse_rollback", "rollback_limit_freeze"}
+            )
+            if run_history is not None:
+                runtime_metadata = dict(run_history.runtime_metadata)
+                runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
+                run_history.set_runtime_metadata(runtime_metadata)
+
+        post_epoch_extra_metrics = {
+            "train_time_sec": float(train_time),
+            "valid_time_sec": float(valid_time),
+            "epoch_time_sec": float(perf_counter() - epoch_started_at),
+            "model_lambda_coef": _resolve_model_lambda_coef(model),
+            "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+            **controller_metrics,
+        }
+
+        if mlflow_logger is not None:
+            mlflow_logger.log_metrics(train_metrics, step=epoch_num)
+            mlflow_logger.log_metrics(valid_metrics, step=epoch_num)
+            controller_numeric_metrics = {
+                key: value
+                for key, value in controller_metrics.items()
+                if isinstance(value, (int, float))
+            }
+            if controller_numeric_metrics:
+                mlflow_logger.log_metrics(controller_numeric_metrics, step=epoch_num)
+
         if run_history is not None:
             run_history.save_checkpoint(
                 "last.pt",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch_num,
-                metrics=epoch_metrics,
+                metrics={
+                    **observed_epoch_metrics,
+                    **controller_metrics,
+                },
+                scheduler_state=scheduler_state,
+                extra_state=post_epoch_extra_metrics,
             )
-            if run_history.should_update_best(epoch_num, valid_metrics):
-                run_history.save_checkpoint(
-                    "best.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch_num,
-                    metrics=epoch_metrics,
-                )
-            run_history.log_channel_history(epoch_num, model)
-            run_history.log_gate_history(epoch_num, "valid", model)
             run_history.log_epoch(
                 epoch_num,
                 train_metrics,
                 valid_metrics,
-                extra_metrics={
-                "train_time_sec": float(train_time),
-                "valid_time_sec": float(valid_time),
-                "epoch_time_sec": float(perf_counter() - epoch_started_at),
-                "model_lambda_coef": _resolve_model_lambda_coef(model),
-                "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
-                },
+                extra_metrics=post_epoch_extra_metrics,
             )
 
         if epoch_end_callback is not None:
@@ -1169,7 +1293,7 @@ def train(model: nn.Module,
             )
 
         collapse_detected: CollapseDetected | None = None
-        if collapse_guard is not None:
+        if collapse_guard is not None and not adaptive_collapse_handled:
             try:
                 collapse_guard(
                     epoch_num,
@@ -1184,9 +1308,6 @@ def train(model: nn.Module,
                 stop_info = exc.as_dict()
                 if mlflow_logger is not None:
                     mlflow_logger.log_params(stop_info)
-
-        if scheduler_state is not None and scheduler_state.interval == "epoch":
-            scheduler_state.step({**train_metrics, **valid_metrics})
 
         should_stop = False
         stop_message: str | None = None
@@ -1218,6 +1339,7 @@ def train(model: nn.Module,
                 total_epochs=total_epochs,
                 train_metrics=train_metrics,
                 valid_metrics=valid_metrics,
+                extra_metrics=post_epoch_extra_metrics,
                 train_time=train_time,
                 valid_time=valid_time,
                 epoch_time=epoch_time,
@@ -1299,6 +1421,12 @@ def train(model: nn.Module,
                         **last_train_metrics,
                         **last_valid_metrics,
                     },
+                    scheduler_state=scheduler_state,
+                    extra_state={
+                        "model_lambda_coef": _resolve_model_lambda_coef(model),
+                        "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+                        **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
+                    },
                 )
 
     evaluate(
@@ -1332,6 +1460,8 @@ def train(model: nn.Module,
         "last_valid_metrics": last_valid_metrics,
         "test_metrics": dict(test_metrics),
     }
+    if adaptive_lambda is not None:
+        result["adaptive_lambda"] = adaptive_lambda.summary_state()
     if recalibration_info is not None:
         result["batchnorm_recalibration"] = recalibration_info
     if stop_info is not None:
@@ -1439,6 +1569,8 @@ def run_training(
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
     lambda_warmup = _build_lambda_warmup(config.training_arguments)
+    if lambda_warmup is not None and _adaptive_lambda_enabled(config.training_arguments):
+        raise ValueError("adaptive_lambda and lambda_warmup cannot be enabled at the same time.")
     if lambda_warmup is not None:
         lambda_warmup.apply_initial_state(model)
     gate_mode_schedule = _build_gate_mode_schedule(config.training_arguments)

@@ -113,6 +113,12 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
     resnet50_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "resnet50_best_practice.yaml")
 
     for cfg in (default_cfg, best_practice_cfg, resnet50_cfg):
+        assert cfg.training_arguments.adaptive_lambda.enabled is False
+        assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
+        assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+        assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
+        assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
         assert cfg.training_arguments.batchnorm_recalibration.enabled is True
         assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
         assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
@@ -275,6 +281,56 @@ def test_best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_starts_ra
         cfg.mlflow.tags.recipe
         == "best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_on_cifar10"
     )
+
+
+def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid():
+    expected = {
+        "resnet50_adaptive_lambda_init5.yaml": 5.0,
+        "resnet50_adaptive_lambda_init15.yaml": 15.0,
+        "resnet50_adaptive_lambda_init25.yaml": 25.0,
+        "resnet50_adaptive_lambda_init35.yaml": 35.0,
+    }
+
+    for config_name, lambda_init in expected.items():
+        cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / config_name)
+        assert cfg.defaults == [
+            {"/data": "cifar10_best_practice"},
+            {"/model": "resnet50"},
+            {"/method": "gumbel"},
+            {"/train": "resnet50_best_practice"},
+            {"/optimizer": "sgd_resnet50"},
+            {"/scheduler": "cosine_200"},
+            {"/metrics": "gumbel_resnet50"},
+            {"/run_history": "valid_accuracy_max"},
+            {"/tracking": "default"},
+            "_self_",
+        ]
+        assert cfg.model.lambda_coef == lambda_init
+        assert cfg.model.gumbel_init_mode == "paper_resnet50"
+        assert cfg.model.bypass_on_zero_lambda is False
+        assert cfg.training_arguments.lambda_warmup.enabled is False
+        assert cfg.training_arguments.adaptive_lambda.enabled is True
+        assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
+        assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+        assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
+        assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
+        assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.6931471805599453
+        assert cfg.training_arguments.adaptive_lambda.log_step_min == 0.04879016416943205
+        assert cfg.training_arguments.adaptive_lambda.soft_drop == 0.02
+        assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.05
+        assert cfg.training_arguments.adaptive_lambda.soft_step_shrink == 0.5
+        assert cfg.training_arguments.adaptive_lambda.hard_step_shrink == 0.25
+        assert cfg.training_arguments.adaptive_lambda.collapse_acc_threshold == 0.15
+        assert cfg.training_arguments.adaptive_lambda.collapse_loss_threshold == 2.15
+        assert cfg.training_arguments.adaptive_lambda.collapse_zero_prob_threshold == 0.90
+        assert cfg.training_arguments.adaptive_lambda.collapse_acc_drop_threshold == 0.40
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_collapse is True
+        assert cfg.training_arguments.adaptive_lambda.max_rollbacks == 6
+        assert cfg.training_arguments.adaptive_lambda.freeze_on_rollback_limit is True
+        assert cfg.run_history.log_gate_history is True
+        assert cfg.mlflow.enabled is False
+        assert cfg.mlflow.tags.recipe == config_name.removesuffix(".yaml")
 
 
 def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():
@@ -628,6 +684,32 @@ def test_gumbel_resnet20_warmup30_lambda_grid_160ep_uses_requested_manual_lambda
         cfg.tuning.search_space["training_arguments.lambda_warmup.target_lambda_coef"].choices
         == [5.0, 15.0, 25.0, 35.0]
     )
+
+
+def test_resnet50_adaptive_lambda_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [5.0, 15.0, 25.0, 35.0]
+
+
+def test_tune_resnet50_adaptive_lambda_nightly_uses_adaptive_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_adaptive_lambda_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_init5"},
+        {"tuning": "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered"},
+        "_self_",
+    ]
 
 
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():

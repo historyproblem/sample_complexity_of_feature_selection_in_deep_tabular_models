@@ -390,6 +390,9 @@ class RunHistory:
         optimizer: torch.optim.Optimizer,
         epoch: int,
         metrics: Mapping[str, Any],
+        scheduler_state: Any | None = None,
+        scaler: Any | None = None,
+        extra_state: Mapping[str, Any] | None = None,
     ) -> Path:
         checkpoint_path = self.checkpoints_dir / file_name
         payload = {
@@ -401,6 +404,15 @@ class RunHistory:
             "run_name": self.run_name,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if scheduler_state is not None and getattr(scheduler_state, "scheduler", None) is not None:
+            payload["scheduler_state_dict"] = self._to_cpu(
+                deepcopy(scheduler_state.scheduler.state_dict())
+            )
+            payload["scheduler_step_count"] = int(getattr(scheduler_state, "step_count", 0))
+        if scaler is not None and hasattr(scaler, "state_dict"):
+            payload["scaler_state_dict"] = self._to_cpu(deepcopy(scaler.state_dict()))
+        if extra_state:
+            payload["extra_state"] = self._to_cpu(deepcopy(dict(extra_state)))
         torch.save(payload, checkpoint_path)
         return checkpoint_path
 
@@ -415,6 +427,7 @@ class RunHistory:
         duration_sec = (finished_at - self.started_at).total_seconds()
         cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
         warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
+        adaptive_lambda_cfg = OmegaConf.select(self.config, "training_arguments.adaptive_lambda")
         gate_mode_schedule_cfg = OmegaConf.select(self.config, "training_arguments.gate_mode_schedule")
         batchnorm_recalibration_cfg = OmegaConf.select(
             self.config,
@@ -433,6 +446,11 @@ class RunHistory:
                 "training_arguments.lambda_warmup": (
                     OmegaConf.to_container(warmup_cfg, resolve=True)
                     if warmup_cfg is not None
+                    else None
+                ),
+                "training_arguments.adaptive_lambda": (
+                    OmegaConf.to_container(adaptive_lambda_cfg, resolve=True)
+                    if adaptive_lambda_cfg is not None
                     else None
                 ),
                 "training_arguments.gate_mode_schedule": (
