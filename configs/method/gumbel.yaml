@@ -1,5 +1,9 @@
 # @package _global_
 
+# Gate logits use a separate optimizer group with paper-style weight-decay scaling.
+optimizer:
+  gate_weight_decay_scale: 20.0
+
 model:
   criterion:
     _target_: torch.nn.CrossEntropyLoss
@@ -10,3 +14,4 @@ model:
     resnet_block:
       _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
       _partial_: true
+      beta: 1.0

@@ -21,6 +21,7 @@ model:
       _target_: net_complexity.wrappers.GumbelBottleneckLayer
       _partial_: true
       temperature: 1.0
+      beta: 1.0
 
 training_arguments:
   batchnorm_recalibration:

@@ -23,6 +23,14 @@ def _slugify(value: str) -> str:
     return slug or "run"
 
 
+def _filter_channel_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if ".channel_" not in str(key)
+    }
+
+
 class RunHistory:
     def __init__(self, config: DictConfig):
         self.config = config
@@ -205,8 +213,8 @@ class RunHistory:
         train_metrics: Mapping[str, Any],
         valid_metrics: Mapping[str, Any],
     ) -> dict[str, Any]:
-        self.last_train_metrics = dict(train_metrics)
-        self.last_valid_metrics = dict(valid_metrics)
+        self.last_train_metrics = _filter_channel_metrics(train_metrics)
+        self.last_valid_metrics = _filter_channel_metrics(valid_metrics)
         record = {
             "epoch": int(epoch),
             **self.last_train_metrics,
@@ -262,11 +270,12 @@ class RunHistory:
         return str(monitor) if monitor is not None else None, mode
 
     def should_update_best(self, epoch: int, valid_metrics: Mapping[str, Any]) -> bool:
-        monitor, mode = self.resolve_monitor(valid_metrics)
+        filtered_valid_metrics = _filter_channel_metrics(valid_metrics)
+        monitor, mode = self.resolve_monitor(filtered_valid_metrics)
         if monitor is None:
             return False
 
-        current_value = valid_metrics.get(monitor)
+        current_value = filtered_valid_metrics.get(monitor)
         if not isinstance(current_value, (int, float)):
             return False
 
@@ -284,7 +293,7 @@ class RunHistory:
             self.best_metric_name = monitor
             self.best_metric_value = float(current_value)
             self.best_epoch = int(epoch)
-            self.best_valid_metrics = dict(valid_metrics)
+            self.best_valid_metrics = filtered_valid_metrics
 
         return improved
 
@@ -346,8 +355,8 @@ class RunHistory:
                 "num_epochs_logged": len(self.history_records),
                 "num_batches_logged": len(self.batch_records),
             },
-            "final_train": dict(final_train_metrics or self.last_train_metrics),
-            "final_valid": dict(final_valid_metrics or self.last_valid_metrics),
+            "final_train": _filter_channel_metrics(final_train_metrics or self.last_train_metrics),
+            "final_valid": _filter_channel_metrics(final_valid_metrics or self.last_valid_metrics),
             "best_valid": {
                 "epoch": self.best_epoch,
                 "metric": self.best_metric_name,

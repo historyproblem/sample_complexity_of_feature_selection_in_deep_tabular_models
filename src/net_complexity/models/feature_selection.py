@@ -115,8 +115,10 @@ class GumbelLayer(nn.Module):
     Fixed implementation: Properly handles batch dimension and sampling.
     """
 
-    def __init__(self, input_dim: int, temperature: float = 1.0):
+    def __init__(self, input_dim: int, temperature: float = 1.0, beta: float = 1.0):
         super().__init__()
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
         # Initialize with bias toward "off" state (first column larger)
         # This encourages sparsity initially
         # self.logits = nn.Parameter(torch.zeros(input_dim, 2))
@@ -127,6 +129,21 @@ class GumbelLayer(nn.Module):
         self.logits = nn.Parameter(self.logits)
         # self.logits.data[:, 0] = 1.0  # Bias toward off state
         self.temperature = temperature
+        self.beta = float(beta)
+
+    def _sample_gumbel_like(self, template_tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+        uniform_samples = torch.rand_like(template_tensor)
+        uniform_samples = uniform_samples.clamp_(min=eps, max=1.0 - eps)
+        return -torch.log(-torch.log(uniform_samples))
+
+    def _sample_gumbel_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        gumbel_noise = self._sample_gumbel_like(logits) * self.beta
+        return F.softmax((logits + gumbel_noise) / self.temperature, dim=-1)
+
+    def _straight_through_hard_sample(self, soft_samples: torch.Tensor) -> torch.Tensor:
+        max_value_indexes = soft_samples.argmax(dim=-1, keepdim=True)
+        hard_samples = torch.zeros_like(soft_samples).scatter_(-1, max_value_indexes, 1.0)
+        return hard_samples - soft_samples.detach() + soft_samples
 
 
     # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
@@ -134,12 +151,8 @@ class GumbelLayer(nn.Module):
         batch_size = x.shape[0]
         if self.training:
             logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
-            sampled = F.gumbel_softmax(
-                logits,
-                tau=self.temperature,
-                hard=True,
-                dim=-1
-            )
+            soft_samples = self._sample_gumbel_softmax(logits)
+            sampled = self._straight_through_hard_sample(soft_samples)
             gates = sampled[..., 1]
         else:
             gates = (self.logits[:, 1] > self.logits[:, 0]).float().unsqueeze(0)
@@ -167,6 +180,12 @@ class GumbelLayer(nn.Module):
     def set_temperature(self, temperature: float):
         """Update temperature for annealing schedule."""
         self.temperature = temperature
+
+    def set_beta(self, beta: float):
+        """Update the Gumbel noise scale."""
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
+        self.beta = float(beta)
 
 
 class STGChannelLayer(nn.Module):
@@ -279,11 +298,20 @@ class STGBottleneckLayer(Bottleneck):
 
 
 class GumbelBottleneckLayer(Bottleneck):
-    def __init__(self, in_channels, out_channels, i_downsample=None, stride=1, temperature: float = 1.0):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+    ):
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
         self.gumbel_layer = GumbelLayer(
             input_dim=out_channels * self.expansion,
             temperature=temperature,
+            beta=beta,
         )
 
     def forward(self, x):
@@ -304,11 +332,20 @@ class GumbelBottleneckLayer(Bottleneck):
 
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
-    def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        temperature: float = 1,
+        beta: float = 1.0,
+    ):
         super().__init__(in_planes, planes, stride=stride, option=option)
         self.gumbel_layer = GumbelLayer(
             input_dim=planes * self.expansion,
             temperature=temperature,
+            beta=beta,
         )
 
     def forward(self, x):

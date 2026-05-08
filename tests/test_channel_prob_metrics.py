@@ -200,6 +200,7 @@ def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
     assert channel_rows[0]["selection_prob"] != ""
     assert channel_rows[0]["zero_prob"] != ""
     assert channel_rows[0]["logit_margin"] != ""
+    assert channel_rows[0]["beta"] == "1.0"
     assert channel_rows[0]["mu"] == ""
 
     summary = json.loads(run_history.summary_path.read_text(encoding="utf-8"))
