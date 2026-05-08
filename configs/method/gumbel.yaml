@@ -1,8 +1,8 @@
 # @package _global_
 
-# Gate logits use a separate optimizer group with paper-style weight-decay scaling.
+# Older Gumbel recipes keep gate weight-decay splitting disabled by default.
 optimizer:
-  gate_weight_decay_scale: 20.0
+  gate_weight_decay_scale: null
 
 model:
   criterion:

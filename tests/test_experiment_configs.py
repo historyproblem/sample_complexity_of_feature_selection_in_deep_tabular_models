@@ -66,6 +66,7 @@ def test_before_refactor_gumbel_cifar10_preserves_old_recipe():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.mlflow.tags.recipe == "before_refactor_gumbel_cifar10"
 
 
@@ -102,10 +103,10 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.batchnorm_recalibration.deterministic_gumbel is True
 
 
-def test_gumbel_method_config_enables_paper_style_gate_weight_decay_scaling():
+def test_gumbel_method_config_keeps_gate_weight_decay_scaling_disabled_for_older_recipes():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel.yaml")
 
-    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.optimizer.gate_weight_decay_scale is None
 
 
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
@@ -135,6 +136,13 @@ def test_best_practice_resnet50_aig_baseline_uses_full_cifar_recipe_with_zero_la
     assert cfg.model.lambda_coef == 0.0
     assert cfg.model.backbone.resnet_block.temperature == 1.0
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_aig_on_cifar10"
+
+
+def test_best_practice_resnet20_gumbel_baseline_sets_beta_to_one():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet20_on_cifar10.yaml")
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
 
 
 def test_best_practice_resnet50_gumbel_bn_recalibration_lambda001_uses_requested_recipe():

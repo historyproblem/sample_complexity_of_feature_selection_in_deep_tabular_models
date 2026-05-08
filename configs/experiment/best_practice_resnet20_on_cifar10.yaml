@@ -16,6 +16,9 @@ device: "cuda:0"
 
 model:
   lambda_coef: 0.0
+  backbone:
+    resnet_block:
+      beta: 1.0
 
 mlflow:
   run_name: "best_practice_resnet20_on_cifar10_lambda_${model.lambda_coef}"
