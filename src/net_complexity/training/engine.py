@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 
 import torch
@@ -13,7 +16,7 @@ from typing import Any, Callable, Mapping
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
 from net_complexity.models.feature_selection import get_gumbel_modules, get_stg_modules
-from net_complexity.training.adaptive_lambda import AdaptiveLambdaController
+from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, AdaptiveLambdaController
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
@@ -27,6 +30,7 @@ EpochEndCallback = Callable[
 ]
 ProgressContext = Mapping[str, Any]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,14 @@ class OptimizerBuildInfo:
 class GateParameterSpec:
     parameter: nn.Parameter
     num_gates: int
+
+
+@dataclass(frozen=True)
+class BaselineAccuracyReference:
+    root_dir: Path
+    history_path: Path
+    metric_name: str
+    accuracy_by_epoch: dict[int, float]
 
 
 @dataclass
@@ -229,6 +241,188 @@ def _resolve_lambda_value(config: DictConfig) -> float | None:
 def _adaptive_lambda_enabled(training_arguments: DictConfig) -> bool:
     cfg = getattr(training_arguments, "adaptive_lambda", None)
     return bool(getattr(cfg, "enabled", False)) if cfg is not None else False
+
+
+def _config_has_path(config: DictConfig | Mapping[str, Any], dot_path: str) -> bool:
+    node: Any = config
+    for part in dot_path.split("."):
+        if isinstance(node, DictConfig):
+            if part not in node:
+                return False
+            node = node[part]
+            continue
+        if isinstance(node, Mapping):
+            if part not in node:
+                return False
+            node = node[part]
+            continue
+        return False
+    return True
+
+
+def _resolve_baseline_history_root(training_arguments: DictConfig) -> Path | None:
+    adaptive_cfg = getattr(training_arguments, "adaptive_lambda", None)
+    if adaptive_cfg is None or not bool(getattr(adaptive_cfg, "enabled", False)):
+        return None
+
+    configured_root = getattr(adaptive_cfg, "baseline_history_dir", None)
+    if configured_root in {None, ""}:
+        return None
+
+    baseline_root = Path(str(configured_root))
+    return baseline_root if baseline_root.is_absolute() else REPO_ROOT / baseline_root
+
+
+def _iter_baseline_history_candidates(root_dir: Path) -> list[Path]:
+    if not root_dir.exists():
+        return []
+
+    candidates: list[Path] = []
+    direct_history_path = root_dir / "history.csv"
+    if direct_history_path.exists():
+        candidates.append(direct_history_path)
+
+    for child in root_dir.iterdir():
+        if not child.is_dir():
+            continue
+        history_path = child / "history.csv"
+        if history_path.exists():
+            candidates.append(history_path)
+
+    return sorted(
+        candidates,
+        key=lambda path: (path.stat().st_mtime, str(path)),
+    )
+
+
+def _load_baseline_accuracy_history(history_path: Path) -> tuple[str, dict[int, float]]:
+    with history_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"Baseline history has no header: {history_path}")
+
+        metric_name = next(
+            (candidate for candidate in ACCURACY_METRIC_NAMES if candidate in reader.fieldnames),
+            None,
+        )
+        if metric_name is None:
+            available_columns = ", ".join(reader.fieldnames)
+            raise ValueError(
+                f"Baseline history {history_path} does not contain an accuracy column. "
+                f"Available columns: {available_columns}"
+            )
+
+        accuracy_by_epoch: dict[int, float] = {}
+        for row in reader:
+            epoch_raw = row.get("epoch")
+            accuracy_raw = row.get(metric_name)
+            if epoch_raw in {None, ""} or accuracy_raw in {None, ""}:
+                continue
+
+            try:
+                epoch = int(float(epoch_raw))
+                accuracy = float(accuracy_raw)
+            except ValueError:
+                continue
+
+            accuracy_by_epoch[epoch] = accuracy
+
+    if not accuracy_by_epoch:
+        raise ValueError(f"Baseline history {history_path} does not contain any valid accuracy records.")
+
+    return metric_name, accuracy_by_epoch
+
+
+def _load_baseline_accuracy_reference(root_dir: Path) -> BaselineAccuracyReference | None:
+    history_candidates = _iter_baseline_history_candidates(root_dir)
+    if not history_candidates:
+        return None
+
+    history_path = history_candidates[-1]
+    metric_name, accuracy_by_epoch = _load_baseline_accuracy_history(history_path)
+    return BaselineAccuracyReference(
+        root_dir=root_dir,
+        history_path=history_path,
+        metric_name=metric_name,
+        accuracy_by_epoch=accuracy_by_epoch,
+    )
+
+
+def _build_baseline_training_config(config: DictConfig, baseline_root_dir: Path) -> DictConfig:
+    baseline_config = deepcopy(config)
+
+    OmegaConf.update(baseline_config, "training_arguments.adaptive_lambda.enabled", False, merge=False)
+    if _config_has_path(baseline_config, "training_arguments.lambda_warmup.enabled"):
+        OmegaConf.update(baseline_config, "training_arguments.lambda_warmup.enabled", False, merge=False)
+
+    OmegaConf.update(baseline_config, "model.lambda_coef", 0.0, merge=False)
+    if _config_has_path(baseline_config, "model.bypass_on_zero_lambda"):
+        OmegaConf.update(baseline_config, "model.bypass_on_zero_lambda", True, merge=False)
+    if _config_has_path(baseline_config, "model.gumbel_init_mode"):
+        OmegaConf.update(baseline_config, "model.gumbel_init_mode", "fully_open", merge=False)
+
+    OmegaConf.update(baseline_config, "run_history.use_hydra_output_dir", False, merge=False)
+    OmegaConf.update(baseline_config, "run_history.root_dir", str(baseline_root_dir), merge=False)
+
+    baseline_run_name = (
+        f"{_resolve_expected_run_name(config) or 'run'}_baseline_no_pruning"
+    )
+    OmegaConf.update(baseline_config, "run_history.run_name", baseline_run_name, merge=False)
+    if _config_has_path(baseline_config, "mlflow.run_name"):
+        OmegaConf.update(baseline_config, "mlflow.run_name", baseline_run_name, merge=False)
+    if _config_has_path(baseline_config, "mlflow.enabled"):
+        OmegaConf.update(baseline_config, "mlflow.enabled", False, merge=False)
+
+    return baseline_config
+
+
+def _ensure_adaptive_baseline_reference(
+    config: DictConfig,
+    progress_context: ProgressContext | None = None,
+) -> BaselineAccuracyReference | None:
+    baseline_root_dir = _resolve_baseline_history_root(config.training_arguments)
+    if baseline_root_dir is None:
+        return None
+
+    baseline_reference = _load_baseline_accuracy_reference(baseline_root_dir)
+    if baseline_reference is not None:
+        print(
+            "Adaptive lambda baseline"
+            f" | loaded_from={baseline_reference.history_path}"
+            f" | metric={baseline_reference.metric_name}"
+            f" | epochs={len(baseline_reference.accuracy_by_epoch)}"
+        )
+        return baseline_reference
+
+    baseline_root_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        "Adaptive lambda baseline"
+        f" | root_dir={baseline_root_dir}"
+        " | no baseline history found, running baseline without pruning"
+    )
+
+    baseline_config = _build_baseline_training_config(config, baseline_root_dir)
+    baseline_progress_context = dict(progress_context or {})
+    baseline_progress_context["baseline_reference_run"] = True
+    run_training(
+        baseline_config,
+        epoch_end_callback=None,
+        progress_context=baseline_progress_context,
+    )
+
+    baseline_reference = _load_baseline_accuracy_reference(baseline_root_dir)
+    if baseline_reference is None:
+        raise FileNotFoundError(
+            f"Baseline run finished but no history.csv was found under: {baseline_root_dir}"
+        )
+
+    print(
+        "Adaptive lambda baseline"
+        f" | generated_at={baseline_reference.history_path}"
+        f" | metric={baseline_reference.metric_name}"
+        f" | epochs={len(baseline_reference.accuracy_by_epoch)}"
+    )
+    return baseline_reference
 
 
 def _resolve_expected_run_name(config: DictConfig) -> str | None:
@@ -852,6 +1046,10 @@ def _build_epoch_log_line(
     if adaptive_action:
         parts.append(f"lambda_action={adaptive_action}")
 
+    reference_acc = extra_metrics.get("reference_acc")
+    if reference_acc is not None:
+        parts.append(f"ref_acc={_format_metric(reference_acc)}")
+
     return " | ".join(parts)
 
 
@@ -954,6 +1152,8 @@ def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | 
 def _build_adaptive_lambda(
     training_arguments: DictConfig,
     model: nn.Module,
+    *,
+    baseline_accuracy_by_epoch: Mapping[int, float] | None = None,
 ) -> AdaptiveLambdaController | None:
     cfg = getattr(training_arguments, "adaptive_lambda", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -969,6 +1169,7 @@ def _build_adaptive_lambda(
 
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
+        reference_accuracy_by_epoch=baseline_accuracy_by_epoch,
         warmup_epochs=int(getattr(cfg, "warmup_epochs", 10)),
         update_every_epochs=int(getattr(cfg, "update_every_epochs", 3)),
         acc_window=int(getattr(cfg, "acc_window", 3)),
@@ -984,6 +1185,7 @@ def _build_adaptive_lambda(
         collapse_loss_threshold=float(getattr(cfg, "collapse_loss_threshold", 2.15)),
         collapse_zero_prob_threshold=float(getattr(cfg, "collapse_zero_prob_threshold", 0.90)),
         collapse_acc_drop_threshold=float(getattr(cfg, "collapse_acc_drop_threshold", 0.40)),
+        rollback_on_degradation=bool(getattr(cfg, "rollback_on_degradation", True)),
         rollback_on_collapse=bool(getattr(cfg, "rollback_on_collapse", True)),
         max_rollbacks=int(getattr(cfg, "max_rollbacks", 6)),
         freeze_on_rollback_limit=bool(getattr(cfg, "freeze_on_rollback_limit", True)),
@@ -1118,6 +1320,7 @@ def train(model: nn.Module,
           training_arguments: DictConfig,
           metrics,
           device: str,
+          baseline_accuracy_reference: BaselineAccuracyReference | None = None,
           mlflow_logger=None,
           run_history: RunHistory | None = None,
           epoch_end_callback: EpochEndCallback | None = None,
@@ -1132,7 +1335,15 @@ def train(model: nn.Module,
     gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
     batchnorm_recalibration = _build_batchnorm_recalibration(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
-    adaptive_lambda = _build_adaptive_lambda(training_arguments, model)
+    adaptive_lambda = _build_adaptive_lambda(
+        training_arguments,
+        model,
+        baseline_accuracy_by_epoch=(
+            baseline_accuracy_reference.accuracy_by_epoch
+            if baseline_accuracy_reference is not None
+            else None
+        ),
+    )
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
     recalibration_info: dict[str, Any] | None = None
@@ -1147,6 +1358,13 @@ def train(model: nn.Module,
         )
         if run_history is not None:
             runtime_metadata = dict(run_history.runtime_metadata)
+            if baseline_accuracy_reference is not None:
+                runtime_metadata["adaptive_lambda_baseline"] = {
+                    "root_dir": str(baseline_accuracy_reference.root_dir),
+                    "history_path": str(baseline_accuracy_reference.history_path),
+                    "metric_name": baseline_accuracy_reference.metric_name,
+                    "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+                }
             runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
             run_history.set_runtime_metadata(runtime_metadata)
 
@@ -1565,6 +1783,10 @@ def run_training(
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
 ) -> dict[str, Any]:
+    baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
+        config,
+        progress_context=progress_context,
+    )
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
     model = instantiate(config.model).to(device)
@@ -1590,6 +1812,13 @@ def run_training(
         run_history,
         progress_context=progress_context,
     )
+    if baseline_accuracy_reference is not None:
+        runtime_snapshot["adaptive_lambda_baseline"] = {
+            "root_dir": str(baseline_accuracy_reference.root_dir),
+            "history_path": str(baseline_accuracy_reference.history_path),
+            "metric_name": baseline_accuracy_reference.metric_name,
+            "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+        }
     run_history.set_runtime_metadata(runtime_snapshot)
     _log_runtime_debug_snapshot(runtime_snapshot)
 
@@ -1615,6 +1844,7 @@ def run_training(
             config.training_arguments,
             metrics,
             device,
+            baseline_accuracy_reference=baseline_accuracy_reference,
             mlflow_logger=mlflow_logger,
             run_history=run_history,
             epoch_end_callback=epoch_end_callback,
@@ -1633,4 +1863,11 @@ def run_training(
         "best_epoch": run_history.best_epoch,
         "seed": resolved_seed,
     })
+    if baseline_accuracy_reference is not None:
+        result["adaptive_lambda_baseline"] = {
+            "root_dir": str(baseline_accuracy_reference.root_dir),
+            "history_path": str(baseline_accuracy_reference.history_path),
+            "metric_name": baseline_accuracy_reference.metric_name,
+            "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+        }
     return result

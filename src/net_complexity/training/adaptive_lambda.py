@@ -114,6 +114,7 @@ class AdaptiveLambdaController:
         self,
         *,
         initial_lambda_coef: float,
+        reference_accuracy_by_epoch: Mapping[int, float] | None = None,
         warmup_epochs: int = 10,
         update_every_epochs: int = 3,
         acc_window: int = 3,
@@ -129,6 +130,7 @@ class AdaptiveLambdaController:
         collapse_loss_threshold: float = 2.15,
         collapse_zero_prob_threshold: float = 0.90,
         collapse_acc_drop_threshold: float = 0.40,
+        rollback_on_degradation: bool = True,
         rollback_on_collapse: bool = True,
         max_rollbacks: int = 6,
         freeze_on_rollback_limit: bool = True,
@@ -169,6 +171,7 @@ class AdaptiveLambdaController:
         self.collapse_loss_threshold = float(collapse_loss_threshold)
         self.collapse_zero_prob_threshold = float(collapse_zero_prob_threshold)
         self.collapse_acc_drop_threshold = float(collapse_acc_drop_threshold)
+        self.rollback_on_degradation = bool(rollback_on_degradation)
         self.rollback_on_collapse = bool(rollback_on_collapse)
         self.max_rollbacks = int(max_rollbacks)
         self.freeze_on_rollback_limit = bool(freeze_on_rollback_limit)
@@ -176,6 +179,14 @@ class AdaptiveLambdaController:
         initial_lambda = self._clamp_lambda(float(initial_lambda_coef))
         self.log_lambda = math.log(initial_lambda)
         self.acc_history: deque[float] = deque(maxlen=self.acc_window)
+        self.reference_accuracy_by_epoch = (
+            {
+                int(epoch): float(accuracy)
+                for epoch, accuracy in dict(reference_accuracy_by_epoch).items()
+            }
+            if reference_accuracy_by_epoch is not None
+            else {}
+        )
         self.best_val_acc: float | None = None
         self.previous_valid_acc: float | None = None
         self.rollback_count = 0
@@ -232,8 +243,11 @@ class AdaptiveLambdaController:
                 self.best_val_acc = valid_acc
 
         acc_ma = self._compute_acc_ma()
-        min_allowed_acc = None if self.best_val_acc is None else self.best_val_acc - self.soft_drop
-        hard_min_allowed_acc = None if self.best_val_acc is None else self.best_val_acc - self.hard_drop
+        reference_epoch, reference_acc = self._resolve_reference_accuracy(epoch)
+        if reference_acc is None:
+            reference_acc = self.best_val_acc
+        min_allowed_acc = None if reference_acc is None else reference_acc - self.soft_drop
+        hard_min_allowed_acc = None if reference_acc is None else reference_acc - self.hard_drop
 
         checkpoint_saved = self._maybe_save_safe_checkpoint(
             epoch=epoch,
@@ -268,40 +282,19 @@ class AdaptiveLambdaController:
             )
             if collapse_reason is not None:
                 collapse_detected = True
-                if self.rollback_on_collapse and self.latest_safe_checkpoint is not None:
-                    action, reason, lambda_changed = self._rollback_to_safe_checkpoint(
-                        epoch=epoch,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler_state=scheduler_state,
-                        scaler=scaler,
-                        apply_lambda=apply_lambda,
-                        shrink_factor=self.hard_step_shrink,
-                        action_name="collapse_rollback",
-                        reason=collapse_reason,
-                    )
-                    rolled_back = action in {
-                        "collapse_rollback",
-                        "rollback_limit_freeze",
-                    }
+                # Temporarily keep training state intact on collapse instead of restoring a safe checkpoint.
+                action = "collapse_continue"
+                if self.latest_safe_checkpoint is None:
+                    reason = f"collapse_without_safe_checkpoint ({collapse_reason})"
                 else:
-                    action = "hold"
-                    if self.latest_safe_checkpoint is None:
-                        reason = f"collapse_without_safe_checkpoint ({collapse_reason})"
-                    else:
-                        reason = f"collapse_detected_but_rollback_disabled ({collapse_reason})"
+                    reason = f"collapse_detected_but_rollback_disabled_temporarily ({collapse_reason})"
             elif self._should_update(epoch):
                 if acc_ma is None or min_allowed_acc is None or hard_min_allowed_acc is None:
                     action = "hold"
                     reason = "missing_accuracy_feedback"
                 elif acc_ma >= min_allowed_acc:
-                    safe_log_lambda = (
-                        self.latest_safe_checkpoint.log_lambda
-                        if self.latest_safe_checkpoint is not None
-                        else self.log_lambda
-                    )
                     old_lambda = self.lambda_coef
-                    self.log_lambda = self._clamp_log_lambda(safe_log_lambda + self.step)
+                    self.log_lambda = self._clamp_log_lambda(self.log_lambda + self.step)
                     new_lambda = self.lambda_coef
                     apply_lambda(model, new_lambda)
                     lambda_changed = abs(new_lambda - old_lambda) > 1e-12
@@ -313,49 +306,25 @@ class AdaptiveLambdaController:
                     if lambda_changed:
                         self._print_action(epoch, action, reason)
                 elif acc_ma >= hard_min_allowed_acc:
-                    if self.latest_safe_checkpoint is not None:
-                        action, reason, lambda_changed = self._rollback_to_safe_checkpoint(
-                            epoch=epoch,
-                            model=model,
-                            optimizer=optimizer,
-                            scheduler_state=scheduler_state,
-                            scaler=scaler,
-                            apply_lambda=apply_lambda,
-                            shrink_factor=self.soft_step_shrink,
-                            action_name="soft_degradation_rollback",
-                            reason=(
-                                f"acc_ma={acc_ma:.4f} < min_allowed_acc={min_allowed_acc:.4f}"
-                            ),
-                        )
-                        rolled_back = action in {
-                            "soft_degradation_rollback",
-                            "rollback_limit_freeze",
-                        }
-                    else:
-                        action = "hold"
-                        reason = "soft_degradation_without_safe_checkpoint"
+                    action = "hold"
+                    reason = (
+                        f"hard_min_allowed_acc={hard_min_allowed_acc:.4f} <= "
+                        f"acc_ma={acc_ma:.4f} < min_allowed_acc={min_allowed_acc:.4f}; "
+                        "lambda unchanged"
+                    )
                 else:
-                    if self.latest_safe_checkpoint is not None:
-                        action, reason, lambda_changed = self._rollback_to_safe_checkpoint(
-                            epoch=epoch,
-                            model=model,
-                            optimizer=optimizer,
-                            scheduler_state=scheduler_state,
-                            scaler=scaler,
-                            apply_lambda=apply_lambda,
-                            shrink_factor=self.hard_step_shrink,
-                            action_name="hard_degradation_rollback",
-                            reason=(
-                                f"acc_ma={acc_ma:.4f} < hard_min_allowed_acc={hard_min_allowed_acc:.4f}"
-                            ),
-                        )
-                        rolled_back = action in {
-                            "hard_degradation_rollback",
-                            "rollback_limit_freeze",
-                        }
-                    else:
-                        action = "hold"
-                        reason = "hard_degradation_without_safe_checkpoint"
+                    old_lambda = self.lambda_coef
+                    self.log_lambda = self._clamp_log_lambda(self.log_lambda - self.step)
+                    new_lambda = self.lambda_coef
+                    apply_lambda(model, new_lambda)
+                    lambda_changed = abs(new_lambda - old_lambda) > 1e-12
+                    action = "decrease_lambda"
+                    reason = (
+                        f"acc_ma={acc_ma:.4f} < hard_min_allowed_acc={hard_min_allowed_acc:.4f}; "
+                        f"lambda {old_lambda:.6g}->{new_lambda:.6g}"
+                    )
+                    if lambda_changed:
+                        self._print_action(epoch, action, reason)
 
         if not rolled_back and valid_acc is not None:
             self.previous_valid_acc = valid_acc
@@ -366,6 +335,8 @@ class AdaptiveLambdaController:
             action=action,
             reason=reason,
             acc_ma=acc_ma,
+            reference_epoch=reference_epoch,
+            reference_acc=reference_acc,
             min_allowed_acc=min_allowed_acc,
             hard_min_allowed_acc=hard_min_allowed_acc,
         )
@@ -400,6 +371,13 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": self.last_action,
             "adaptive_lambda_reason": self.last_reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "rollback_on_degradation": self.rollback_on_degradation,
+            "reference_source": (
+                "baseline_history"
+                if self.reference_accuracy_by_epoch
+                else "best_val_acc"
+            ),
+            "reference_num_epochs": len(self.reference_accuracy_by_epoch),
             "best_val_acc": self.best_val_acc,
             "latest_safe_epoch": self.latest_safe_epoch,
             "latest_safe_lambda": self.latest_safe_lambda,
@@ -416,6 +394,19 @@ class AdaptiveLambdaController:
         if not self.acc_history:
             return None
         return float(sum(self.acc_history) / len(self.acc_history))
+
+    def _resolve_reference_accuracy(self, epoch: int) -> tuple[int | None, float | None]:
+        if not self.reference_accuracy_by_epoch:
+            return None, None
+        if epoch in self.reference_accuracy_by_epoch:
+            return int(epoch), float(self.reference_accuracy_by_epoch[epoch])
+
+        candidate_epochs = [candidate for candidate in self.reference_accuracy_by_epoch if candidate <= epoch]
+        if not candidate_epochs:
+            return None, None
+
+        resolved_epoch = max(candidate_epochs)
+        return int(resolved_epoch), float(self.reference_accuracy_by_epoch[resolved_epoch])
 
     def _clamp_lambda(self, value: float) -> float:
         return float(min(max(value, self.lambda_min), self.lambda_max))
@@ -643,7 +634,8 @@ class AdaptiveLambdaController:
         )
 
         self.rollback_count += 1
-        self.step = max(self.log_step_min, self.step * float(shrink_factor))
+        # Temporarily keep the adaptive step fixed while rollback tuning is disabled.
+        # self.step = max(self.log_step_min, self.step * float(shrink_factor))
 
         if self.rollback_count > self.max_rollbacks:
             self.frozen = True
@@ -674,6 +666,8 @@ class AdaptiveLambdaController:
         action: str,
         reason: str,
         acc_ma: float | None,
+        reference_epoch: int | None,
+        reference_acc: float | None,
         min_allowed_acc: float | None,
         hard_min_allowed_acc: float | None,
     ) -> dict[str, Any]:
@@ -684,6 +678,14 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": action,
             "adaptive_lambda_reason": reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "rollback_on_degradation": self.rollback_on_degradation,
+            "reference_epoch": reference_epoch,
+            "reference_acc": reference_acc,
+            "reference_source": (
+                "baseline_history"
+                if self.reference_accuracy_by_epoch
+                else "best_val_acc"
+            ),
             "best_val_acc": self.best_val_acc,
             "acc_ma": acc_ma,
             "min_allowed_acc": min_allowed_acc,

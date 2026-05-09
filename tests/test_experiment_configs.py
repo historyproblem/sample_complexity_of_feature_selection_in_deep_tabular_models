@@ -117,8 +117,10 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
         assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
         assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
         assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
         assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
         assert cfg.training_arguments.batchnorm_recalibration.enabled is True
         assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
         assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
@@ -313,6 +315,10 @@ def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid(
         assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
         assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
         assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert (
+            cfg.training_arguments.adaptive_lambda.baseline_history_dir
+            == "outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_1.0"
+        )
         assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
         assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
         assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.6931471805599453
@@ -325,12 +331,47 @@ def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid(
         assert cfg.training_arguments.adaptive_lambda.collapse_loss_threshold == 2.15
         assert cfg.training_arguments.adaptive_lambda.collapse_zero_prob_threshold == 0.90
         assert cfg.training_arguments.adaptive_lambda.collapse_acc_drop_threshold == 0.40
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
         assert cfg.training_arguments.adaptive_lambda.rollback_on_collapse is True
         assert cfg.training_arguments.adaptive_lambda.max_rollbacks == 6
         assert cfg.training_arguments.adaptive_lambda.freeze_on_rollback_limit is True
         assert cfg.run_history.log_gate_history is True
         assert cfg.mlflow.enabled is False
         assert cfg.mlflow.tags.recipe == config_name.removesuffix(".yaml")
+
+
+def test_resnet50_adaptive_lambda_init1em6_no_warmup_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_adaptive_lambda_init1em6_no_warmup.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.0e-6
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+    assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+    assert (
+        cfg.training_arguments.adaptive_lambda.baseline_history_dir
+        == "outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_1.0"
+    )
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "resnet50_adaptive_lambda_init1em6_no_warmup"
 
 
 def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():

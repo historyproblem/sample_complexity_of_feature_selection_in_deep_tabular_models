@@ -76,7 +76,54 @@ def test_adaptive_lambda_increases_when_accuracy_stays_within_soft_band():
     assert result.metrics["adaptive_lambda_action"] == "increase_lambda"
 
 
-def test_adaptive_lambda_rolls_back_and_restores_runtime_state_on_hard_degradation():
+def test_adaptive_lambda_uses_baseline_epoch_accuracy_instead_of_best_accuracy_so_far():
+    model = _DummyModel(lambda_coef=5.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    scheduler_state = _make_scheduler_state(token=7, step_count=4)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=5.0,
+        reference_accuracy_by_epoch={1: 0.91, 2: 0.84},
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    first_result = controller.on_epoch_end(
+        epoch=1,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.91,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+    second_result = controller.on_epoch_end(
+        epoch=2,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.83,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    assert first_result.action == "increase_lambda"
+    assert second_result.action == "increase_lambda"
+    assert second_result.metrics["reference_source"] == "baseline_history"
+    assert second_result.metrics["reference_epoch"] == 2
+    assert second_result.metrics["reference_acc"] == pytest.approx(0.84)
+    assert second_result.metrics["min_allowed_acc"] == pytest.approx(0.82)
+    assert model.lambda_coef == pytest.approx(20.0)
+
+
+def test_adaptive_lambda_decreases_lambda_on_hard_degradation_without_rollback():
     model = _DummyModel(lambda_coef=5.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     scheduler_state = _make_scheduler_state(token=7, step_count=4)
@@ -120,20 +167,18 @@ def test_adaptive_lambda_rolls_back_and_restores_runtime_state_on_hard_degradati
         apply_lambda=_apply_lambda,
     )
 
-    expected_step = max(math.log(1.05), math.log(2.0) * 0.25)
-    expected_lambda = 5.0 * math.exp(expected_step)
-
-    assert result.action == "hard_degradation_rollback"
-    assert result.rolled_back is True
-    assert controller.rollback_count == 1
-    assert model.weight.detach().cpu().item() == pytest.approx(1.0)
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1)
-    assert scheduler_state.step_count == 4
-    assert scheduler_state.scheduler.token == 7
-    assert model.lambda_coef == pytest.approx(expected_lambda)
+    assert result.action == "decrease_lambda"
+    assert result.rolled_back is False
+    assert controller.rollback_count == 0
+    assert controller.step == pytest.approx(math.log(2.0))
+    assert model.weight.detach().cpu().item() == pytest.approx(99.0)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.333)
+    assert scheduler_state.step_count == 99
+    assert scheduler_state.scheduler.token == 42
+    assert model.lambda_coef == pytest.approx(5.0)
 
 
-def test_adaptive_lambda_freezes_at_latest_safe_lambda_after_rollback_limit():
+def test_adaptive_lambda_does_not_freeze_when_rollback_limit_is_unreachable():
     model = _DummyModel(lambda_coef=5.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     scheduler_state = _make_scheduler_state(token=11, step_count=2)
@@ -172,7 +217,121 @@ def test_adaptive_lambda_freezes_at_latest_safe_lambda_after_rollback_limit():
         apply_lambda=_apply_lambda,
     )
 
-    assert result.action == "rollback_limit_freeze"
-    assert controller.frozen is True
+    assert result.action == "decrease_lambda"
+    assert controller.frozen is False
+    assert controller.rollback_count == 0
+    assert controller.step == pytest.approx(math.log(2.0))
     assert model.lambda_coef == pytest.approx(5.0)
     assert controller.latest_safe_lambda == pytest.approx(5.0)
+
+
+def test_adaptive_lambda_holds_lambda_between_soft_and_hard_thresholds():
+    model = _DummyModel(lambda_coef=5.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    scheduler_state = _make_scheduler_state(token=7, step_count=4)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=5.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        rollback_on_degradation=False,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    controller.on_epoch_end(
+        epoch=1,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.91,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    with torch.no_grad():
+        model.weight.fill_(99.0)
+    optimizer.param_groups[0]["lr"] = 0.333
+    scheduler_state.step_count = 99
+    scheduler_state.scheduler.token = 42
+
+    result = controller.on_epoch_end(
+        epoch=2,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.88,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    assert result.action == "hold"
+    assert result.rolled_back is False
+    assert controller.rollback_count == 0
+    assert model.weight.detach().cpu().item() == pytest.approx(99.0)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.333)
+    assert scheduler_state.step_count == 99
+    assert scheduler_state.scheduler.token == 42
+    assert model.lambda_coef == pytest.approx(10.0)
+
+
+def test_adaptive_lambda_keeps_runtime_state_on_collapse_when_rollbacks_are_disabled_temporarily():
+    model = _DummyModel(lambda_coef=5.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    scheduler_state = _make_scheduler_state(token=7, step_count=4)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=5.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        rollback_on_degradation=False,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    controller.on_epoch_end(
+        epoch=1,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.91,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    with torch.no_grad():
+        model.weight.fill_(99.0)
+    optimizer.param_groups[0]["lr"] = 0.333
+    scheduler_state.step_count = 99
+    scheduler_state.scheduler.token = 42
+
+    result = controller.on_epoch_end(
+        epoch=2,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.10,
+            "valid_average_zero_prob": 0.92,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    assert result.action == "collapse_continue"
+    assert result.rolled_back is False
+    assert result.collapse_detected is True
+    assert controller.rollback_count == 0
+    assert controller.step == pytest.approx(math.log(2.0))
+    assert model.weight.detach().cpu().item() == pytest.approx(99.0)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.333)
+    assert scheduler_state.step_count == 99
+    assert scheduler_state.scheduler.token == 42
+    assert model.lambda_coef == pytest.approx(10.0)
