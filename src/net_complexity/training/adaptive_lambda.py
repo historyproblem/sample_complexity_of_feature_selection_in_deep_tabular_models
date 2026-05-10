@@ -104,6 +104,7 @@ class AdaptiveLambdaStepResult:
     reason: str
     lambda_changed: bool
     rolled_back: bool
+    resume_epoch: int | None
     collapse_detected: bool
     checkpoint_saved: bool
     metrics: dict[str, Any]
@@ -130,6 +131,10 @@ class AdaptiveLambdaController:
         collapse_loss_threshold: float = 2.15,
         collapse_zero_prob_threshold: float = 0.90,
         collapse_acc_drop_threshold: float = 0.40,
+        rollback_check_every_epochs: int = 5,
+        rollback_acc_drop_threshold: float = 0.20,
+        rollback_epoch_lookback: int = 20,
+        lambda_increase_cooldown_epochs: int = 10,
         rollback_on_degradation: bool = True,
         rollback_on_collapse: bool = True,
         max_rollbacks: int = 6,
@@ -153,6 +158,19 @@ class AdaptiveLambdaController:
             raise ValueError("adaptive_lambda soft/hard drops must be >= 0.")
         if soft_step_shrink <= 0.0 or hard_step_shrink <= 0.0:
             raise ValueError("adaptive_lambda step shrink factors must be > 0.")
+        if rollback_check_every_epochs <= 0:
+            raise ValueError("adaptive_lambda.rollback_check_every_epochs must be >= 1.")
+        if rollback_acc_drop_threshold < 0.0:
+            raise ValueError("adaptive_lambda.rollback_acc_drop_threshold must be >= 0.")
+        if rollback_epoch_lookback <= 0:
+            raise ValueError("adaptive_lambda.rollback_epoch_lookback must be >= 1.")
+        if rollback_epoch_lookback % rollback_check_every_epochs != 0:
+            raise ValueError(
+                "adaptive_lambda.rollback_epoch_lookback must be divisible by "
+                "adaptive_lambda.rollback_check_every_epochs."
+            )
+        if lambda_increase_cooldown_epochs < 0:
+            raise ValueError("adaptive_lambda.lambda_increase_cooldown_epochs must be >= 0.")
         if max_rollbacks < 0:
             raise ValueError("adaptive_lambda.max_rollbacks must be >= 0.")
 
@@ -171,6 +189,10 @@ class AdaptiveLambdaController:
         self.collapse_loss_threshold = float(collapse_loss_threshold)
         self.collapse_zero_prob_threshold = float(collapse_zero_prob_threshold)
         self.collapse_acc_drop_threshold = float(collapse_acc_drop_threshold)
+        self.rollback_check_every_epochs = int(rollback_check_every_epochs)
+        self.rollback_acc_drop_threshold = float(rollback_acc_drop_threshold)
+        self.rollback_epoch_lookback = int(rollback_epoch_lookback)
+        self.lambda_increase_cooldown_epochs = int(lambda_increase_cooldown_epochs)
         self.rollback_on_degradation = bool(rollback_on_degradation)
         self.rollback_on_collapse = bool(rollback_on_collapse)
         self.max_rollbacks = int(max_rollbacks)
@@ -189,10 +211,13 @@ class AdaptiveLambdaController:
         )
         self.best_val_acc: float | None = None
         self.previous_valid_acc: float | None = None
+        self.observed_accuracy_by_epoch: dict[int, float] = {}
         self.rollback_count = 0
         self.frozen = False
+        self.lambda_increase_cooldown_remaining = 0
         self.latest_safe_checkpoint: AdaptiveLambdaCheckpoint | None = None
         self.best_sparse_safe_checkpoint: AdaptiveLambdaCheckpoint | None = None
+        self.rollback_checkpoints_by_epoch: dict[int, AdaptiveLambdaCheckpoint] = {}
         self.latest_safe_epoch: int | None = None
         self.latest_safe_lambda: float | None = None
         self.best_sparse_safe_epoch: int | None = None
@@ -239,6 +264,7 @@ class AdaptiveLambdaController:
 
         if valid_acc is not None:
             self.acc_history.append(valid_acc)
+            self.observed_accuracy_by_epoch[epoch] = float(valid_acc)
             if self.best_val_acc is None or valid_acc > self.best_val_acc:
                 self.best_val_acc = valid_acc
 
@@ -249,25 +275,42 @@ class AdaptiveLambdaController:
         min_allowed_acc = None if reference_acc is None else reference_acc - self.soft_drop
         hard_min_allowed_acc = None if reference_acc is None else reference_acc - self.hard_drop
 
-        checkpoint_saved = self._maybe_save_safe_checkpoint(
-            epoch=epoch,
-            model=model,
-            optimizer=optimizer,
-            valid_metrics=valid_metrics,
-            scheduler_state=scheduler_state,
-            scaler=scaler,
-            min_allowed_acc=min_allowed_acc,
-            acc_ma=acc_ma,
-            current_lambda=current_lambda_before,
-        )
-
         action = "hold"
         reason = "waiting_for_next_update"
         lambda_changed = False
         rolled_back = False
+        resume_epoch = None
         collapse_detected = False
 
-        if epoch <= self.warmup_epochs:
+        rollback_result = self._maybe_rollback_on_recent_acc_drop(
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            scheduler_state=scheduler_state,
+            scaler=scaler,
+            valid_acc=valid_acc,
+            apply_lambda=apply_lambda,
+        )
+        checkpoint_saved = False
+        if rollback_result is not None:
+            action, reason, lambda_changed, resume_epoch = rollback_result
+            rolled_back = True
+        else:
+            checkpoint_saved = self._maybe_save_safe_checkpoint(
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                valid_metrics=valid_metrics,
+                scheduler_state=scheduler_state,
+                scaler=scaler,
+                min_allowed_acc=min_allowed_acc,
+                acc_ma=acc_ma,
+                current_lambda=current_lambda_before,
+            )
+
+        if rolled_back:
+            pass
+        elif epoch <= self.warmup_epochs:
             action = "warmup"
             reason = f"epoch={epoch} <= warmup_epochs={self.warmup_epochs}"
         elif self.frozen:
@@ -293,18 +336,26 @@ class AdaptiveLambdaController:
                     action = "hold"
                     reason = "missing_accuracy_feedback"
                 elif acc_ma >= min_allowed_acc:
-                    old_lambda = self.lambda_coef
-                    self.log_lambda = self._clamp_log_lambda(self.log_lambda + self.step)
-                    new_lambda = self.lambda_coef
-                    apply_lambda(model, new_lambda)
-                    lambda_changed = abs(new_lambda - old_lambda) > 1e-12
-                    action = "increase_lambda"
-                    reason = (
-                        f"acc_ma={acc_ma:.4f} >= min_allowed_acc={min_allowed_acc:.4f}; "
-                        f"lambda {old_lambda:.6g}->{new_lambda:.6g}"
-                    )
-                    if lambda_changed:
-                        self._print_action(epoch, action, reason)
+                    if self.lambda_increase_cooldown_remaining > 0:
+                        action = "hold"
+                        reason = (
+                            f"acc_ma={acc_ma:.4f} >= min_allowed_acc={min_allowed_acc:.4f}; "
+                            "lambda increase blocked by rollback cooldown"
+                            f" ({self.lambda_increase_cooldown_remaining} epochs remaining)"
+                        )
+                    else:
+                        old_lambda = self.lambda_coef
+                        self.log_lambda = self._clamp_log_lambda(self.log_lambda + self.step)
+                        new_lambda = self.lambda_coef
+                        apply_lambda(model, new_lambda)
+                        lambda_changed = abs(new_lambda - old_lambda) > 1e-12
+                        action = "increase_lambda"
+                        reason = (
+                            f"acc_ma={acc_ma:.4f} >= min_allowed_acc={min_allowed_acc:.4f}; "
+                            f"lambda {old_lambda:.6g}->{new_lambda:.6g}"
+                        )
+                        if lambda_changed:
+                            self._print_action(epoch, action, reason)
                 elif acc_ma >= hard_min_allowed_acc:
                     action = "hold"
                     reason = (
@@ -328,9 +379,24 @@ class AdaptiveLambdaController:
 
         if not rolled_back and valid_acc is not None:
             self.previous_valid_acc = valid_acc
+        if not rolled_back and self.lambda_increase_cooldown_remaining > 0:
+            self.lambda_increase_cooldown_remaining = max(
+                0,
+                self.lambda_increase_cooldown_remaining - 1,
+            )
 
         self.last_action = action
         self.last_reason = reason
+        if not rolled_back:
+            self._maybe_store_rollback_checkpoint(
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                valid_metrics=valid_metrics,
+                scheduler_state=scheduler_state,
+                scaler=scaler,
+                current_lambda=self.lambda_coef,
+            )
         metrics = self._build_epoch_metrics(
             action=action,
             reason=reason,
@@ -345,6 +411,7 @@ class AdaptiveLambdaController:
             reason=reason,
             lambda_changed=lambda_changed,
             rolled_back=rolled_back,
+            resume_epoch=resume_epoch,
             collapse_detected=collapse_detected,
             checkpoint_saved=checkpoint_saved,
             metrics=metrics,
@@ -371,7 +438,12 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": self.last_action,
             "adaptive_lambda_reason": self.last_reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "rollback_check_every_epochs": self.rollback_check_every_epochs,
+            "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
+            "rollback_epoch_lookback": self.rollback_epoch_lookback,
             "rollback_on_degradation": self.rollback_on_degradation,
+            "lambda_increase_cooldown_epochs": self.lambda_increase_cooldown_epochs,
+            "lambda_increase_cooldown_remaining": self.lambda_increase_cooldown_remaining,
             "reference_source": (
                 "baseline_history"
                 if self.reference_accuracy_by_epoch
@@ -419,6 +491,9 @@ class AdaptiveLambdaController:
             return False
         return (epoch - self.warmup_epochs) % self.update_every_epochs == 0
 
+    def _should_check_rollback(self, epoch: int) -> bool:
+        return epoch % self.rollback_check_every_epochs == 0
+
     def _detect_collapse(
         self,
         *,
@@ -458,6 +533,9 @@ class AdaptiveLambdaController:
             "acc_history": list(self.acc_history),
             "previous_valid_acc": self.previous_valid_acc,
             "best_val_acc": self.best_val_acc,
+            "step": self.step,
+            "observed_accuracy_by_epoch": dict(self.observed_accuracy_by_epoch),
+            "lambda_increase_cooldown_remaining": self.lambda_increase_cooldown_remaining,
         }
 
     def _capture_checkpoint(
@@ -592,6 +670,7 @@ class AdaptiveLambdaController:
         if scaler is not None and checkpoint.scaler_state_dict is not None and hasattr(scaler, "load_state_dict"):
             scaler.load_state_dict(checkpoint.scaler_state_dict)
 
+        self.log_lambda = float(checkpoint.log_lambda)
         apply_lambda(model, checkpoint.lambda_coef)
 
         snapshot = checkpoint.controller_state
@@ -601,10 +680,124 @@ class AdaptiveLambdaController:
         )
         self.previous_valid_acc = _to_float(snapshot.get("previous_valid_acc"))
         checkpoint_best_val_acc = _to_float(snapshot.get("best_val_acc"))
+        checkpoint_step = _to_float(snapshot.get("step"))
+        if checkpoint_step is not None:
+            self.step = max(float(checkpoint_step), self.log_step_min)
+        restored_accuracy_by_epoch = snapshot.get("observed_accuracy_by_epoch", {})
+        self.observed_accuracy_by_epoch = {
+            int(epoch): float(value)
+            for epoch, value in dict(restored_accuracy_by_epoch).items()
+        }
+        restored_cooldown_remaining = snapshot.get("lambda_increase_cooldown_remaining")
+        if restored_cooldown_remaining is None:
+            self.lambda_increase_cooldown_remaining = 0
+        else:
+            self.lambda_increase_cooldown_remaining = max(0, int(restored_cooldown_remaining))
         if self.best_val_acc is None:
             self.best_val_acc = checkpoint_best_val_acc
         elif checkpoint_best_val_acc is not None:
             self.best_val_acc = max(self.best_val_acc, checkpoint_best_val_acc)
+
+    def _maybe_rollback_on_recent_acc_drop(
+        self,
+        *,
+        epoch: int,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler_state: Any,
+        scaler: Any,
+        valid_acc: float | None,
+        apply_lambda: LambdaApplier,
+    ) -> tuple[str, str, bool, int] | None:
+        if not self.rollback_on_degradation:
+            return None
+        if valid_acc is None or not self._should_check_rollback(epoch):
+            return None
+        if epoch <= self.rollback_epoch_lookback:
+            return None
+
+        comparison_epoch = epoch - self.rollback_check_every_epochs
+        previous_acc = self.observed_accuracy_by_epoch.get(comparison_epoch)
+        if previous_acc is None:
+            return None
+
+        acc_drop = float(previous_acc) - float(valid_acc)
+        if acc_drop <= self.rollback_acc_drop_threshold:
+            return None
+
+        target_epoch = epoch - self.rollback_epoch_lookback
+        checkpoint = self.rollback_checkpoints_by_epoch.get(target_epoch)
+        if checkpoint is None:
+            return None
+
+        old_lambda = self.lambda_coef
+        self._restore_checkpoint(
+            checkpoint,
+            model=model,
+            optimizer=optimizer,
+            scheduler_state=scheduler_state,
+            scaler=scaler,
+            apply_lambda=apply_lambda,
+        )
+        self.rollback_checkpoints_by_epoch = {
+            saved_epoch: saved_checkpoint
+            for saved_epoch, saved_checkpoint in self.rollback_checkpoints_by_epoch.items()
+            if saved_epoch <= target_epoch
+        }
+        self.rollback_count += 1
+        self.lambda_increase_cooldown_remaining = int(self.lambda_increase_cooldown_epochs)
+
+        action = "periodic_rollback"
+        lambda_changed = abs(old_lambda - checkpoint.lambda_coef) > 1e-12
+        reason = (
+            f"valid_acc_drop_over_{self.rollback_check_every_epochs}_epochs={acc_drop:.4f}"
+            f" > rollback_acc_drop_threshold={self.rollback_acc_drop_threshold:.4f}; "
+            f"rolled back to epoch={target_epoch}; "
+            f"lambda increase cooldown={self.lambda_increase_cooldown_remaining} epochs"
+        )
+
+        if self.freeze_on_rollback_limit and self.rollback_count > self.max_rollbacks:
+            self.frozen = True
+            action = "rollback_limit_freeze"
+            reason = (
+                f"rollback_limit_reached ({self.rollback_count}>{self.max_rollbacks}); "
+                f"rolled back to epoch={target_epoch}; "
+                f"freezing at lambda={checkpoint.lambda_coef:.6g}"
+            )
+
+        self._print_action(epoch, action, reason)
+        return action, reason, lambda_changed, target_epoch + 1
+
+    def _maybe_store_rollback_checkpoint(
+        self,
+        *,
+        epoch: int,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        valid_metrics: Mapping[str, Any],
+        scheduler_state: Any,
+        scaler: Any,
+        current_lambda: float,
+    ) -> None:
+        if not self._should_check_rollback(epoch):
+            return
+
+        checkpoint = self._capture_checkpoint(
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            valid_metrics=valid_metrics,
+            scheduler_state=scheduler_state,
+            scaler=scaler,
+            current_lambda=current_lambda,
+        )
+        self.rollback_checkpoints_by_epoch[int(epoch)] = checkpoint
+        min_epoch_to_keep = max(0, int(epoch) - self.rollback_epoch_lookback)
+        self.rollback_checkpoints_by_epoch = {
+            saved_epoch: saved_checkpoint
+            for saved_epoch, saved_checkpoint in self.rollback_checkpoints_by_epoch.items()
+            if saved_epoch >= min_epoch_to_keep
+        }
 
     def _rollback_to_safe_checkpoint(
         self,
@@ -678,7 +871,12 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": action,
             "adaptive_lambda_reason": reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "rollback_check_every_epochs": self.rollback_check_every_epochs,
+            "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
+            "rollback_epoch_lookback": self.rollback_epoch_lookback,
             "rollback_on_degradation": self.rollback_on_degradation,
+            "lambda_increase_cooldown_epochs": self.lambda_increase_cooldown_epochs,
+            "lambda_increase_cooldown_remaining": self.lambda_increase_cooldown_remaining,
             "reference_epoch": reference_epoch,
             "reference_acc": reference_acc,
             "reference_source": (

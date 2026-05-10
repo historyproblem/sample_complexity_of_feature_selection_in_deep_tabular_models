@@ -1186,6 +1186,12 @@ def _build_adaptive_lambda(
         collapse_loss_threshold=float(getattr(cfg, "collapse_loss_threshold", 2.15)),
         collapse_zero_prob_threshold=float(getattr(cfg, "collapse_zero_prob_threshold", 0.90)),
         collapse_acc_drop_threshold=float(getattr(cfg, "collapse_acc_drop_threshold", 0.40)),
+        rollback_check_every_epochs=int(getattr(cfg, "rollback_check_every_epochs", 5)),
+        rollback_acc_drop_threshold=float(getattr(cfg, "rollback_acc_drop_threshold", 0.20)),
+        rollback_epoch_lookback=int(getattr(cfg, "rollback_epoch_lookback", 20)),
+        lambda_increase_cooldown_epochs=int(
+            getattr(cfg, "lambda_increase_cooldown_epochs", 10)
+        ),
         rollback_on_degradation=bool(getattr(cfg, "rollback_on_degradation", True)),
         rollback_on_collapse=bool(getattr(cfg, "rollback_on_collapse", True)),
         max_rollbacks=int(getattr(cfg, "max_rollbacks", 6)),
@@ -1369,8 +1375,8 @@ def train(model: nn.Module,
             runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
             run_history.set_runtime_metadata(runtime_metadata)
 
-    for epoch in range(total_epochs):
-        epoch_num = epoch + 1
+    epoch_num = 1
+    while epoch_num <= total_epochs:
         if lambda_warmup is not None:
             lambda_warmup.step(epoch_num, model)
         if gate_mode_schedule is not None:
@@ -1441,6 +1447,7 @@ def train(model: nn.Module,
 
         controller_metrics: dict[str, Any] = {}
         adaptive_collapse_handled = False
+        next_epoch_num = epoch_num + 1
         if adaptive_lambda is not None:
             adaptive_step_result = adaptive_lambda.on_epoch_end(
                 epoch=epoch_num,
@@ -1453,9 +1460,14 @@ def train(model: nn.Module,
             )
             controller_metrics = dict(adaptive_step_result.metrics)
             adaptive_collapse_handled = (
-                adaptive_step_result.collapse_detected
-                and adaptive_step_result.action in {"collapse_rollback", "rollback_limit_freeze"}
+                adaptive_step_result.rolled_back
+                or (
+                    adaptive_step_result.collapse_detected
+                    and adaptive_step_result.action in {"collapse_rollback", "rollback_limit_freeze"}
+                )
             )
+            if adaptive_step_result.resume_epoch is not None:
+                next_epoch_num = int(adaptive_step_result.resume_epoch)
             if run_history is not None:
                 runtime_metadata = dict(run_history.runtime_metadata)
                 runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
@@ -1530,7 +1542,7 @@ def train(model: nn.Module,
 
         should_stop = False
         stop_message: str | None = None
-        if early_stopping is not None:
+        if early_stopping is not None and not adaptive_collapse_handled:
             should_stop = early_stopping.step(epoch_num, valid_metrics)
             if should_stop:
                 stop_message = (
@@ -1574,6 +1586,7 @@ def train(model: nn.Module,
 
         if should_stop:
             break
+        epoch_num = next_epoch_num
 
     final_epoch = completed_epochs or total_epochs
     if batchnorm_recalibration is not None:

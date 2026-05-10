@@ -41,6 +41,7 @@ class RunHistory:
         self.last_valid_metrics: dict[str, Any] = {}
         self.best_valid_metrics: dict[str, Any] = {}
         self.runtime_metadata: dict[str, Any] = {}
+        self.epoch_pass_counts: dict[int, int] = {}
 
         resolved_config = OmegaConf.to_container(config, resolve=True)
         run_name = "run"
@@ -79,7 +80,7 @@ class RunHistory:
         self.summary_path = self.run_dir / "summary.json"
         self.config_path = self.run_dir / "config_resolved.yaml"
         self.checkpoints_dir.mkdir(parents=True, exist_ok=False)
-        self._history_fieldnames = ["epoch"]
+        self._history_fieldnames = ["epoch", "epoch_pass", "epoch_label"]
         self._batch_fieldnames = ["global_batch_step", "stage", "stage_batch_step", "epoch", "batch_in_epoch"]
         self._logged_gate_history_keys: set[tuple[int, str]] = set()
 
@@ -133,6 +134,9 @@ class RunHistory:
 
     def _write_json(self, path: Path, payload: Mapping[str, Any]) -> None:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _build_epoch_label(self, epoch: int, epoch_pass: int) -> str:
+        return f"epoch_{int(epoch):03d}_pass_{int(epoch_pass):02d}"
 
     def _append_csv_record(self, path: Path, fieldnames: list[str], record: Mapping[str, Any]) -> None:
         needs_header = not path.exists() or path.stat().st_size == 0
@@ -220,8 +224,13 @@ class RunHistory:
     ) -> dict[str, Any]:
         self.last_train_metrics = dict(train_metrics)
         self.last_valid_metrics = dict(valid_metrics)
+        epoch = int(epoch)
+        epoch_pass = int(self.epoch_pass_counts.get(epoch, 0))
+        self.epoch_pass_counts[epoch] = epoch_pass + 1
         record = {
-            "epoch": int(epoch),
+            "epoch": epoch,
+            "epoch_pass": epoch_pass,
+            "epoch_label": self._build_epoch_label(epoch, epoch_pass),
             **self.last_train_metrics,
             **self.last_valid_metrics,
             **dict(extra_metrics or {}),

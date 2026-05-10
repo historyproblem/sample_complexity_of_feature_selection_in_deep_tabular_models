@@ -184,6 +184,9 @@ def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
         rows = list(csv.DictReader(handle))
 
     assert len(rows) == 1
+    assert rows[0]["epoch"] == "1"
+    assert rows[0]["epoch_pass"] == "0"
+    assert rows[0]["epoch_label"] == "epoch_001_pass_00"
     assert rows[0]["train_average_zero_prob"] == "0.25"
     assert rows[0]["valid_average_zero_prob"] == "0.5"
     assert rows[0]["epoch_time_sec"] == "2.1"
@@ -210,6 +213,32 @@ def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
     assert summary["best_valid"]["value"] == 0.9
     assert summary["artifacts"]["history"] == "history.csv"
     assert summary["artifacts"]["channel_history"] == "channel_history.csv.gz"
+
+
+def test_run_history_assigns_unique_epoch_labels_to_replayed_epochs(tmp_path):
+    config = OmegaConf.create(
+        {
+            "run_history": {
+                "root_dir": str(tmp_path),
+                "run_name": "epoch_label_test",
+            },
+        }
+    )
+    run_history = RunHistory(config)
+
+    run_history.log_epoch(3, {"train_loss": 1.0}, {"valid_loss": 0.9})
+    run_history.log_epoch(3, {"train_loss": 0.8}, {"valid_loss": 0.7})
+
+    with run_history.history_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 2
+    assert rows[0]["epoch"] == "3"
+    assert rows[0]["epoch_pass"] == "0"
+    assert rows[0]["epoch_label"] == "epoch_003_pass_00"
+    assert rows[1]["epoch"] == "3"
+    assert rows[1]["epoch_pass"] == "1"
+    assert rows[1]["epoch_label"] == "epoch_003_pass_01"
 
 
 def test_run_history_logs_gumbel_gate_history_as_jsonl_without_duplicates(tmp_path):

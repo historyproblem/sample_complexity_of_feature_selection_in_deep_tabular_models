@@ -27,6 +27,10 @@ training_arguments:
     collapse_loss_threshold: 2.15
     collapse_zero_prob_threshold: 0.90
     collapse_acc_drop_threshold: 0.40
+    rollback_check_every_epochs: 5
+    rollback_acc_drop_threshold: 0.20
+    rollback_epoch_lookback: 20
+    lambda_increase_cooldown_epochs: 10
     rollback_on_degradation: true
     rollback_on_collapse: true
     max_rollbacks: 6

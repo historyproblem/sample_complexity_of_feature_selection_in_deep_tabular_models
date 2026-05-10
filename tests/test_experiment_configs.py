@@ -120,6 +120,10 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
         assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
         assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
+        assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 5
+        assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
+        assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
+        assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
         assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
         assert cfg.training_arguments.batchnorm_recalibration.enabled is True
         assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
@@ -372,6 +376,42 @@ def test_resnet50_adaptive_lambda_init1em6_no_warmup_uses_requested_recipe():
     assert cfg.run_history.log_gate_history is True
     assert cfg.mlflow.enabled is False
     assert cfg.mlflow.tags.recipe == "resnet50_adaptive_lambda_init1em6_no_warmup"
+
+
+def test_resnet50_adaptive_lambda_step125_no_warmup_base_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_adaptive_lambda_step125_no_warmup_base.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.0e-3
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 1
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 100.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.22314355131420976
+    assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.04
+    assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 5
+    assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
+    assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
+    assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "resnet50_adaptive_lambda_step125_no_warmup_base"
 
 
 def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():
@@ -743,12 +783,45 @@ def test_resnet50_adaptive_lambda_nightly_grid_runs_requested_points_in_order():
     assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [5.0, 15.0, 25.0, 35.0]
 
 
+def test_resnet50_adaptive_lambda_updatefreq_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [0.001, 0.1, 0.001, 0.1]
+    assert [
+        point["training_arguments.adaptive_lambda.update_every_epochs"]
+        for point in cfg.tuning.points
+    ] == [2, 2, 1, 1]
+
+
 def test_tune_resnet50_adaptive_lambda_nightly_uses_adaptive_base_and_ordered_grid():
     cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_adaptive_lambda_nightly.yaml")
 
     assert cfg.defaults == [
         {"experiment": "resnet50_adaptive_lambda_init5"},
         {"tuning": "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered"},
+        "_self_",
+    ]
+
+
+def test_tune_resnet50_adaptive_lambda_updatefreq_nightly_uses_adaptive_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_adaptive_lambda_updatefreq_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_step125_no_warmup_base"},
+        {"tuning": "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"},
         "_self_",
     ]
 
