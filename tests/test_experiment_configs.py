@@ -826,6 +826,35 @@ def test_tune_resnet50_adaptive_lambda_updatefreq_nightly_uses_adaptive_base_and
     ]
 
 
+def test_resnet50_gumbel_constant_lambda_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [27.0, 28.0, 29.0, 31.0]
+
+
+def test_tune_resnet50_gumbel_constant_lambda_nightly_uses_stock_gumbel_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_gumbel_constant_lambda_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "best_practice_resnet50_gumbel_on_cifar10"},
+        {"tuning": "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered"},
+        "_self_",
+    ]
+
+
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10_120.yaml")
 
