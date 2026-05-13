@@ -125,6 +125,12 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
         assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
         assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
+        assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_enabled is True
+        assert cfg.training_arguments.adaptive_lambda.prune_rate_low_per_epoch == 0.02
+        assert cfg.training_arguments.adaptive_lambda.prune_rate_high_per_epoch == 0.07
+        assert cfg.training_arguments.adaptive_lambda.log_step_boost_factor == 2.0
+        assert cfg.training_arguments.adaptive_lambda.log_step_max_boost_level == 2
+        assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_max_epoch is None
         assert cfg.training_arguments.adaptive_lambda.recovery.enabled is True
         assert cfg.training_arguments.adaptive_lambda.recovery.min_epoch == 80
         assert cfg.training_arguments.adaptive_lambda.recovery.recovery_epochs == 5
@@ -198,6 +204,13 @@ def test_resnet50_gumbel_adaptive_lambda_recovery_v1_config_enables_recovery():
     )
 
     assert cfg.training_arguments.adaptive_lambda.enabled is True
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert adaptive.adaptive_log_step_enabled is True
+    assert adaptive.prune_rate_low_per_epoch == 0.02
+    assert adaptive.prune_rate_high_per_epoch == 0.07
+    assert adaptive.log_step_boost_factor == 2.0
+    assert adaptive.log_step_max_boost_level == 2
+    assert adaptive.adaptive_log_step_max_epoch is None
     recovery = cfg.training_arguments.adaptive_lambda.recovery
     assert recovery.enabled is True
     assert recovery.decay_lambda is False
@@ -853,6 +866,69 @@ def test_tune_resnet50_adaptive_lambda_updatefreq_nightly_uses_adaptive_base_and
     assert cfg.defaults == [
         {"experiment": "resnet50_adaptive_lambda_step125_no_warmup_base"},
         {"tuning": "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"},
+        "_self_",
+    ]
+
+
+def test_resnet50_gumbel_adaptive_logstep_until50_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / (
+            "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+            "logstep_grid_1em6_1em4_boost5_until50_ordered.yaml"
+        )
+    )
+
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == (
+            "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+            "logstep_grid_1em6_1em4_boost5_until50_ordered"
+        )
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.000001,
+        0.0001,
+        0.000001,
+        0.0001,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in cfg.tuning.points
+    ] == [
+        0.22314355131420976,
+        0.22314355131420976,
+        0.09531017980432493,
+        0.09531017980432493,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_max_boost_level"]
+        for point in cfg.tuning.points
+    ] == [5, 5, 5, 5]
+    assert [
+        point["training_arguments.adaptive_lambda.adaptive_log_step_max_epoch"]
+        for point in cfg.tuning.points
+    ] == [50, 50, 50, 50]
+
+
+def test_tune_resnet50_gumbel_adaptive_logstep_until50_uses_recovery_base_and_ordered_grid():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_gumbel_adaptive_lambda_recovery_v1_logstep_grid_until50.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_gumbel_adaptive_lambda_recovery_v1"},
+        {
+            "tuning": (
+                "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+                "logstep_grid_1em6_1em4_boost5_until50_ordered"
+            )
+        },
         "_self_",
     ]
 

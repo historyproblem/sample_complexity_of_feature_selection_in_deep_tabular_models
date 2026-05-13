@@ -41,6 +41,30 @@ def _make_scheduler_state(token: int, step_count: int) -> SimpleNamespace:
     )
 
 
+def _run_epoch(
+    controller: AdaptiveLambdaController,
+    model: _DummyModel,
+    optimizer: torch.optim.Optimizer,
+    *,
+    epoch: int,
+    accuracy: float,
+    zero_prob: float,
+    scheduler_state: SimpleNamespace | None = None,
+):
+    return controller.on_epoch_end(
+        epoch=epoch,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": accuracy,
+            "valid_average_zero_prob": zero_prob,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+
 def test_adaptive_lambda_increases_when_accuracy_stays_within_soft_band():
     model = _DummyModel(lambda_coef=5.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
@@ -50,6 +74,7 @@ def test_adaptive_lambda_increases_when_accuracy_stays_within_soft_band():
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
     )
 
     controller.apply_initial_state(model, apply_lambda=_apply_lambda)
@@ -86,6 +111,7 @@ def test_adaptive_lambda_uses_baseline_epoch_accuracy_instead_of_best_accuracy_s
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
     )
 
     controller.apply_initial_state(model, apply_lambda=_apply_lambda)
@@ -132,6 +158,7 @@ def test_adaptive_lambda_decreases_lambda_on_hard_degradation_without_rollback()
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
     )
 
     controller.apply_initial_state(model, apply_lambda=_apply_lambda)
@@ -187,6 +214,7 @@ def test_adaptive_lambda_does_not_freeze_when_rollback_limit_is_unreachable():
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
         max_rollbacks=0,
     )
 
@@ -234,6 +262,7 @@ def test_adaptive_lambda_holds_lambda_between_soft_and_hard_thresholds():
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
         rollback_on_degradation=False,
     )
 
@@ -289,6 +318,7 @@ def test_adaptive_lambda_keeps_runtime_state_on_collapse_when_rollbacks_are_disa
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
         rollback_on_degradation=False,
     )
 
@@ -346,6 +376,7 @@ def test_adaptive_lambda_rolls_back_after_large_drop_over_five_epochs():
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
         lambda_max=1000.0,
         rollback_check_every_epochs=5,
         rollback_acc_drop_threshold=0.20,
@@ -417,6 +448,7 @@ def test_adaptive_lambda_blocks_increase_during_cooldown_and_resumes_after_it_ex
         warmup_epochs=0,
         update_every_epochs=1,
         acc_window=1,
+        adaptive_log_step_enabled=False,
     )
 
     controller.apply_initial_state(model, apply_lambda=_apply_lambda)
@@ -484,3 +516,258 @@ def test_adaptive_lambda_blocks_increase_during_cooldown_and_resumes_after_it_ex
     )
     assert fourth_result.action == "increase_lambda"
     assert model.lambda_coef == pytest.approx(20.0)
+
+
+def test_adaptive_log_step_slow_pruning_boosts_to_cap_and_target_resets():
+    model = _DummyModel(lambda_coef=1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    log_step = math.log(1.25)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=1.0,
+        warmup_epochs=0,
+        update_every_epochs=2,
+        acc_window=1,
+        log_step_init=log_step,
+        log_step_min=math.log(1.05),
+        lambda_max=1000.0,
+        rollback_on_degradation=False,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    _run_epoch(controller, model, optimizer, epoch=1, accuracy=0.90, zero_prob=0.095)
+    first_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=2,
+        accuracy=0.90,
+        zero_prob=0.10,
+    )
+    lambda_after_first_update = model.lambda_coef
+
+    _run_epoch(controller, model, optimizer, epoch=3, accuracy=0.90, zero_prob=0.105)
+    second_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=4,
+        accuracy=0.90,
+        zero_prob=0.11,
+    )
+    lambda_after_second_update = model.lambda_coef
+
+    _run_epoch(controller, model, optimizer, epoch=5, accuracy=0.90, zero_prob=0.115)
+    third_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=6,
+        accuracy=0.90,
+        zero_prob=0.12,
+    )
+    lambda_after_third_update = model.lambda_coef
+
+    _run_epoch(controller, model, optimizer, epoch=7, accuracy=0.90, zero_prob=0.125)
+    fourth_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=8,
+        accuracy=0.90,
+        zero_prob=0.13,
+    )
+    lambda_after_fourth_update = model.lambda_coef
+
+    _run_epoch(controller, model, optimizer, epoch=9, accuracy=0.90, zero_prob=0.17)
+    target_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=10,
+        accuracy=0.90,
+        zero_prob=0.21,
+    )
+    lambda_after_target_update = model.lambda_coef
+
+    _run_epoch(controller, model, optimizer, epoch=11, accuracy=0.90, zero_prob=0.31)
+    fast_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=12,
+        accuracy=0.90,
+        zero_prob=0.41,
+    )
+
+    assert first_update.metrics["adaptive_lambda_step_action"] == "step_init_no_prev_zero_prob"
+    assert first_update.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert first_update.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(log_step)
+
+    assert second_update.metrics["adaptive_lambda_step_action"] == "step_boost_slow_pruning"
+    assert second_update.metrics["adaptive_lambda_log_step_boost_level"] == 1
+    assert second_update.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(0.005)
+    assert lambda_after_second_update / lambda_after_first_update == pytest.approx(1.25**2)
+
+    assert third_update.metrics["adaptive_lambda_step_action"] == "step_boost_slow_pruning"
+    assert third_update.metrics["adaptive_lambda_log_step_boost_level"] == 2
+    assert lambda_after_third_update / lambda_after_second_update == pytest.approx(1.25**4)
+
+    assert fourth_update.metrics["adaptive_lambda_step_action"] == "step_boost_slow_pruning"
+    assert fourth_update.metrics["adaptive_lambda_log_step_boost_level"] == 2
+    assert lambda_after_fourth_update / lambda_after_third_update == pytest.approx(1.25**4)
+
+    assert target_update.metrics["adaptive_lambda_step_action"] == "step_reset_target_pruning"
+    assert target_update.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert target_update.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(0.04)
+    assert lambda_after_target_update / lambda_after_fourth_update == pytest.approx(1.25)
+
+    assert fast_update.metrics["adaptive_lambda_step_action"] == (
+        "step_keep_fast_pruning_no_new_logic"
+    )
+    assert fast_update.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert fast_update.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(0.10)
+    assert model.lambda_coef / lambda_after_target_update == pytest.approx(1.25)
+
+
+def test_adaptive_log_step_bad_accuracy_resets_boost_and_uses_base_step():
+    model = _DummyModel(lambda_coef=1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    log_step = math.log(1.25)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=1.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        log_step_init=log_step,
+        log_step_min=math.log(1.05),
+        rollback_on_degradation=False,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    _run_epoch(controller, model, optimizer, epoch=1, accuracy=0.90, zero_prob=0.10)
+    _run_epoch(controller, model, optimizer, epoch=2, accuracy=0.90, zero_prob=0.105)
+    lambda_before_bad_acc = model.lambda_coef
+    assert controller.log_step_boost_level == 1
+
+    result = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=3,
+        accuracy=0.80,
+        zero_prob=0.11,
+    )
+
+    assert result.action == "decrease_lambda"
+    assert result.metrics["adaptive_lambda_step_action"] == "step_reset_bad_acc"
+    assert result.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert result.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(log_step)
+    assert model.lambda_coef == pytest.approx(lambda_before_bad_acc / 1.25)
+
+
+def test_adaptive_log_step_rollback_resets_boost_level():
+    model = _DummyModel(lambda_coef=1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    log_step = math.log(1.25)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=1.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        log_step_init=log_step,
+        log_step_min=math.log(1.05),
+        rollback_check_every_epochs=1,
+        rollback_acc_drop_threshold=0.05,
+        rollback_epoch_lookback=1,
+        lambda_increase_cooldown_epochs=0,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    _run_epoch(controller, model, optimizer, epoch=1, accuracy=0.90, zero_prob=0.10)
+    _run_epoch(controller, model, optimizer, epoch=2, accuracy=0.90, zero_prob=0.105)
+    assert controller.log_step_boost_level == 1
+
+    result = _run_epoch(controller, model, optimizer, epoch=3, accuracy=0.80, zero_prob=0.11)
+
+    assert result.rolled_back is True
+    assert result.action == "periodic_rollback"
+    assert controller.log_step_boost_level == 0
+    assert result.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert result.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(log_step)
+
+
+def test_disabled_adaptive_log_step_keeps_base_log_step():
+    model = _DummyModel(lambda_coef=1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    log_step = math.log(1.25)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=1.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        log_step_init=log_step,
+        log_step_min=math.log(1.05),
+        adaptive_log_step_enabled=False,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    first_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=1,
+        accuracy=0.90,
+        zero_prob=0.10,
+    )
+    second_update = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=2,
+        accuracy=0.90,
+        zero_prob=0.10,
+    )
+
+    assert first_update.metrics["adaptive_lambda_step_action"] == "step_disabled"
+    assert second_update.metrics["adaptive_lambda_step_action"] == "step_disabled"
+    assert second_update.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert second_update.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(log_step)
+    assert second_update.metrics["adaptive_lambda_prune_rate_per_epoch"] is None
+    assert model.lambda_coef == pytest.approx(1.25**2)
+
+
+def test_adaptive_log_step_max_epoch_resets_to_base_step_after_cutoff():
+    model = _DummyModel(lambda_coef=1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    log_step = math.log(1.25)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=1.0,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        log_step_init=log_step,
+        log_step_min=math.log(1.05),
+        adaptive_log_step_max_epoch=2,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    _run_epoch(controller, model, optimizer, epoch=1, accuracy=0.90, zero_prob=0.10)
+    _run_epoch(controller, model, optimizer, epoch=2, accuracy=0.90, zero_prob=0.105)
+    lambda_before_cutoff = model.lambda_coef
+    assert controller.log_step_boost_level == 1
+
+    result = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=3,
+        accuracy=0.90,
+        zero_prob=0.11,
+    )
+
+    assert result.action == "increase_lambda"
+    assert result.metrics["adaptive_lambda_step_action"] == "step_reset_after_max_epoch"
+    assert result.metrics["adaptive_lambda_log_step_boost_level"] == 0
+    assert result.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(log_step)
+    assert result.metrics["adaptive_log_step_max_epoch"] == 2
+    assert model.lambda_coef / lambda_before_cutoff == pytest.approx(1.25)

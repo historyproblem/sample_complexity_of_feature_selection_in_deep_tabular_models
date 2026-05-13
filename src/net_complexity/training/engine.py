@@ -1234,6 +1234,7 @@ def _build_adaptive_lambda(
         if recovery_cfg is not None
         else None
     )
+    adaptive_log_step_max_epoch = getattr(cfg, "adaptive_log_step_max_epoch", None)
 
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
@@ -1245,6 +1246,16 @@ def _build_adaptive_lambda(
         lambda_max=float(getattr(cfg, "lambda_max", 80.0)),
         log_step_init=float(getattr(cfg, "log_step_init", 0.6931471805599453)),
         log_step_min=float(getattr(cfg, "log_step_min", 0.04879016416943205)),
+        adaptive_log_step_enabled=bool(getattr(cfg, "adaptive_log_step_enabled", True)),
+        prune_rate_low_per_epoch=float(getattr(cfg, "prune_rate_low_per_epoch", 0.02)),
+        prune_rate_high_per_epoch=float(getattr(cfg, "prune_rate_high_per_epoch", 0.07)),
+        log_step_boost_factor=float(getattr(cfg, "log_step_boost_factor", 2.0)),
+        log_step_max_boost_level=int(getattr(cfg, "log_step_max_boost_level", 2)),
+        adaptive_log_step_max_epoch=(
+            None
+            if adaptive_log_step_max_epoch is None
+            else int(adaptive_log_step_max_epoch)
+        ),
         soft_drop=float(getattr(cfg, "soft_drop", 0.02)),
         hard_drop=float(getattr(cfg, "hard_drop", 0.05)),
         soft_step_shrink=float(getattr(cfg, "soft_step_shrink", 0.5)),

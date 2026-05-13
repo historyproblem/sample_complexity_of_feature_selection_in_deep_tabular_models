@@ -42,6 +42,9 @@ def _apply_lambda(model: TinyRecoveryModel, lambda_coef: float) -> None:
 
 def _make_controller(**recovery_overrides) -> AdaptiveLambdaController:
     update_every_epochs = int(recovery_overrides.pop("update_every_epochs", 1))
+    adaptive_log_step_enabled = bool(
+        recovery_overrides.pop("adaptive_log_step_enabled", False)
+    )
     recovery_config = {
         "enabled": True,
         "min_epoch": 3,
@@ -72,6 +75,7 @@ def _make_controller(**recovery_overrides) -> AdaptiveLambdaController:
         warmup_epochs=0,
         update_every_epochs=update_every_epochs,
         acc_window=1,
+        adaptive_log_step_enabled=adaptive_log_step_enabled,
         soft_drop=0.02,
         hard_drop=0.04,
         rollback_check_every_epochs=5,
@@ -359,6 +363,10 @@ def test_recovery_metrics_are_written_to_history_and_summary(tmp_path):
     assert rows[0]["recovery_active"] == "True"
     assert rows[0]["recovery_open_bias"] == "0.15"
     assert "recovery_revive_candidates_frac" in rows[0]
+    assert "adaptive_lambda_effective_log_step" in rows[0]
+    assert "adaptive_lambda_log_step_boost_level" in rows[0]
+    assert "adaptive_lambda_prune_rate_per_epoch" in rows[0]
+    assert "adaptive_lambda_step_action" in rows[0]
 
     summary = json.loads(run_history.summary_path.read_text(encoding="utf-8"))
     assert summary["recovery_num_attempts"] == 1

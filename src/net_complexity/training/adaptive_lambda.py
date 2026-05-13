@@ -259,6 +259,13 @@ class RecoveryUpdate:
     block_lambda_increase: bool = False
 
 
+@dataclass(frozen=True)
+class AdaptiveLogStepUpdate:
+    effective_log_step: float
+    prune_rate_per_epoch: float | None
+    step_action: str
+
+
 @dataclass
 class AdaptiveLambdaCheckpoint:
     epoch: int
@@ -299,6 +306,12 @@ class AdaptiveLambdaController:
         lambda_max: float = 80.0,
         log_step_init: float = math.log(2.0),
         log_step_min: float = math.log(1.05),
+        adaptive_log_step_enabled: bool = True,
+        prune_rate_low_per_epoch: float = 0.02,
+        prune_rate_high_per_epoch: float = 0.07,
+        log_step_boost_factor: float = 2.0,
+        log_step_max_boost_level: int = 2,
+        adaptive_log_step_max_epoch: int | None = None,
         soft_drop: float = 0.02,
         hard_drop: float = 0.05,
         soft_step_shrink: float = 0.5,
@@ -331,6 +344,19 @@ class AdaptiveLambdaController:
             raise ValueError("adaptive_lambda.log_step_init must be > 0.")
         if log_step_min <= 0.0:
             raise ValueError("adaptive_lambda.log_step_min must be > 0.")
+        if prune_rate_low_per_epoch < 0.0:
+            raise ValueError("adaptive_lambda.prune_rate_low_per_epoch must be >= 0.")
+        if prune_rate_high_per_epoch < prune_rate_low_per_epoch:
+            raise ValueError(
+                "adaptive_lambda.prune_rate_high_per_epoch must be >= "
+                "prune_rate_low_per_epoch."
+            )
+        if log_step_boost_factor <= 0.0:
+            raise ValueError("adaptive_lambda.log_step_boost_factor must be > 0.")
+        if log_step_max_boost_level < 0:
+            raise ValueError("adaptive_lambda.log_step_max_boost_level must be >= 0.")
+        if adaptive_log_step_max_epoch is not None and adaptive_log_step_max_epoch < 0:
+            raise ValueError("adaptive_lambda.adaptive_log_step_max_epoch must be >= 0.")
         if soft_drop < 0.0 or hard_drop < 0.0:
             raise ValueError("adaptive_lambda soft/hard drops must be >= 0.")
         if soft_step_shrink <= 0.0 or hard_step_shrink <= 0.0:
@@ -358,6 +384,16 @@ class AdaptiveLambdaController:
         self.lambda_max = float(lambda_max)
         self.log_step_min = float(log_step_min)
         self.step = max(float(log_step_init), self.log_step_min)
+        self.adaptive_log_step_enabled = bool(adaptive_log_step_enabled)
+        self.prune_rate_low_per_epoch = float(prune_rate_low_per_epoch)
+        self.prune_rate_high_per_epoch = float(prune_rate_high_per_epoch)
+        self.log_step_boost_factor = float(log_step_boost_factor)
+        self.log_step_max_boost_level = int(log_step_max_boost_level)
+        self.adaptive_log_step_max_epoch = (
+            None
+            if adaptive_log_step_max_epoch is None
+            else int(adaptive_log_step_max_epoch)
+        )
         self.soft_drop = float(soft_drop)
         self.hard_drop = float(hard_drop)
         self.soft_step_shrink = float(soft_step_shrink)
@@ -415,6 +451,16 @@ class AdaptiveLambdaController:
         self.latest_safe_lambda: float | None = None
         self.best_sparse_safe_epoch: int | None = None
         self.best_sparse_safe_lambda: float | None = None
+        self.log_step_boost_level = 0
+        self.previous_control_zero_prob: float | None = None
+        self.previous_control_epoch: int | None = None
+        self.latest_effective_log_step = self.step
+        self.latest_prune_rate_per_epoch: float | None = None
+        self.latest_step_action = (
+            "step_disabled"
+            if not self.adaptive_log_step_enabled
+            else "step_init_no_prev_zero_prob"
+        )
         self.last_action = "hold"
         self.last_reason = "initialized"
 
@@ -550,6 +596,12 @@ class AdaptiveLambdaController:
                     action = "hold"
                     reason = "missing_accuracy_feedback"
                 elif acc_ma >= min_allowed_acc:
+                    step_update = self._update_adaptive_log_step(
+                        epoch=epoch,
+                        valid_zero_prob=valid_zero_prob,
+                        acc_ok=True,
+                    )
+                    effective_log_step = step_update.effective_log_step
                     if recovery_update.block_lambda_increase:
                         action = "recovery_blocked_lambda_increase"
                         reason = (
@@ -565,18 +617,26 @@ class AdaptiveLambdaController:
                         )
                     else:
                         old_lambda = self.lambda_coef
-                        self.log_lambda = self._clamp_log_lambda(self.log_lambda + self.step)
+                        self.log_lambda = self._clamp_log_lambda(
+                            self.log_lambda + effective_log_step
+                        )
                         new_lambda = self.lambda_coef
                         apply_lambda(model, new_lambda)
                         lambda_changed = abs(new_lambda - old_lambda) > 1e-12
                         action = "increase_lambda"
                         reason = (
                             f"acc_ma={acc_ma:.4f} >= min_allowed_acc={min_allowed_acc:.4f}; "
-                            f"lambda {old_lambda:.6g}->{new_lambda:.6g}"
+                            f"lambda {old_lambda:.6g}->{new_lambda:.6g}; "
+                            f"effective_log_step={effective_log_step:.6g}"
                         )
                         if lambda_changed:
                             self._print_action(epoch, action, reason)
                 elif acc_ma >= hard_min_allowed_acc:
+                    self._update_adaptive_log_step(
+                        epoch=epoch,
+                        valid_zero_prob=valid_zero_prob,
+                        acc_ok=False,
+                    )
                     action = "hold"
                     reason = (
                         f"hard_min_allowed_acc={hard_min_allowed_acc:.4f} <= "
@@ -584,15 +644,24 @@ class AdaptiveLambdaController:
                         "lambda unchanged"
                     )
                 else:
+                    step_update = self._update_adaptive_log_step(
+                        epoch=epoch,
+                        valid_zero_prob=valid_zero_prob,
+                        acc_ok=False,
+                    )
+                    effective_log_step = step_update.effective_log_step
                     old_lambda = self.lambda_coef
-                    self.log_lambda = self._clamp_log_lambda(self.log_lambda - self.step)
+                    self.log_lambda = self._clamp_log_lambda(
+                        self.log_lambda - effective_log_step
+                    )
                     new_lambda = self.lambda_coef
                     apply_lambda(model, new_lambda)
                     lambda_changed = abs(new_lambda - old_lambda) > 1e-12
                     action = "decrease_lambda"
                     reason = (
                         f"acc_ma={acc_ma:.4f} < hard_min_allowed_acc={hard_min_allowed_acc:.4f}; "
-                        f"lambda {old_lambda:.6g}->{new_lambda:.6g}"
+                        f"lambda {old_lambda:.6g}->{new_lambda:.6g}; "
+                        f"effective_log_step={effective_log_step:.6g}"
                     )
                     if lambda_changed:
                         self._print_action(epoch, action, reason)
@@ -604,6 +673,8 @@ class AdaptiveLambdaController:
                 0,
                 self.lambda_increase_cooldown_remaining - 1,
             )
+        if not rolled_back:
+            self._maybe_reset_adaptive_log_step_after_max_epoch(epoch=epoch)
 
         self.last_action = action
         self.last_reason = reason
@@ -661,6 +732,11 @@ class AdaptiveLambdaController:
             "lambda_coef": self.lambda_coef,
             "log_lambda": self.log_lambda,
             "adaptive_lambda_step": self.step,
+            "adaptive_lambda_effective_log_step": self.latest_effective_log_step,
+            "adaptive_lambda_log_step_boost_level": self.log_step_boost_level,
+            "adaptive_lambda_prune_rate_per_epoch": self.latest_prune_rate_per_epoch,
+            "adaptive_lambda_step_action": self.latest_step_action,
+            "adaptive_log_step_max_epoch": self.adaptive_log_step_max_epoch,
             "adaptive_lambda_action": self.last_action,
             "adaptive_lambda_reason": self.last_reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
@@ -725,6 +801,136 @@ class AdaptiveLambdaController:
 
     def _should_check_rollback(self, epoch: int) -> bool:
         return epoch % self.rollback_check_every_epochs == 0
+
+    def _adaptive_log_step_is_after_max_epoch(self, epoch: int) -> bool:
+        return (
+            self.adaptive_log_step_enabled
+            and self.adaptive_log_step_max_epoch is not None
+            and int(epoch) > self.adaptive_log_step_max_epoch
+        )
+
+    def _base_log_step(self) -> float:
+        return max(float(self.step), self.log_step_min)
+
+    def _current_effective_log_step(self) -> float:
+        return float(
+            self._base_log_step()
+            * (self.log_step_boost_factor ** self.log_step_boost_level)
+        )
+
+    def _set_log_step_update_state(
+        self,
+        *,
+        effective_log_step: float,
+        prune_rate_per_epoch: float | None,
+        step_action: str,
+    ) -> AdaptiveLogStepUpdate:
+        self.latest_effective_log_step = float(effective_log_step)
+        self.latest_prune_rate_per_epoch = prune_rate_per_epoch
+        self.latest_step_action = str(step_action)
+        return AdaptiveLogStepUpdate(
+            effective_log_step=float(effective_log_step),
+            prune_rate_per_epoch=prune_rate_per_epoch,
+            step_action=str(step_action),
+        )
+
+    def _store_control_zero_prob(
+        self,
+        *,
+        epoch: int,
+        valid_zero_prob: float | None,
+    ) -> None:
+        if valid_zero_prob is None:
+            return
+        self.previous_control_zero_prob = float(valid_zero_prob)
+        self.previous_control_epoch = int(epoch)
+
+    def _reset_log_step_boost(self, *, step_action: str) -> AdaptiveLogStepUpdate:
+        self.log_step_boost_level = 0
+        return self._set_log_step_update_state(
+            effective_log_step=self._base_log_step(),
+            prune_rate_per_epoch=None,
+            step_action=step_action,
+        )
+
+    def _maybe_reset_adaptive_log_step_after_max_epoch(self, *, epoch: int) -> None:
+        if not self._adaptive_log_step_is_after_max_epoch(epoch):
+            return
+        self._reset_log_step_boost(step_action="step_reset_after_max_epoch")
+
+    def _update_adaptive_log_step(
+        self,
+        *,
+        epoch: int,
+        valid_zero_prob: float | None,
+        acc_ok: bool,
+    ) -> AdaptiveLogStepUpdate:
+        if not self.adaptive_log_step_enabled:
+            self.log_step_boost_level = 0
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            return self._set_log_step_update_state(
+                effective_log_step=self._base_log_step(),
+                prune_rate_per_epoch=None,
+                step_action="step_disabled",
+            )
+
+        if self._adaptive_log_step_is_after_max_epoch(epoch):
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            return self._reset_log_step_boost(step_action="step_reset_after_max_epoch")
+
+        if not acc_ok:
+            step_action = (
+                "step_reset_bad_acc"
+                if self.log_step_boost_level > 0
+                else "step_not_acc_ok"
+            )
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            return self._reset_log_step_boost(step_action=step_action)
+
+        if (
+            valid_zero_prob is None
+            or self.previous_control_zero_prob is None
+            or self.previous_control_epoch is None
+        ):
+            self.log_step_boost_level = 0
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            return self._set_log_step_update_state(
+                effective_log_step=self._base_log_step(),
+                prune_rate_per_epoch=None,
+                step_action="step_init_no_prev_zero_prob",
+            )
+
+        epochs_delta = int(epoch) - int(self.previous_control_epoch)
+        if epochs_delta <= 0:
+            self.log_step_boost_level = 0
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            return self._set_log_step_update_state(
+                effective_log_step=self._base_log_step(),
+                prune_rate_per_epoch=None,
+                step_action="step_init_no_prev_zero_prob",
+            )
+
+        prune_rate_per_epoch = (
+            float(valid_zero_prob) - float(self.previous_control_zero_prob)
+        ) / float(epochs_delta)
+        if prune_rate_per_epoch < self.prune_rate_low_per_epoch:
+            self.log_step_boost_level = min(
+                self.log_step_boost_level + 1,
+                self.log_step_max_boost_level,
+            )
+            step_action = "step_boost_slow_pruning"
+        elif prune_rate_per_epoch <= self.prune_rate_high_per_epoch:
+            self.log_step_boost_level = 0
+            step_action = "step_reset_target_pruning"
+        else:
+            step_action = "step_keep_fast_pruning_no_new_logic"
+
+        self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+        return self._set_log_step_update_state(
+            effective_log_step=self._current_effective_log_step(),
+            prune_rate_per_epoch=float(prune_rate_per_epoch),
+            step_action=step_action,
+        )
 
     def _apply_recovery_open_bias(self, model: nn.Module, value: float) -> None:
         self.recovery_open_bias = float(value)
@@ -1122,6 +1328,9 @@ class AdaptiveLambdaController:
             "previous_valid_acc": self.previous_valid_acc,
             "best_val_acc": self.best_val_acc,
             "step": self.step,
+            "log_step_boost_level": self.log_step_boost_level,
+            "previous_control_zero_prob": self.previous_control_zero_prob,
+            "previous_control_epoch": self.previous_control_epoch,
             "observed_accuracy_by_epoch": dict(self.observed_accuracy_by_epoch),
             "observed_zero_prob_by_epoch": dict(self.observed_zero_prob_by_epoch),
             "lambda_increase_cooldown_remaining": self.lambda_increase_cooldown_remaining,
@@ -1272,6 +1481,23 @@ class AdaptiveLambdaController:
         checkpoint_step = _to_float(snapshot.get("step"))
         if checkpoint_step is not None:
             self.step = max(float(checkpoint_step), self.log_step_min)
+        restored_log_step_boost_level = snapshot.get("log_step_boost_level")
+        if restored_log_step_boost_level is None:
+            self.log_step_boost_level = 0
+        else:
+            self.log_step_boost_level = min(
+                max(0, int(restored_log_step_boost_level)),
+                self.log_step_max_boost_level,
+            )
+        self.previous_control_zero_prob = _to_float(
+            snapshot.get("previous_control_zero_prob")
+        )
+        restored_previous_control_epoch = snapshot.get("previous_control_epoch")
+        self.previous_control_epoch = (
+            None
+            if restored_previous_control_epoch is None
+            else int(restored_previous_control_epoch)
+        )
         restored_accuracy_by_epoch = snapshot.get("observed_accuracy_by_epoch", {})
         self.observed_accuracy_by_epoch = {
             int(epoch): float(value)
@@ -1291,6 +1517,7 @@ class AdaptiveLambdaController:
             self.best_val_acc = checkpoint_best_val_acc
         elif checkpoint_best_val_acc is not None:
             self.best_val_acc = max(self.best_val_acc, checkpoint_best_val_acc)
+        self._reset_log_step_boost(step_action="step_reset_bad_acc")
 
     def _maybe_rollback_on_recent_acc_drop(
         self,
@@ -1462,6 +1689,11 @@ class AdaptiveLambdaController:
             "lambda_coef": self.lambda_coef,
             "log_lambda": self.log_lambda,
             "adaptive_lambda_step": self.step,
+            "adaptive_lambda_effective_log_step": self.latest_effective_log_step,
+            "adaptive_lambda_log_step_boost_level": self.log_step_boost_level,
+            "adaptive_lambda_prune_rate_per_epoch": self.latest_prune_rate_per_epoch,
+            "adaptive_lambda_step_action": self.latest_step_action,
+            "adaptive_log_step_max_epoch": self.adaptive_log_step_max_epoch,
             "adaptive_lambda_action": action,
             "adaptive_lambda_reason": reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
@@ -1496,5 +1728,7 @@ class AdaptiveLambdaController:
             f" | lambda_coef={self.lambda_coef:.12g}"
             f" | log_lambda={self.log_lambda:.12g}"
             f" | step={self.step:.12g}"
+            f" | effective_step={self.latest_effective_log_step:.12g}"
+            f" | boost_level={self.log_step_boost_level}"
             f" | reason={reason}"
         )
