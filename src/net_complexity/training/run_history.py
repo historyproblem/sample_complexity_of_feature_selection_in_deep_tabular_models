@@ -503,6 +503,18 @@ class RunHistory:
             },
             "provenance": self._build_provenance(),
         }
+        adaptive_runtime = summary["runtime"].get("adaptive_lambda")
+        if isinstance(adaptive_runtime, Mapping):
+            for key in (
+                "recovery_num_attempts",
+                "recovery_total_epochs",
+                "recovery_was_used",
+                "recovery_final_active_delta",
+                "recovery_best_acc_after_recovery",
+                "recovery_config",
+            ):
+                if key in adaptive_runtime:
+                    summary[key] = adaptive_runtime[key]
         if stop_info is not None:
             summary["stop_info"] = dict(stop_info)
         summary_lambda = summary["tracked_config"].get("model.lambda_coef")

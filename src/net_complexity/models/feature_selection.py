@@ -81,6 +81,10 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                 eval_gate_mode=eval_gate_mode,
             )
 
+    def set_gumbel_open_bias(self, value: float, p_min: float = 0.02, p_max: float = 0.50) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_open_bias(value, p_min=p_min, p_max=p_max)
+
     def set_lambda_coef(self, lambda_coef: float, *, bypass_gumbel: bool | None = None) -> None:
         self.lambda_coef = float(lambda_coef)
         if bypass_gumbel is None:
@@ -219,6 +223,9 @@ class GumbelLayer(nn.Module):
             eval_gate_mode=eval_gate_mode,
         )
         self._bypass = False
+        self._open_bias = 0.0
+        self._open_bias_p_min = 0.02
+        self._open_bias_p_max = 0.50
         self.reset_parameters()
 
     @classmethod
@@ -329,8 +336,65 @@ class GumbelLayer(nn.Module):
     def bypass(self) -> bool:
         return self._bypass
 
+    @property
+    def open_bias(self) -> float:
+        return self._open_bias
+
+    def set_open_bias(self, value: float, p_min: float = 0.02, p_max: float = 0.50) -> None:
+        value = float(value)
+        p_min = float(p_min)
+        p_max = float(p_max)
+        if value < 0.0:
+            raise ValueError("open bias must be non-negative.")
+        if not 0.0 <= p_min < p_max <= 1.0:
+            raise ValueError(
+                "open bias probability bounds must satisfy 0.0 <= p_min < p_max <= 1.0."
+            )
+        self._open_bias = value
+        self._open_bias_p_min = p_min
+        self._open_bias_p_max = p_max
+
+    def _raw_selection_probs(self) -> torch.Tensor:
+        return F.softmax(self.logits, dim=1)[:, 1]
+
+    def _revive_mask(self, probs_on: torch.Tensor) -> torch.Tensor:
+        return (probs_on > self._open_bias_p_min) & (probs_on < self._open_bias_p_max)
+
+    def _effective_logits(self) -> torch.Tensor:
+        if self._open_bias <= 0.0:
+            return self.logits
+        raw_probs_on = self._raw_selection_probs()
+        revive_mask = self._revive_mask(raw_probs_on)
+        if not bool(revive_mask.any().item()):
+            return self.logits
+        logits = self.logits.clone()
+        logits[:, 1] = logits[:, 1] + float(self._open_bias) * revive_mask.to(
+            dtype=logits.dtype
+        )
+        return logits
+
+    def get_open_bias_candidate_stats(
+        self,
+        p_min: float | None = None,
+        p_max: float | None = None,
+    ) -> dict[str, float | int]:
+        p_min = self._open_bias_p_min if p_min is None else float(p_min)
+        p_max = self._open_bias_p_max if p_max is None else float(p_max)
+        with torch.no_grad():
+            probs_on = self._raw_selection_probs().detach()
+            revive_mask = (probs_on > p_min) & (probs_on < p_max)
+            candidate_probs = probs_on[revive_mask]
+            return {
+                "num_channels": int(probs_on.numel()),
+                "revive_candidates": int(revive_mask.sum().item()),
+                "sum_p_open_candidates": (
+                    float(candidate_probs.sum().item()) if candidate_probs.numel() else 0.0
+                ),
+                "sum_p_open_all": float(probs_on.sum().item()),
+            }
+
     def _selection_probs(self, batch_size: int) -> torch.Tensor:
-        probs_on = F.softmax(self.logits, dim=1)[:, 1].unsqueeze(0)
+        probs_on = F.softmax(self._effective_logits(), dim=1)[:, 1].unsqueeze(0)
         return probs_on.expand(batch_size, -1)
 
     def _hard_threshold_mask(self, batch_size: int) -> torch.Tensor:
@@ -363,7 +427,7 @@ class GumbelLayer(nn.Module):
             hard_mask = self._hard_threshold_mask(batch_size)
             return hard_mask.detach() - soft_mask.detach() + soft_mask
         if mode == "gumbel_hard":
-            logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
+            logits = self._effective_logits().unsqueeze(0).expand(batch_size, -1, -1)
             soft_samples = self._sample_gumbel_softmax(logits)
             sampled = self._straight_through_hard_sample(soft_samples)
             return sampled[..., 1]
@@ -400,7 +464,7 @@ class GumbelLayer(nn.Module):
         """Get selection probabilities for each feature."""
         if self._bypass:
             return torch.ones(self.logits.shape[0], device=self.logits.device)
-        return F.softmax(self.logits, dim=1)[:, 1].detach()
+        return F.softmax(self._effective_logits(), dim=1)[:, 1].detach()
 
     # ACTUAL: temperature control hook for the current Gumbel layer implementation.
     def set_temperature(self, temperature: float):

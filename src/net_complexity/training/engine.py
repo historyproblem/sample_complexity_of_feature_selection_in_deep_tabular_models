@@ -1228,6 +1228,12 @@ def _build_adaptive_lambda(
     initial_lambda_coef = _resolve_model_lambda_coef(model)
     if initial_lambda_coef is None:
         raise ValueError("adaptive_lambda requires a model with a numeric lambda_coef.")
+    recovery_cfg = getattr(cfg, "recovery", None)
+    recovery_config = (
+        OmegaConf.to_container(recovery_cfg, resolve=True)
+        if recovery_cfg is not None
+        else None
+    )
 
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
@@ -1257,6 +1263,7 @@ def _build_adaptive_lambda(
         rollback_on_collapse=bool(getattr(cfg, "rollback_on_collapse", True)),
         max_rollbacks=int(getattr(cfg, "max_rollbacks", 6)),
         freeze_on_rollback_limit=bool(getattr(cfg, "freeze_on_rollback_limit", True)),
+        recovery_config=recovery_config,
     )
 
 

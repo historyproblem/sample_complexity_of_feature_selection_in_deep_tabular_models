@@ -125,6 +125,12 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
         assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
         assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
+        assert cfg.training_arguments.adaptive_lambda.recovery.enabled is True
+        assert cfg.training_arguments.adaptive_lambda.recovery.min_epoch == 80
+        assert cfg.training_arguments.adaptive_lambda.recovery.recovery_epochs == 5
+        assert cfg.training_arguments.adaptive_lambda.recovery.open_bias_start == 0.15
+        assert cfg.training_arguments.adaptive_lambda.recovery.p_open_min == 0.02
+        assert cfg.training_arguments.adaptive_lambda.recovery.p_open_max == 0.50
         assert cfg.training_arguments.batchnorm_recalibration.enabled is True
         assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
         assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
@@ -184,6 +190,31 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
     assert cfg.run_history.log_gate_history is True
     assert cfg.mlflow.enabled is False
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_on_cifar10"
+
+
+def test_resnet50_gumbel_adaptive_lambda_recovery_v1_config_enables_recovery():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_gumbel_adaptive_lambda_recovery_v1.yaml"
+    )
+
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    recovery = cfg.training_arguments.adaptive_lambda.recovery
+    assert recovery.enabled is True
+    assert recovery.decay_lambda is False
+    assert recovery.open_bias_start == 0.15
+    assert recovery.open_bias_decay == 0.90
+    assert recovery.p_open_min == 0.02
+    assert recovery.p_open_max == 0.50
+    assert recovery.recovery_epochs == 5
+    assert recovery.patience == 5
+    assert recovery.max_reopen_delta == 0.02
+    assert recovery.min_epoch == 80
+    assert recovery.require_slow_recovery is True
+    assert recovery.recovery_slope_window == 5
+    assert recovery.min_acc_delta_over_window == 0.005
+    assert recovery.use_zero_prob_filter is True
+    assert recovery.zero_prob_window == 10
+    assert recovery.zero_prob_delta_min == 0.02
 
 
 def test_best_practice_resnet50_gumbel_paper_init_lambda0_disables_bypass_and_warmup():
