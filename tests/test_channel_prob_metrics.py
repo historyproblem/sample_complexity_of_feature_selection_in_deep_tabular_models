@@ -30,6 +30,14 @@ class TinyGumbelModel(nn.Module):
         self.backbone.layer1.gumbel_layer = GumbelLayer(input_dim=3)
 
 
+class TinyTwoLayerGumbelModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = nn.Module()
+        self.backbone.small = GumbelLayer(input_dim=2)
+        self.backbone.large = GumbelLayer(input_dim=4)
+
+
 class TinySTGModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -93,6 +101,36 @@ def test_gumbel_metric_logs_per_channel_zero_probabilities():
         computed["backbone.layer1.gumbel_layer_avg_zero_prob"]
     )
     assert computed["backbone.layer1.gumbel_layer_avg_real_prob"] == pytest.approx(1 / 3)
+
+
+def test_gumbel_metric_weights_global_channel_ratios_by_layer_size():
+    model = TinyTwoLayerGumbelModel()
+    metric = GumbelProbMetric(log_channel_zero_probs=False)
+
+    with torch.no_grad():
+        model.backbone.small.logits.copy_(
+            torch.tensor([[10.0, -10.0], [10.0, -10.0]])
+        )
+        model.backbone.large.logits.copy_(
+            torch.tensor([[-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0], [-10.0, 10.0]])
+        )
+
+    metric.update(None, None, None, model)
+    computed = metric.compute()
+
+    assert computed["backbone.small_num_channels"] == 2
+    assert computed["backbone.large_num_channels"] == 4
+    assert computed["average_layer_zero_prob"] == pytest.approx(0.5)
+    assert computed["average_zero_prob"] == pytest.approx(2.0 / 6.0)
+    assert computed["total_channels"] == 6
+    assert computed["estim_zero_channels"] == pytest.approx(2.0)
+    assert computed["estim_active_channels"] == pytest.approx(4.0)
+    assert computed["average_zero_prob"] * computed["total_channels"] == pytest.approx(
+        computed["estim_zero_channels"]
+    )
+    assert (1.0 - computed["average_zero_prob"]) * computed["total_channels"] == pytest.approx(
+        computed["estim_active_channels"]
+    )
 
 
 @pytest.mark.skipif(
@@ -216,11 +254,18 @@ def test_epoch_log_line_includes_zero_probability_summary():
     line = _build_epoch_log_line(
         epoch=3,
         total_epochs=10,
-        train_metrics={"train_loss": 1.2, "train_average_zero_prob": 0.25},
+        train_metrics={
+            "train_loss": 1.2,
+            "train_average_zero_prob": 0.25,
+            "train_estim_active_channels": 7.5,
+            "train_total_channels": 10,
+        },
         valid_metrics={
             "valid_loss": 0.9,
             "valid_accuracy": 0.8,
             "valid_average_zero_prob": 0.4,
+            "valid_estim_active_channels": 6,
+            "valid_total_channels": 10,
         },
         train_time=1.5,
         valid_time=0.5,
@@ -228,4 +273,6 @@ def test_epoch_log_line_includes_zero_probability_summary():
     )
 
     assert "train_zero=0.2500" in line
+    assert "train_open=7.50/10" in line
     assert "val_zero=0.4000" in line
+    assert "val_open=6/10" in line

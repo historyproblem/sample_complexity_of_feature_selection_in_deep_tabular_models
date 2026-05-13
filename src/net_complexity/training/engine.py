@@ -249,23 +249,60 @@ def collect_batch_metrics(output, targets, model: nn.Module | None = None) -> di
 
     real_means = []
     estim_means = []
+    zero_means = []
+    total_channels = 0
+    total_real_active_channels = 0.0
+    total_estim_active_channels = 0.0
+    total_real_zero_channels = 0.0
+    total_estim_zero_channels = 0.0
     for name, module in gumbel_modules.items():
-        value = module.get_selection_probs().detach().cpu()
+        value = module.get_selection_probs().detach().cpu().reshape(-1)
+        hard_active = (value > 0.5).float()
+        num_channels = int(value.numel())
         estim_prob = float(value.mean().item())
-        real_prob = float((value > 0.5).float().mean().item())
+        real_prob = float(hard_active.mean().item())
+        zero_prob = 1.0 - estim_prob
+        estim_active_channels = float(value.sum().item())
+        estim_zero_channels = float(num_channels - estim_active_channels)
+        real_active_channels = float(hard_active.sum().item())
+        real_zero_channels = float(num_channels - real_active_channels)
         batch_metrics[f"{name}_avg_estim_prob"] = estim_prob
         batch_metrics[f"{name}_avg_real_prob"] = real_prob
+        batch_metrics[f"{name}_avg_zero_prob"] = zero_prob
+        batch_metrics[f"{name}_num_channels"] = num_channels
+        batch_metrics[f"{name}_estim_active_channels"] = estim_active_channels
+        batch_metrics[f"{name}_estim_zero_channels"] = estim_zero_channels
+        batch_metrics[f"{name}_real_active_channels"] = real_active_channels
+        batch_metrics[f"{name}_real_zero_channels"] = real_zero_channels
         estim_means.append(estim_prob)
         real_means.append(real_prob)
+        zero_means.append(zero_prob)
+        total_channels += num_channels
+        total_real_active_channels += real_active_channels
+        total_estim_active_channels += estim_active_channels
+        total_real_zero_channels += real_zero_channels
+        total_estim_zero_channels += estim_zero_channels
 
     if real_means:
-        batch_metrics["average_real_prob"] = float(sum(real_means) / len(real_means))
+        batch_metrics["average_layer_real_prob"] = float(sum(real_means) / len(real_means))
+        batch_metrics["average_real_prob"] = float(total_real_active_channels / total_channels)
         batch_metrics["max_real_prob"] = float(max(real_means))
         batch_metrics["min_real_prob"] = float(min(real_means))
     if estim_means:
-        batch_metrics["average_estim_prob"] = float(sum(estim_means) / len(estim_means))
+        batch_metrics["average_layer_estim_prob"] = float(sum(estim_means) / len(estim_means))
+        batch_metrics["average_estim_prob"] = float(total_estim_active_channels / total_channels)
         batch_metrics["max_estim_prob"] = float(max(estim_means))
         batch_metrics["min_estimm_prob"] = float(min(estim_means))
+    if zero_means:
+        batch_metrics["average_layer_zero_prob"] = float(sum(zero_means) / len(zero_means))
+        batch_metrics["average_zero_prob"] = float(total_estim_zero_channels / total_channels)
+        batch_metrics["max_zero_prob"] = float(max(zero_means))
+        batch_metrics["min_zero_prob"] = float(min(zero_means))
+        batch_metrics["total_channels"] = total_channels
+        batch_metrics["real_active_channels"] = total_real_active_channels
+        batch_metrics["real_zero_channels"] = total_real_zero_channels
+        batch_metrics["estim_active_channels"] = total_estim_active_channels
+        batch_metrics["estim_zero_channels"] = total_estim_zero_channels
 
     return batch_metrics
 
@@ -463,6 +500,16 @@ def _format_metric(value: Any) -> str:
     return "n/a"
 
 
+def _format_channel_count(value: Any) -> str:
+    numeric = _to_float(value)
+    if numeric is None:
+        return "n/a"
+    rounded = round(numeric)
+    if abs(numeric - rounded) < 1e-9:
+        return str(int(rounded))
+    return f"{numeric:.2f}"
+
+
 def _build_epoch_log_line(
     epoch: int,
     total_epochs: int,
@@ -493,10 +540,24 @@ def _build_epoch_log_line(
     train_zero_prob = train_metrics.get("train_average_zero_prob")
     if train_zero_prob is not None:
         parts.append(f"train_zero={_format_metric(train_zero_prob)}")
+    train_active_channels = train_metrics.get("train_estim_active_channels")
+    train_total_channels = train_metrics.get("train_total_channels")
+    if train_active_channels is not None and train_total_channels is not None:
+        parts.append(
+            f"train_open={_format_channel_count(train_active_channels)}/"
+            f"{_format_channel_count(train_total_channels)}"
+        )
 
     valid_zero_prob = valid_metrics.get("valid_average_zero_prob")
     if valid_zero_prob is not None:
         parts.append(f"val_zero={_format_metric(valid_zero_prob)}")
+    valid_active_channels = valid_metrics.get("valid_estim_active_channels")
+    valid_total_channels = valid_metrics.get("valid_total_channels")
+    if valid_active_channels is not None and valid_total_channels is not None:
+        parts.append(
+            f"val_open={_format_channel_count(valid_active_channels)}/"
+            f"{_format_channel_count(valid_total_channels)}"
+        )
 
     return " | ".join(parts)
 
