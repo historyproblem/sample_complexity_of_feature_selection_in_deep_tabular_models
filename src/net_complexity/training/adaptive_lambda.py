@@ -300,6 +300,8 @@ class AdaptiveLambdaController:
         initial_lambda_coef: float,
         reference_accuracy_by_epoch: Mapping[int, float] | None = None,
         warmup_epochs: int = 10,
+        lambda_increase_warmup_epochs: int = 0,
+        lambda_increase_warmup_every_epochs: int | None = None,
         update_every_epochs: int = 3,
         acc_window: int = 3,
         lambda_min: float = 1e-8,
@@ -332,6 +334,15 @@ class AdaptiveLambdaController:
     ) -> None:
         if warmup_epochs < 0:
             raise ValueError("adaptive_lambda.warmup_epochs must be >= 0.")
+        if lambda_increase_warmup_epochs < 0:
+            raise ValueError("adaptive_lambda.lambda_increase_warmup_epochs must be >= 0.")
+        if (
+            lambda_increase_warmup_every_epochs is not None
+            and lambda_increase_warmup_every_epochs <= 0
+        ):
+            raise ValueError(
+                "adaptive_lambda.lambda_increase_warmup_every_epochs must be >= 1."
+            )
         if update_every_epochs <= 0:
             raise ValueError("adaptive_lambda.update_every_epochs must be >= 1.")
         if acc_window <= 0:
@@ -379,6 +390,12 @@ class AdaptiveLambdaController:
 
         self.warmup_epochs = int(warmup_epochs)
         self.update_every_epochs = int(update_every_epochs)
+        self.lambda_increase_warmup_epochs = int(lambda_increase_warmup_epochs)
+        self.lambda_increase_warmup_every_epochs = (
+            self.update_every_epochs
+            if lambda_increase_warmup_every_epochs is None
+            else int(lambda_increase_warmup_every_epochs)
+        )
         self.acc_window = int(acc_window)
         self.lambda_min = float(lambda_min)
         self.lambda_max = float(lambda_max)
@@ -573,6 +590,36 @@ class AdaptiveLambdaController:
         elif epoch <= self.warmup_epochs:
             action = "warmup"
             reason = f"epoch={epoch} <= warmup_epochs={self.warmup_epochs}"
+        elif epoch <= self.lambda_increase_warmup_epochs:
+            self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
+            if self._should_increase_warmup_update(epoch):
+                old_lambda = self.lambda_coef
+                effective_log_step = self._base_log_step()
+                self.log_lambda = self._clamp_log_lambda(
+                    self.log_lambda + effective_log_step
+                )
+                new_lambda = self.lambda_coef
+                apply_lambda(model, new_lambda)
+                lambda_changed = abs(new_lambda - old_lambda) > 1e-12
+                action = "increase_lambda_warmup"
+                reason = (
+                    f"epoch={epoch} <= lambda_increase_warmup_epochs="
+                    f"{self.lambda_increase_warmup_epochs}; "
+                    f"lambda {old_lambda:.6g}->{new_lambda:.6g}; "
+                    f"effective_log_step={effective_log_step:.6g}"
+                )
+                self._reset_log_step_boost(step_action="step_warmup_fixed_increase")
+                if lambda_changed:
+                    self._print_action(epoch, action, reason)
+            else:
+                action = "warmup_hold"
+                reason = (
+                    f"epoch={epoch} <= lambda_increase_warmup_epochs="
+                    f"{self.lambda_increase_warmup_epochs}; waiting for "
+                    f"lambda_increase_warmup_every_epochs="
+                    f"{self.lambda_increase_warmup_every_epochs}"
+                )
+                self._reset_log_step_boost(step_action="step_warmup_hold")
         elif self.frozen:
             action = "hold"
             reason = "adaptive_lambda_frozen"
@@ -740,6 +787,8 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": self.last_action,
             "adaptive_lambda_reason": self.last_reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "lambda_increase_warmup_epochs": self.lambda_increase_warmup_epochs,
+            "lambda_increase_warmup_every_epochs": self.lambda_increase_warmup_every_epochs,
             "rollback_check_every_epochs": self.rollback_check_every_epochs,
             "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
             "rollback_epoch_lookback": self.rollback_epoch_lookback,
@@ -798,6 +847,9 @@ class AdaptiveLambdaController:
         if epoch <= self.warmup_epochs:
             return False
         return (epoch - self.warmup_epochs) % self.update_every_epochs == 0
+
+    def _should_increase_warmup_update(self, epoch: int) -> bool:
+        return int(epoch) % self.lambda_increase_warmup_every_epochs == 0
 
     def _should_check_rollback(self, epoch: int) -> bool:
         return epoch % self.rollback_check_every_epochs == 0
@@ -1697,6 +1749,8 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": action,
             "adaptive_lambda_reason": reason,
             "adaptive_lambda_rollbacks": self.rollback_count,
+            "lambda_increase_warmup_epochs": self.lambda_increase_warmup_epochs,
+            "lambda_increase_warmup_every_epochs": self.lambda_increase_warmup_every_epochs,
             "rollback_check_every_epochs": self.rollback_check_every_epochs,
             "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
             "rollback_epoch_lookback": self.rollback_epoch_lookback,
