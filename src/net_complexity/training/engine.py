@@ -1235,24 +1235,11 @@ def _build_adaptive_lambda(
         else None
     )
     adaptive_log_step_max_epoch = getattr(cfg, "adaptive_log_step_max_epoch", None)
-    lambda_increase_warmup_every_epochs = getattr(
-        cfg,
-        "lambda_increase_warmup_every_epochs",
-        None,
-    )
 
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
         reference_accuracy_by_epoch=baseline_accuracy_by_epoch,
         warmup_epochs=int(getattr(cfg, "warmup_epochs", 10)),
-        lambda_increase_warmup_epochs=int(
-            getattr(cfg, "lambda_increase_warmup_epochs", 0)
-        ),
-        lambda_increase_warmup_every_epochs=(
-            None
-            if lambda_increase_warmup_every_epochs is None
-            else int(lambda_increase_warmup_every_epochs)
-        ),
         update_every_epochs=int(getattr(cfg, "update_every_epochs", 3)),
         acc_window=int(getattr(cfg, "acc_window", 3)),
         lambda_min=float(getattr(cfg, "lambda_min", 1e-8)),
