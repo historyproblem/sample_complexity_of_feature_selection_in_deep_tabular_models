@@ -367,7 +367,7 @@ def test_adaptive_lambda_keeps_runtime_state_on_collapse_when_rollbacks_are_disa
     assert model.lambda_coef == pytest.approx(10.0)
 
 
-def test_adaptive_lambda_rolls_back_after_large_drop_over_five_epochs():
+def test_adaptive_lambda_rolls_back_after_large_drop_over_one_epoch():
     model = _DummyModel(lambda_coef=0.1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     scheduler_state = _make_scheduler_state(token=0, step_count=0)
@@ -378,7 +378,7 @@ def test_adaptive_lambda_rolls_back_after_large_drop_over_five_epochs():
         acc_window=1,
         adaptive_log_step_enabled=False,
         lambda_max=1000.0,
-        rollback_check_every_epochs=5,
+        rollback_check_every_epochs=1,
         rollback_acc_drop_threshold=0.20,
         rollback_epoch_lookback=20,
         lambda_increase_cooldown_epochs=10,
@@ -437,6 +437,89 @@ def test_adaptive_lambda_rolls_back_after_large_drop_over_five_epochs():
     assert scheduler_state.scheduler.token == 5
     assert controller.observed_accuracy_by_epoch == {1: 0.91, 2: 0.91, 3: 0.91, 4: 0.91, 5: 0.91}
     assert model.lambda_coef == pytest.approx(3.2)
+
+
+def test_adaptive_lambda_can_check_rollback_every_epoch_against_lookback_window():
+    model = _DummyModel(lambda_coef=0.1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    scheduler_state = _make_scheduler_state(token=0, step_count=0)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=0.1,
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        adaptive_log_step_enabled=False,
+        lambda_max=1000.0,
+        rollback_check_every_epochs=1,
+        rollback_acc_drop_threshold=0.20,
+        rollback_compare_epoch_lookback=5,
+        rollback_epoch_lookback=5,
+        lambda_increase_cooldown_epochs=10,
+    )
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+    accuracies = {
+        1: 0.91,
+        2: 0.91,
+        3: 0.91,
+        4: 0.91,
+        5: 0.91,
+        6: 0.86,
+        7: 0.81,
+        8: 0.76,
+        9: 0.72,
+    }
+    for epoch, accuracy in accuracies.items():
+        with torch.no_grad():
+            model.weight.fill_(float(epoch))
+        optimizer.param_groups[0]["lr"] = float(epoch)
+        scheduler_state.step_count = epoch
+        scheduler_state.scheduler.token = epoch
+
+        result = controller.on_epoch_end(
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            valid_metrics={
+                "valid_accuracy": accuracy,
+                "valid_average_zero_prob": 0.35,
+            },
+            scheduler_state=scheduler_state,
+            scaler=None,
+            apply_lambda=_apply_lambda,
+        )
+        assert result.rolled_back is False
+
+    with torch.no_grad():
+        model.weight.fill_(10.0)
+    optimizer.param_groups[0]["lr"] = 10.0
+    scheduler_state.step_count = 10
+    scheduler_state.scheduler.token = 10
+
+    result = controller.on_epoch_end(
+        epoch=10,
+        model=model,
+        optimizer=optimizer,
+        valid_metrics={
+            "valid_accuracy": 0.70,
+            "valid_average_zero_prob": 0.35,
+        },
+        scheduler_state=scheduler_state,
+        scaler=None,
+        apply_lambda=_apply_lambda,
+    )
+
+    assert result.action == "periodic_rollback"
+    assert result.rolled_back is True
+    assert result.resume_epoch == 6
+    assert "valid_acc_drop_over_5_epochs" in result.reason
+    assert result.metrics["rollback_check_every_epochs"] == 1
+    assert result.metrics["rollback_compare_epoch_lookback"] == 5
+    assert result.metrics["rollback_epoch_lookback"] == 5
+    assert model.weight.detach().cpu().item() == pytest.approx(5.0)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5.0)
+    assert scheduler_state.step_count == 5
+    assert scheduler_state.scheduler.token == 5
 
 
 def test_adaptive_lambda_blocks_increase_during_cooldown_and_resumes_after_it_expires():

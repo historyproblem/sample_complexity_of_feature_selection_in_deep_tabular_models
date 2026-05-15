@@ -345,3 +345,30 @@ def test_epoch_log_line_includes_zero_probability_summary():
     assert "train_open=7.50/10" in line
     assert "val_zero=0.4000" in line
     assert "val_open=6/10" in line
+
+
+def test_epoch_log_line_includes_recovery_state():
+    line = _build_epoch_log_line(
+        epoch=82,
+        total_epochs=200,
+        train_metrics={"train_loss": 1.2},
+        valid_metrics={"valid_loss": 0.9, "valid_accuracy": 0.78},
+        train_time=1.5,
+        valid_time=0.5,
+        epoch_time=2.0,
+        extra_metrics={
+            "adaptive_lambda_action": "recovery_blocked_lambda_increase",
+            "recovery_active": True,
+            "recovery_action": "continue_recovery",
+            "recovery_epochs_left": 4,
+            "recovery_open_bias": 0.135,
+            "recovery_attempts": 1,
+        },
+    )
+
+    assert "lambda_action=recovery_blocked_lambda_increase" in line
+    assert "recovery=active" in line
+    assert "recovery_action=continue_recovery" in line
+    assert "recovery_left=4" in line
+    assert "recovery_bias=0.1350" in line
+    assert "recovery_attempts=1" in line

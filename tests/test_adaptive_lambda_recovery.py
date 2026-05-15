@@ -78,11 +78,26 @@ def _make_controller(**recovery_overrides) -> AdaptiveLambdaController:
         adaptive_log_step_enabled=adaptive_log_step_enabled,
         soft_drop=0.02,
         hard_drop=0.04,
-        rollback_check_every_epochs=5,
+        rollback_check_every_epochs=1,
         rollback_acc_drop_threshold=0.20,
         rollback_epoch_lookback=20,
         recovery_config=recovery_config,
     )
+
+
+def test_initial_log_includes_recovery_config(capsys):
+    model = TinyRecoveryModel()
+    controller = _make_controller()
+
+    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
+
+    output = capsys.readouterr().out
+    assert "Adaptive lambda initialized" in output
+    assert "recovery_enabled=true" in output
+    assert "recovery_min_epoch=3" in output
+    assert "recovery_patience=1" in output
+    assert "recovery_epochs=5" in output
+    assert "recovery_max_attempts=3" in output
 
 
 def test_gumbel_open_bias_only_reopens_revive_candidates():
@@ -281,7 +296,7 @@ def test_hard_rollback_has_priority_over_recovery():
     optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
     controller.apply_initial_state(model, apply_lambda=_apply_lambda)
 
-    for epoch in (5, 10, 15, 20):
+    for epoch in range(1, 25):
         controller.on_epoch_end(
             epoch=epoch,
             model=model,

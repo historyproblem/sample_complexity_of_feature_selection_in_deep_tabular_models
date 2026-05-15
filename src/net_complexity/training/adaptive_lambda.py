@@ -320,8 +320,9 @@ class AdaptiveLambdaController:
         collapse_loss_threshold: float = 2.15,
         collapse_zero_prob_threshold: float = 0.90,
         collapse_acc_drop_threshold: float = 0.40,
-        rollback_check_every_epochs: int = 5,
+        rollback_check_every_epochs: int = 1,
         rollback_acc_drop_threshold: float = 0.20,
+        rollback_compare_epoch_lookback: int | None = None,
         rollback_epoch_lookback: int = 20,
         lambda_increase_cooldown_epochs: int = 10,
         rollback_on_degradation: bool = True,
@@ -365,6 +366,10 @@ class AdaptiveLambdaController:
             raise ValueError("adaptive_lambda.rollback_check_every_epochs must be >= 1.")
         if rollback_acc_drop_threshold < 0.0:
             raise ValueError("adaptive_lambda.rollback_acc_drop_threshold must be >= 0.")
+        if rollback_compare_epoch_lookback is None:
+            rollback_compare_epoch_lookback = rollback_check_every_epochs
+        if rollback_compare_epoch_lookback <= 0:
+            raise ValueError("adaptive_lambda.rollback_compare_epoch_lookback must be >= 1.")
         if rollback_epoch_lookback <= 0:
             raise ValueError("adaptive_lambda.rollback_epoch_lookback must be >= 1.")
         if rollback_epoch_lookback % rollback_check_every_epochs != 0:
@@ -404,6 +409,7 @@ class AdaptiveLambdaController:
         self.collapse_acc_drop_threshold = float(collapse_acc_drop_threshold)
         self.rollback_check_every_epochs = int(rollback_check_every_epochs)
         self.rollback_acc_drop_threshold = float(rollback_acc_drop_threshold)
+        self.rollback_compare_epoch_lookback = int(rollback_compare_epoch_lookback)
         self.rollback_epoch_lookback = int(rollback_epoch_lookback)
         self.lambda_increase_cooldown_epochs = int(lambda_increase_cooldown_epochs)
         self.rollback_on_degradation = bool(rollback_on_degradation)
@@ -481,6 +487,11 @@ class AdaptiveLambdaController:
             f" | lambda_coef={self.lambda_coef:.12g}"
             f" | log_lambda={self.log_lambda:.12g}"
             f" | step={self.step:.12g}"
+            f" | recovery_enabled={str(self.recovery_config.enabled).lower()}"
+            f" | recovery_min_epoch={self.recovery_config.min_epoch}"
+            f" | recovery_patience={self.recovery_config.patience}"
+            f" | recovery_epochs={self.recovery_config.recovery_epochs}"
+            f" | recovery_max_attempts={self.recovery_config.max_recovery_attempts}"
         )
 
     def on_epoch_end(
@@ -742,6 +753,7 @@ class AdaptiveLambdaController:
             "adaptive_lambda_rollbacks": self.rollback_count,
             "rollback_check_every_epochs": self.rollback_check_every_epochs,
             "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
+            "rollback_compare_epoch_lookback": self.rollback_compare_epoch_lookback,
             "rollback_epoch_lookback": self.rollback_epoch_lookback,
             "rollback_on_degradation": self.rollback_on_degradation,
             "lambda_increase_cooldown_epochs": self.lambda_increase_cooldown_epochs,
@@ -1534,10 +1546,10 @@ class AdaptiveLambdaController:
             return None
         if valid_acc is None or not self._should_check_rollback(epoch):
             return None
-        if epoch <= self.rollback_epoch_lookback:
+        if epoch <= max(self.rollback_epoch_lookback, self.rollback_compare_epoch_lookback):
             return None
 
-        comparison_epoch = epoch - self.rollback_check_every_epochs
+        comparison_epoch = epoch - self.rollback_compare_epoch_lookback
         previous_acc = self.observed_accuracy_by_epoch.get(comparison_epoch)
         if previous_acc is None:
             return None
@@ -1571,7 +1583,7 @@ class AdaptiveLambdaController:
         action = "periodic_rollback"
         lambda_changed = abs(old_lambda - checkpoint.lambda_coef) > 1e-12
         reason = (
-            f"valid_acc_drop_over_{self.rollback_check_every_epochs}_epochs={acc_drop:.4f}"
+            f"valid_acc_drop_over_{self.rollback_compare_epoch_lookback}_epochs={acc_drop:.4f}"
             f" > rollback_acc_drop_threshold={self.rollback_acc_drop_threshold:.4f}; "
             f"rolled back to epoch={target_epoch}; "
             f"lambda increase cooldown={self.lambda_increase_cooldown_remaining} epochs"
@@ -1699,6 +1711,7 @@ class AdaptiveLambdaController:
             "adaptive_lambda_rollbacks": self.rollback_count,
             "rollback_check_every_epochs": self.rollback_check_every_epochs,
             "rollback_acc_drop_threshold": self.rollback_acc_drop_threshold,
+            "rollback_compare_epoch_lookback": self.rollback_compare_epoch_lookback,
             "rollback_epoch_lookback": self.rollback_epoch_lookback,
             "rollback_on_degradation": self.rollback_on_degradation,
             "lambda_increase_cooldown_epochs": self.lambda_increase_cooldown_epochs,

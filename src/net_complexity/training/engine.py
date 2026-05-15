@@ -1045,6 +1045,17 @@ def _format_channel_count(value: Any) -> str:
     return f"{numeric:.2f}"
 
 
+def _format_bool(value: Any) -> str:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            value = value.detach().item()
+        else:
+            value = bool(value.detach().cpu().any().item())
+    if isinstance(value, str):
+        return "true" if value.strip().lower() in {"1", "true", "yes", "on"} else "false"
+    return str(bool(value)).lower()
+
+
 def _build_epoch_log_line(
     epoch: int,
     total_epochs: int,
@@ -1107,6 +1118,31 @@ def _build_epoch_log_line(
     adaptive_action = extra_metrics.get("adaptive_lambda_action")
     if adaptive_action:
         parts.append(f"lambda_action={adaptive_action}")
+
+    recovery_active = extra_metrics.get("recovery_active")
+    recovery_action = extra_metrics.get("recovery_action")
+    recovery_active_flag = False
+    if recovery_active is not None:
+        recovery_active_flag = _format_bool(recovery_active) == "true"
+        recovery_mode = "active" if recovery_active_flag else "idle"
+        parts.append(f"recovery={recovery_mode}")
+    if recovery_action:
+        parts.append(f"recovery_action={recovery_action}")
+
+    recovery_should_log_details = (
+        recovery_active_flag
+        or (recovery_action not in {None, "", "none"})
+    )
+    if recovery_should_log_details:
+        recovery_epochs_left = extra_metrics.get("recovery_epochs_left")
+        if recovery_epochs_left is not None:
+            parts.append(f"recovery_left={_format_channel_count(recovery_epochs_left)}")
+        recovery_open_bias = extra_metrics.get("recovery_open_bias")
+        if recovery_open_bias is not None:
+            parts.append(f"recovery_bias={_format_metric(recovery_open_bias)}")
+        recovery_attempts = extra_metrics.get("recovery_attempts")
+        if recovery_attempts is not None:
+            parts.append(f"recovery_attempts={_format_channel_count(recovery_attempts)}")
 
     reference_acc = extra_metrics.get("reference_acc")
     if reference_acc is not None:
@@ -1264,8 +1300,13 @@ def _build_adaptive_lambda(
         collapse_loss_threshold=float(getattr(cfg, "collapse_loss_threshold", 2.15)),
         collapse_zero_prob_threshold=float(getattr(cfg, "collapse_zero_prob_threshold", 0.90)),
         collapse_acc_drop_threshold=float(getattr(cfg, "collapse_acc_drop_threshold", 0.40)),
-        rollback_check_every_epochs=int(getattr(cfg, "rollback_check_every_epochs", 5)),
+        rollback_check_every_epochs=int(getattr(cfg, "rollback_check_every_epochs", 1)),
         rollback_acc_drop_threshold=float(getattr(cfg, "rollback_acc_drop_threshold", 0.20)),
+        rollback_compare_epoch_lookback=(
+            None
+            if getattr(cfg, "rollback_compare_epoch_lookback", None) is None
+            else int(getattr(cfg, "rollback_compare_epoch_lookback"))
+        ),
         rollback_epoch_lookback=int(getattr(cfg, "rollback_epoch_lookback", 20)),
         lambda_increase_cooldown_epochs=int(
             getattr(cfg, "lambda_increase_cooldown_epochs", 10)

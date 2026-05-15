@@ -15,7 +15,7 @@ defaults:
 device: "cuda:0"
 
 model:
-  lambda_coef: 10.0
+  lambda_coef: 0.001
   gumbel_init_mode: paper_resnet50
   bypass_on_zero_lambda: false
   backbone:
@@ -30,19 +30,14 @@ training_arguments:
   adaptive_lambda:
     enabled: true
     warmup_epochs: 0
-    update_every_epochs: 2
+    update_every_epochs: 1
     acc_window: 3
     baseline_history_dir: outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
     lambda_min: 1e-8
     lambda_max: 100.0
     log_step_init: 0.22314355131420976
     log_step_min: 0.04879016416943205
-    adaptive_log_step_enabled: true
-    prune_rate_low_per_epoch: 0.02
-    prune_rate_high_per_epoch: 0.07
-    log_step_boost_factor: 2.0
-    log_step_max_boost_level: 2
-    adaptive_log_step_max_epoch: null
+    adaptive_log_step_enabled: false
     soft_drop: 0.02
     hard_drop: 0.04
     soft_step_shrink: 0.5
@@ -53,43 +48,23 @@ training_arguments:
     collapse_acc_drop_threshold: 0.40
     rollback_check_every_epochs: 1
     rollback_acc_drop_threshold: 0.20
-    rollback_epoch_lookback: 20
+    rollback_compare_epoch_lookback: 5
+    rollback_epoch_lookback: 5
     lambda_increase_cooldown_epochs: 10
     rollback_on_degradation: true
     rollback_on_collapse: true
     max_rollbacks: 6
     freeze_on_rollback_limit: true
     recovery:
-      enabled: true
-      decay_lambda: false
-      open_bias_start: 0.15
-      open_bias_decay: 0.90
-      p_open_min: 0.02
-      p_open_max: 0.50
-      recovery_epochs: 5
-      patience: 5
-      max_reopen_delta: 0.02
-      min_epoch: 80
-      require_slow_recovery: true
-      recovery_slope_window: 5
-      min_acc_delta_over_window: 0.005
-      use_zero_prob_filter: true
-      zero_prob_window: 10
-      zero_prob_delta_min: 0.02
-      drop_min: 0.02
-      drop_max: 0.20
-      freeze_lambda_increase: true
-      target_acc_margin: 0.01
-      cooldown_epochs: 10
-      max_recovery_attempts: 3
+      enabled: false
 
 run_history:
   log_gate_history: true
 
 mlflow:
   enabled: false
-  run_name: "resnet50_gumbel_adaptive_lambda_recovery_v1_temp_${model.backbone.resnet_block.temperature}"
+  run_name: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_Gumbel"
     method: "gumbel"
-    recipe: "resnet50_gumbel_adaptive_lambda_recovery_v1"
+    recipe: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125"

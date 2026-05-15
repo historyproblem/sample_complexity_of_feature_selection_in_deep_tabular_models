@@ -120,7 +120,7 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
         assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
         assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
-        assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 5
+        assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 1
         assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
         assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
         assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
@@ -449,7 +449,7 @@ def test_resnet50_adaptive_lambda_step125_no_warmup_base_uses_requested_recipe()
     assert cfg.training_arguments.adaptive_lambda.lambda_max == 100.0
     assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.22314355131420976
     assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.04
-    assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 5
+    assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 1
     assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
     assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
     assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
@@ -866,6 +866,84 @@ def test_tune_resnet50_adaptive_lambda_updatefreq_nightly_uses_adaptive_base_and
     assert cfg.defaults == [
         {"experiment": "resnet50_adaptive_lambda_step125_no_warmup_base"},
         {"tuning": "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"},
+        "_self_",
+    ]
+
+
+def test_resnet50_adaptive_lambda_rollback5_base_disables_boost_and_recovery():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5.yaml"
+    )
+
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert cfg.model.lambda_coef == 0.001
+    assert adaptive.enabled is True
+    assert adaptive.adaptive_log_step_enabled is False
+    assert adaptive.recovery.enabled is False
+    assert adaptive.rollback_check_every_epochs == 1
+    assert adaptive.rollback_compare_epoch_lookback == 5
+    assert adaptive.rollback_epoch_lookback == 5
+
+
+def test_resnet50_adaptive_lambda_rollback5_step_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / (
+            "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+            "rollback5_step_grid_125_150_175_200_ordered.yaml"
+        )
+    )
+
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == (
+            "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+            "rollback5_step_grid_125_150_175_200_ordered"
+        )
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.001,
+        0.001,
+        0.001,
+        0.001,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in cfg.tuning.points
+    ] == [
+        0.22314355131420976,
+        0.4054651081081644,
+        0.5596157879354227,
+        0.6931471805599453,
+    ]
+    assert [point["mlflow.tags.lambda_multiplier"] for point in cfg.tuning.points] == [
+        "1.25",
+        "1.5",
+        "1.75",
+        "2",
+    ]
+
+
+def test_tune_resnet50_adaptive_lambda_rollback5_step_grid_uses_requested_defaults():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step_grid.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5"},
+        {
+            "tuning": (
+                "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+                "rollback5_step_grid_125_150_175_200_ordered"
+            )
+        },
         "_self_",
     ]
 
