@@ -296,6 +296,101 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         return out
 
 
+class MaskedGumbelLayer(GumbelLayer):
+    """GumbelLayer that permanently disables a subset of channels.
+
+    Disabled channels: gate is always 0 regardless of learned logits.
+    They are excluded from the regularisation mean and reported as
+    zero in get_selection_probs().  Logits of disabled channels receive
+    no gradient and are never updated.
+
+    Two ways to disable channels:
+      1. Pass disabled_channels at construction time (same list for every
+         block when set via the YAML resnet_block config).
+      2. Call apply_channel_mask() from channel_pruning after construction
+         to set per-layer channel sets loaded from a previous run.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        temperature: float = 1.0,
+        disabled_channels: list[int] | None = None,
+    ):
+        super().__init__(input_dim, temperature)
+        channel_mask = torch.ones(input_dim)
+        if disabled_channels:
+            for ch in disabled_channels:
+                if 0 <= ch < input_dim:
+                    channel_mask[ch] = 0.0
+        self.register_buffer("channel_mask", channel_mask)
+
+    def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
+        gates = super().compute_gates(x)
+        # channel_mask: [C] → reshape to [1, C, 1, 1, ...] for broadcast
+        mask = self.channel_mask.view(1, -1, *([1] * (len(x.shape) - 2)))
+        return gates * mask
+
+    def regularization_loss(self) -> torch.Tensor:
+        probs = F.softmax(self.logits, dim=1)[:, 1]
+        total_enabled = self.channel_mask.sum()
+        if total_enabled == 0:
+            return torch.tensor(0.0, device=self.logits.device)
+        return (probs * self.channel_mask).sum() / total_enabled
+
+    def get_selection_probs(self) -> torch.Tensor:
+        probs = super().get_selection_probs()
+        return probs * self.channel_mask
+
+
+class CIFARMaskedGumbelBasicBlock(CIFARBasicBlock):
+    """CIFAR BasicBlock with a MaskedGumbelLayer for per-channel gating.
+
+    Functionally identical to CIFARGumbelBasicBlock but uses
+    MaskedGumbelLayer, which supports permanently disabling channels
+    identified by a prior Gumbel training run.
+    """
+
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        temperature: float = 1.0,
+        disabled_channels: list[int] | None = None,
+    ):
+        super().__init__(in_planes, planes, stride=stride, option=option)
+        self.gumbel_layer = MaskedGumbelLayer(
+            input_dim=planes * self.expansion,
+            temperature=temperature,
+            disabled_channels=disabled_channels,
+        )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.gumbel_layer(out)
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+
+class SkippedCIFARBasicBlock(CIFARBasicBlock):
+    """CIFARBasicBlock with its residual branch permanently disabled.
+
+    Forward pass returns only the shortcut output (identity or spatially
+    downsampled), making this block a no-op residual.  All conv/BN weights
+    are retained for checkpoint compatibility but never executed.
+
+    Use this for ablation studies where specific blocks are excluded from
+    the residual computation while preserving the overall network depth.
+    """
+
+    def forward(self, x):
+        return F.relu(self.shortcut(x))
+
+
 class CIFARSTGBasicBlock(CIFARBasicBlock):
     def __init__(
         self,

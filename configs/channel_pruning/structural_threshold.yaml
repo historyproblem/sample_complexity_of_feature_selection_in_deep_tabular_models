@@ -1,0 +1,13 @@
+channel_pruning:
+  enabled: true
+  structural: true          # Build a new narrowed model (not soft mask)
+  mode: threshold
+
+  # Path to the previous run directory (relative to repo root or absolute).
+  source_run_dir: ???       # REQUIRED — override on the CLI
+
+  # Channels with mean selection_prob below this are removed from residual.
+  threshold: 0.1
+
+  # Average over last N epochs only; null = all epochs.
+  last_n_epochs: null

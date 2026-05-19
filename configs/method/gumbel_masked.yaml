@@ -1,0 +1,10 @@
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_gumbel_loss
+    _partial_: true
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.CIFARMaskedGumbelBasicBlock
+      _partial_: true

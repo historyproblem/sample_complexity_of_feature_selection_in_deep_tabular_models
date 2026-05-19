@@ -1,0 +1,14 @@
+channel_pruning:
+  enabled: true
+  mode: threshold
+
+  # Path to the previous run directory (relative to repo root or absolute).
+  # Example: "outputs/runs/20240101_120000_gumbel_cifar10_lambda_1.479"
+  source_run_dir: ???
+
+  # Channels with mean selection_prob below this value are permanently disabled.
+  threshold: 0.1
+
+  # Average selection_prob over last N epochs only.
+  # null = use all epochs logged in channel_history.csv.gz
+  last_n_epochs: null

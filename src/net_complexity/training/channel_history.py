@@ -146,6 +146,11 @@ _COLLECTORS: dict[_CollectorSpec, BaseChannelHistoryCollector] = {
         backbone_target="net_complexity.wrappers.CIFARResNet20",
         block_target="net_complexity.wrappers.CIFARGumbelBasicBlock",
     ): CifarResNet20GumbelCollector(),
+    # MaskedGumbelLayer is-a GumbelLayer, so the same collector works.
+    _CollectorSpec(
+        backbone_target="net_complexity.wrappers.CIFARResNet20",
+        block_target="net_complexity.wrappers.CIFARMaskedGumbelBasicBlock",
+    ): CifarResNet20GumbelCollector(),
 }
 
 

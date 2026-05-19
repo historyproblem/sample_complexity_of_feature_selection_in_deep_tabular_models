@@ -1,0 +1,16 @@
+channel_pruning:
+  enabled: true
+  mode: explicit
+
+  # Map each layer to the list of channel indices (0-based) to disable.
+  # Layers with no channels to disable can be omitted entirely.
+  mask:
+    backbone.layer1.0.gumbel_layer: []
+    backbone.layer1.1.gumbel_layer: []
+    backbone.layer1.2.gumbel_layer: []
+    backbone.layer2.0.gumbel_layer: []
+    backbone.layer2.1.gumbel_layer: []
+    backbone.layer2.2.gumbel_layer: []
+    backbone.layer3.0.gumbel_layer: []
+    backbone.layer3.1.gumbel_layer: []
+    backbone.layer3.2.gumbel_layer: []

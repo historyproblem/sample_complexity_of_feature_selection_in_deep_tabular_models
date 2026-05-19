@@ -1,0 +1,4 @@
+layer_skipping:
+  enabled: true
+  # List the "layerN.B" keys of blocks to skip. Empty list = no skipping.
+  disabled_layers: []

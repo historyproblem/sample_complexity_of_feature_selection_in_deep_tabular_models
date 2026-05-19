@@ -1,8 +1,12 @@
+from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
+from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .models.feature_selection import (
     AIGBottleneckLayer,
     CIFARGumbelBasicBlock,
+    CIFARMaskedGumbelBasicBlock,
     CIFARSTGBasicBlock,
     CIFARResNet20,
+    SkippedCIFARBasicBlock,
     CIFARResNet32,
     CIFARResNet44,
     CIFARResNet56,
@@ -11,6 +15,7 @@ from .models.feature_selection import (
     ClassificationFeatureSelectionWrapper,
     GumbelLayer,
     GumbleSoftmax,
+    MaskedGumbelLayer,
     ResNet50,
     ResNet101,
     ResNet152,
@@ -30,10 +35,16 @@ from .models.feature_selection import (
 )
 
 __all__ = [
+    "CIFARPrunedGumbelBasicBlock",
+    "PrunedCIFARResNet",
+    "apply_layer_skipping",
+    "apply_layer_skipping_from_config",
     "AIGBottleneckLayer",
     "CIFARGumbelBasicBlock",
+    "CIFARMaskedGumbelBasicBlock",
     "CIFARSTGBasicBlock",
     "CIFARResNet20",
+    "SkippedCIFARBasicBlock",
     "CIFARResNet32",
     "CIFARResNet44",
     "CIFARResNet56",
@@ -42,6 +53,7 @@ __all__ = [
     "ClassificationFeatureSelectionWrapper",
     "GumbelLayer",
     "GumbleSoftmax",
+    "MaskedGumbelLayer",
     "ResNet50",
     "ResNet101",
     "ResNet152",

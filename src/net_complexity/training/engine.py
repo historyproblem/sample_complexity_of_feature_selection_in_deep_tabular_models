@@ -519,6 +519,16 @@ def train(model: nn.Module,
         if stop_message is not None:
             print(stop_message)
 
+        if mlflow_logger is not None:
+            mlflow_logger.log_metrics(
+                {
+                    "train_time_sec": float(train_time),
+                    "valid_time_sec": float(valid_time),
+                    "epoch_time_sec": float(epoch_time),
+                },
+                step=epoch_num,
+            )
+
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
         completed_epochs = epoch_num
@@ -634,7 +644,34 @@ def run_training(
 ) -> dict[str, Any]:
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
-    model = instantiate(config.model).to(device)
+
+    channel_pruning_cfg = getattr(config, "channel_pruning", None)
+    pruning_enabled = (
+        channel_pruning_cfg is not None
+        and bool(getattr(channel_pruning_cfg, "enabled", True))
+    )
+
+    if pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
+        # Structural pruning: build a physically narrowed model from scratch
+        # instead of instantiating the full model from config.
+        from net_complexity.models.channel_pruning import (
+            build_structurally_pruned_model_from_config,
+        )
+        model = build_structurally_pruned_model_from_config(config, channel_pruning_cfg)
+    else:
+        # Standard path: instantiate from config, then optionally apply soft mask.
+        model = instantiate(config.model)
+        if pruning_enabled:
+            from net_complexity.models.channel_pruning import apply_channel_mask_from_config
+            apply_channel_mask_from_config(model, channel_pruning_cfg)
+
+    layer_skipping_cfg = getattr(config, "layer_skipping", None)
+    if layer_skipping_cfg is not None and bool(getattr(layer_skipping_cfg, "enabled", True)):
+        from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
+        apply_layer_skipping_from_config(model, layer_skipping_cfg)
+
+    model = model.to(device)
+
     dataloaders = instantiate(config.dataloaders)
     optimizer = instantiate(config.optimizer, params=model.parameters())
     scheduler_state = _build_scheduler(config, optimizer)
