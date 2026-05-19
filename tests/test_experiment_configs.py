@@ -197,7 +197,8 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
         "_self_",
     ]
     assert cfg.model.lambda_coef == 0.0
-    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is True
     assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
     assert cfg.model.backbone.resnet_block.temperature == 1.0
     assert cfg.model.backbone.resnet_block.beta == 1.0

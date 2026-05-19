@@ -16,7 +16,7 @@ device: "cuda:0"
 
 model:
   lambda_coef: 0.0
-  gumbel_init_mode: auto
+  gumbel_init_mode: paper_resnet50
   bypass_on_zero_lambda: true
   backbone:
     resnet_block:
