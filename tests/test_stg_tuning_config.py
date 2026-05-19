@@ -16,6 +16,8 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 build_grid_search_space = MODULE.build_grid_search_space
+build_grid_points = MODULE.build_grid_points
+build_point_grid_search_space = MODULE.build_point_grid_search_space
 count_grid_trials = MODULE.count_grid_trials
 
 
@@ -70,6 +72,92 @@ def test_stg_150ep_narrow_grid_tuning_config_uses_exact_6_point_search_space():
     assert count_grid_trials(grid_space) == 6
 
 
+def test_gumbel_resnet50_mask_mode_triplet_uses_exact_three_manual_points():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_mask_mode_triplet.yaml")
+
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_mask_mode_triplet"
+    assert cfg.tuning.n_trials == 3
+    assert cfg.tuning.output_dir == "outputs/studies"
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    grid_points = build_grid_points(
+        OmegaConf.to_container(cfg.tuning.points, resolve=True),
+    )
+    grid_space = build_point_grid_search_space(grid_points)
+
+    assert grid_points == [
+        {
+            "model.lambda_coef": 0.0,
+            "model.backbone.resnet_block.force_ones_mask": True,
+            "model.backbone.resnet_block.deterministic_soft_mask": False,
+            "model.backbone.resnet_block.deterministic_hard_mask": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.force_ones_mask": False,
+            "model.backbone.resnet_block.deterministic_soft_mask": True,
+            "model.backbone.resnet_block.deterministic_hard_mask": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.force_ones_mask": False,
+            "model.backbone.resnet_block.deterministic_soft_mask": False,
+            "model.backbone.resnet_block.deterministic_hard_mask": True,
+        },
+    ]
+    assert grid_space == {"__grid_point_index__": [0, 1, 2]}
+    assert count_grid_trials(grid_space) == 3
+
+
+def test_gumbel_resnet50_gate_mode_abc_ordered_uses_three_manual_points_in_order():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_gate_mode_abc_ordered.yaml")
+
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_gate_mode_abc_ordered"
+    assert cfg.tuning.n_trials == 3
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.points_in_order is True
+    assert cfg.tuning.output_dir == "outputs/studies"
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    grid_points = build_grid_points(
+        OmegaConf.to_container(cfg.tuning.points, resolve=True),
+    )
+    grid_space = build_point_grid_search_space(grid_points)
+
+    assert grid_points == [
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.train_gate_mode": "deterministic_soft",
+            "model.backbone.resnet_block.eval_gate_mode": "deterministic_hard",
+            "mlflow.tags.mask_mode_variant": "variant_a_soft_train_hard_prune",
+            "training_arguments.gate_mode_schedule.enabled": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.train_gate_mode": "ste_hard",
+            "model.backbone.resnet_block.eval_gate_mode": "deterministic_hard",
+            "mlflow.tags.mask_mode_variant": "variant_b_hard_forward_soft_backward_ste",
+            "training_arguments.gate_mode_schedule.enabled": False,
+        },
+        {
+            "model.lambda_coef": 0.01,
+            "model.backbone.resnet_block.train_gate_mode": "gumbel_hard",
+            "model.backbone.resnet_block.eval_gate_mode": "deterministic_hard",
+            "mlflow.tags.mask_mode_variant": "variant_c_delayed_gumbel",
+            "training_arguments.gate_mode_schedule.enabled": True,
+            "training_arguments.gate_mode_schedule.start_epoch": 31,
+            "training_arguments.gate_mode_schedule.initial_train_gate_mode": "deterministic_soft",
+            "training_arguments.gate_mode_schedule.initial_eval_gate_mode": "deterministic_soft",
+            "training_arguments.gate_mode_schedule.target_train_gate_mode": "gumbel_hard",
+            "training_arguments.gate_mode_schedule.target_eval_gate_mode": "deterministic_hard",
+        },
+    ]
+    assert grid_space == {"__grid_point_index__": [0, 1, 2]}
+    assert count_grid_trials(grid_space) == 3
+
+
 def test_stg_experiment_recipe_is_composed_from_layered_config_groups():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "stg_cifar10_default_valid_accuracy.yaml")
 
@@ -93,8 +181,8 @@ def test_tune_entrypoint_routes_hydra_output_into_study_artifacts_dir():
     cfg = OmegaConf.load(CONFIGS_DIR / "tune.yaml")
     hydra_cfg = OmegaConf.to_container(cfg.hydra, resolve=False)
 
-    assert cfg.defaults[0]["experiment"] == "best_practice_resnet50_aig_on_cifar10"
-    assert cfg.defaults[1]["tuning"] == "aig_lambda_grid_150ep"
+    assert cfg.defaults[0]["experiment"] == "best_practice_resnet50_gumbel_on_cifar10"
+    assert cfg.defaults[1]["tuning"] == "gumbel_resnet50_lambda_grid_150ep_narrow"
     assert hydra_cfg == {
         "run": {
             "dir": "${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}",

@@ -1,0 +1,4 @@
+# @package _global_
+
+defaults:
+  - /experiment: resnet50_gumbel_adaptive_lambda_recovery_v1

@@ -26,6 +26,7 @@ CHANNEL_HISTORY_FIELDNAMES = [
     "logit_on",
     "logit_margin",
     "temperature",
+    "beta",
 ]
 
 _CIFAR_SELECTOR_RE = re.compile(
@@ -96,6 +97,7 @@ class CifarResNet20STGCollector(BaseChannelHistoryCollector):
                     "logit_on": None,
                     "logit_margin": None,
                     "temperature": None,
+                    "beta": None,
                 })
         return rows
 
@@ -114,6 +116,7 @@ class CifarResNet20GumbelCollector(BaseChannelHistoryCollector):
                 )
             logit_pairs = logits.tolist()
             temperature = float(module.temperature)
+            beta = float(module.beta)
 
             for channel_index, selection_prob in enumerate(selection_probs):
                 logit_off = float(logit_pairs[channel_index][0])
@@ -133,6 +136,7 @@ class CifarResNet20GumbelCollector(BaseChannelHistoryCollector):
                     "logit_on": logit_on,
                     "logit_margin": float(logit_on - logit_off),
                     "temperature": temperature,
+                    "beta": beta,
                 })
         return rows
 

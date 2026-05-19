@@ -16,6 +16,11 @@ device: "cuda:0"
 
 model:
   lambda_coef: 1.479470
+  gumbel_init_mode: auto
+  bypass_on_zero_lambda: true
+  backbone:
+    resnet_block:
+      beta: 1.0
 
 mlflow:
   run_name: "before_refactor_gumbel_cifar10_lambda_${model.lambda_coef}"

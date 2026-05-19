@@ -15,25 +15,81 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
     def __init__(self,
                  backbone: nn.Module,
                  lambda_coef: float = 0.01,
+                 gumbel_init_mode: str = "auto",
+                 bypass_on_zero_lambda: bool = True,
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
         self.backbone = backbone
         self.criterion = criterion
         self.lambda_coef = lambda_coef
+        self.gumbel_init_mode = gumbel_init_mode
+        self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
         self.regularization_loss = regularization_loss
+        self._initialize_gumbel_layers()
 
     def forward(self, X, y) -> ClassifModelOutput:
         logits = self.backbone(X)
         ce_loss = self.criterion(logits, y)
-        reg_loss = self.regularization_loss(self.backbone)
+        if float(self.lambda_coef) == 0.0:
+            reg_loss = logits.new_zeros(())
+            loss = ce_loss
+        else:
+            reg_loss = self.regularization_loss(self.backbone)
+            loss = ce_loss + self.lambda_coef*reg_loss
 
         return ClassifModelOutput(
             ce_loss=ce_loss,
             regularization_loss=reg_loss,
-            loss=ce_loss + self.lambda_coef*reg_loss,
+            loss=loss,
             logits=logits
         )
+
+    def _should_bypass_gumbel(self) -> bool:
+        return self.bypass_on_zero_lambda and float(self.lambda_coef) == 0.0
+
+    def _resolve_gumbel_init_mode(self) -> str:
+        mode = str(self.gumbel_init_mode).lower()
+        if mode == "auto":
+            return "fully_open" if self._should_bypass_gumbel() else "paper"
+        if mode in {"paper", "paper_resnet50", "fully_open"}:
+            return mode
+        raise ValueError(
+            "gumbel_init_mode must be one of: 'auto', 'paper', 'paper_resnet50', 'fully_open'."
+        )
+
+    def _initialize_gumbel_layers(self) -> None:
+        init_mode = self._resolve_gumbel_init_mode()
+        bypass_gumbel = self._should_bypass_gumbel()
+        for module in get_gumbel_modules(self.backbone).values():
+            module.reset_parameters(init_mode=init_mode)
+            module.set_bypass(bypass_gumbel)
+
+    def set_gumbel_bypass(self, enabled: bool) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_bypass(enabled)
+
+    def set_gumbel_gate_modes(
+        self,
+        *,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+    ) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_gate_modes(
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+            )
+
+    def set_gumbel_open_bias(self, value: float, p_min: float = 0.02, p_max: float = 0.50) -> None:
+        for module in get_gumbel_modules(self.backbone).values():
+            module.set_open_bias(value, p_min=p_min, p_max=p_max)
+
+    def set_lambda_coef(self, lambda_coef: float, *, bypass_gumbel: bool | None = None) -> None:
+        self.lambda_coef = float(lambda_coef)
+        if bypass_gumbel is None:
+            bypass_gumbel = self._should_bypass_gumbel()
+        self.set_gumbel_bypass(bool(bypass_gumbel))
 
 
 # LEGACY: old custom Gumbel-Softmax helper used only by legacy paths, not by the main_gumbel pipeline.
@@ -115,35 +171,278 @@ class GumbelLayer(nn.Module):
     Fixed implementation: Properly handles batch dimension and sampling.
     """
 
-    def __init__(self, input_dim: int, temperature: float = 1.0):
-        super().__init__()
-        # Initialize with bias toward "off" state (first column larger)
-        # This encourages sparsity initially
-        # self.logits = nn.Parameter(torch.zeros(input_dim, 2))
-        self.logits = torch.empty(input_dim, 2)
-        self.logits[:, 1] = 2.0
-        self.logits[:, 0] = 0.1
-        self.logits = self.logits + torch.randn_like(self.logits)*0.02
-        self.logits = nn.Parameter(self.logits)
-        # self.logits.data[:, 0] = 1.0  # Bias toward off state
-        self.temperature = temperature
+    PAPER_INIT_OFF_LOGIT = 0.1
+    PAPER_INIT_ON_LOGIT = 2.0
+    PAPER_INIT_NOISE_SCALE = 0.02
+    PAPER_RESNET50_INIT_OFF_LOGIT = 0.1
+    PAPER_RESNET50_INIT_ON_LOGIT = 4.0
+    PAPER_RESNET50_INIT_NOISE_SCALE = 0.02
+    FULLY_OPEN_OFF_LOGIT = -10.0
+    FULLY_OPEN_ON_LOGIT = 10.0
+    FULLY_OPEN_NOISE_SCALE = 0.0
+    VALID_GATE_MODES = {
+        "gumbel_hard",
+        "deterministic_soft",
+        "deterministic_hard",
+        "ste_hard",
+        "ones",
+    }
 
+    def __init__(
+        self,
+        input_dim: int,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+    ):
+        super().__init__()
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
+        self.logits = nn.Parameter(torch.empty(input_dim, 2))
+        self.temperature = temperature
+        self.beta = float(beta)
+        self.gate_threshold = float(gate_threshold)
+        if not 0.0 <= self.gate_threshold <= 1.0:
+            raise ValueError("gate_threshold must be within [0.0, 1.0].")
+        (
+            self.force_ones_mask,
+            self.deterministic_soft_mask,
+            self.deterministic_hard_mask,
+            self.train_gate_mode,
+            self.eval_gate_mode,
+        ) = self._resolve_gate_mode_configuration(
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+        )
+        self._bypass = False
+        self._open_bias = 0.0
+        self._open_bias_p_min = 0.02
+        self._open_bias_p_max = 0.50
+        self.reset_parameters()
+
+    @classmethod
+    def _normalize_gate_mode(cls, mode: str | None) -> str | None:
+        if mode is None:
+            return None
+        normalized = str(mode).strip().lower()
+        if normalized not in cls.VALID_GATE_MODES:
+            allowed = ", ".join(sorted(cls.VALID_GATE_MODES))
+            raise ValueError(f"gate mode must be one of: {allowed}. Got: {mode!r}")
+        return normalized
+
+    @classmethod
+    def _resolve_gate_mode_configuration(
+        cls,
+        *,
+        force_ones_mask: bool,
+        deterministic_soft_mask: bool,
+        deterministic_hard_mask: bool,
+        train_gate_mode: str | None,
+        eval_gate_mode: str | None,
+    ) -> tuple[bool, bool, bool, str, str]:
+        legacy_flags = {
+            "ones": bool(force_ones_mask),
+            "deterministic_soft": bool(deterministic_soft_mask),
+            "deterministic_hard": bool(deterministic_hard_mask),
+        }
+        enabled_legacy_modes = [mode for mode, enabled in legacy_flags.items() if enabled]
+        normalized_train = cls._normalize_gate_mode(train_gate_mode)
+        normalized_eval = cls._normalize_gate_mode(eval_gate_mode)
+
+        if enabled_legacy_modes and (normalized_train is not None or normalized_eval is not None):
+            raise ValueError(
+                "Legacy mask flags and explicit train/eval gate modes are mutually exclusive."
+            )
+        if len(enabled_legacy_modes) > 1:
+            raise ValueError(
+                "force_ones_mask, deterministic_soft_mask, and deterministic_hard_mask are mutually exclusive."
+            )
+
+        if enabled_legacy_modes:
+            legacy_mode = enabled_legacy_modes[0]
+            normalized_train = legacy_mode
+            normalized_eval = legacy_mode
+
+        if normalized_train is None:
+            normalized_train = "gumbel_hard"
+        if normalized_eval is None:
+            normalized_eval = "deterministic_hard"
+
+        return (
+            bool(force_ones_mask),
+            bool(deterministic_soft_mask),
+            bool(deterministic_hard_mask),
+            normalized_train,
+            normalized_eval,
+        )
+
+    def reset_parameters(self, init_mode: str = "paper") -> None:
+        mode = str(init_mode).lower()
+        if mode == "paper":
+            off_logit = self.PAPER_INIT_OFF_LOGIT
+            on_logit = self.PAPER_INIT_ON_LOGIT
+            noise_scale = self.PAPER_INIT_NOISE_SCALE
+        elif mode == "paper_resnet50":
+            off_logit = self.PAPER_RESNET50_INIT_OFF_LOGIT
+            on_logit = self.PAPER_RESNET50_INIT_ON_LOGIT
+            noise_scale = self.PAPER_RESNET50_INIT_NOISE_SCALE
+        elif mode == "fully_open":
+            off_logit = self.FULLY_OPEN_OFF_LOGIT
+            on_logit = self.FULLY_OPEN_ON_LOGIT
+            noise_scale = self.FULLY_OPEN_NOISE_SCALE
+        else:
+            raise ValueError(
+                "init_mode must be one of: 'paper', 'paper_resnet50', 'fully_open'."
+            )
+
+        with torch.no_grad():
+            self.logits[:, 0].fill_(float(off_logit))
+            self.logits[:, 1].fill_(float(on_logit))
+            if float(noise_scale) > 0.0:
+                self.logits.add_(torch.randn_like(self.logits) * float(noise_scale))
+
+    def set_bypass(self, enabled: bool) -> None:
+        self._bypass = bool(enabled)
+
+    def set_gate_modes(
+        self,
+        *,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+    ) -> None:
+        if train_gate_mode is not None:
+            self.train_gate_mode = self._normalize_gate_mode(train_gate_mode)
+        if eval_gate_mode is not None:
+            self.eval_gate_mode = self._normalize_gate_mode(eval_gate_mode)
+        self.force_ones_mask = self.train_gate_mode == "ones" and self.eval_gate_mode == "ones"
+        self.deterministic_soft_mask = (
+            self.train_gate_mode == "deterministic_soft"
+            and self.eval_gate_mode == "deterministic_soft"
+        )
+        self.deterministic_hard_mask = (
+            self.train_gate_mode == "deterministic_hard"
+            and self.eval_gate_mode == "deterministic_hard"
+        )
+
+    @property
+    def bypass(self) -> bool:
+        return self._bypass
+
+    @property
+    def open_bias(self) -> float:
+        return self._open_bias
+
+    def set_open_bias(self, value: float, p_min: float = 0.02, p_max: float = 0.50) -> None:
+        value = float(value)
+        p_min = float(p_min)
+        p_max = float(p_max)
+        if value < 0.0:
+            raise ValueError("open bias must be non-negative.")
+        if not 0.0 <= p_min < p_max <= 1.0:
+            raise ValueError(
+                "open bias probability bounds must satisfy 0.0 <= p_min < p_max <= 1.0."
+            )
+        self._open_bias = value
+        self._open_bias_p_min = p_min
+        self._open_bias_p_max = p_max
+
+    def _raw_selection_probs(self) -> torch.Tensor:
+        return F.softmax(self.logits, dim=1)[:, 1]
+
+    def _revive_mask(self, probs_on: torch.Tensor) -> torch.Tensor:
+        return (probs_on > self._open_bias_p_min) & (probs_on < self._open_bias_p_max)
+
+    def _effective_logits(self) -> torch.Tensor:
+        if self._open_bias <= 0.0:
+            return self.logits
+        raw_probs_on = self._raw_selection_probs()
+        revive_mask = self._revive_mask(raw_probs_on)
+        if not bool(revive_mask.any().item()):
+            return self.logits
+        logits = self.logits.clone()
+        logits[:, 1] = logits[:, 1] + float(self._open_bias) * revive_mask.to(
+            dtype=logits.dtype
+        )
+        return logits
+
+    def get_open_bias_candidate_stats(
+        self,
+        p_min: float | None = None,
+        p_max: float | None = None,
+    ) -> dict[str, float | int]:
+        p_min = self._open_bias_p_min if p_min is None else float(p_min)
+        p_max = self._open_bias_p_max if p_max is None else float(p_max)
+        with torch.no_grad():
+            probs_on = self._raw_selection_probs().detach()
+            revive_mask = (probs_on > p_min) & (probs_on < p_max)
+            candidate_probs = probs_on[revive_mask]
+            return {
+                "num_channels": int(probs_on.numel()),
+                "revive_candidates": int(revive_mask.sum().item()),
+                "sum_p_open_candidates": (
+                    float(candidate_probs.sum().item()) if candidate_probs.numel() else 0.0
+                ),
+                "sum_p_open_all": float(probs_on.sum().item()),
+            }
+
+    def _selection_probs(self, batch_size: int) -> torch.Tensor:
+        probs_on = F.softmax(self._effective_logits(), dim=1)[:, 1].unsqueeze(0)
+        return probs_on.expand(batch_size, -1)
+
+    def _hard_threshold_mask(self, batch_size: int) -> torch.Tensor:
+        probs_on = self._selection_probs(batch_size)
+        return (probs_on > self.gate_threshold).float()
+
+    def _sample_gumbel_like(self, template_tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+        uniform_samples = torch.rand_like(template_tensor)
+        uniform_samples = uniform_samples.clamp_(min=eps, max=1.0 - eps)
+        return -torch.log(-torch.log(uniform_samples))
+
+    def _sample_gumbel_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        gumbel_noise = self._sample_gumbel_like(logits) * self.beta
+        return F.softmax((logits + gumbel_noise) / self.temperature, dim=-1)
+
+    def _straight_through_hard_sample(self, soft_samples: torch.Tensor) -> torch.Tensor:
+        max_value_indexes = soft_samples.argmax(dim=-1, keepdim=True)
+        hard_samples = torch.zeros_like(soft_samples).scatter_(-1, max_value_indexes, 1.0)
+        return hard_samples - soft_samples.detach() + soft_samples
+
+    def _compute_mode_gates(self, mode: str, batch_size: int) -> torch.Tensor:
+        if mode == "ones":
+            return self.logits.new_ones((batch_size, self.logits.shape[0]))
+        if mode == "deterministic_soft":
+            return self._selection_probs(batch_size)
+        if mode == "deterministic_hard":
+            return self._hard_threshold_mask(batch_size)
+        if mode == "ste_hard":
+            soft_mask = self._selection_probs(batch_size)
+            hard_mask = self._hard_threshold_mask(batch_size)
+            return hard_mask.detach() - soft_mask.detach() + soft_mask
+        if mode == "gumbel_hard":
+            logits = self._effective_logits().unsqueeze(0).expand(batch_size, -1, -1)
+            soft_samples = self._sample_gumbel_softmax(logits)
+            sampled = self._straight_through_hard_sample(soft_samples)
+            return sampled[..., 1]
+        raise AssertionError(f"Unhandled gate mode: {mode}")
 
     # ACTUAL: computes broadcastable Gumbel gates for the current CIFAR main pipeline.
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         batch_size = x.shape[0]
-        if self.training:
-            logits = self.logits.unsqueeze(0).expand(batch_size, -1, -1)
-            sampled = F.gumbel_softmax(
-                logits,
-                tau=self.temperature,
-                hard=True,
-                dim=-1
-            )
-            gates = sampled[..., 1]
-        else:
-            gates = (self.logits[:, 1] > self.logits[:, 0]).float().unsqueeze(0)
-            gates = gates.expand(batch_size, -1)
+        if self._bypass:
+            gates = x.new_ones((batch_size, self.logits.shape[0]))
+            while len(gates.shape) < len(x.shape):
+                gates = gates.unsqueeze(-1)
+            return gates
+        active_mode = self.train_gate_mode if self.training else self.eval_gate_mode
+        gates = self._compute_mode_gates(active_mode, batch_size)
         while len(gates.shape) < len(x.shape):
             gates = gates.unsqueeze(-1)
         return gates
@@ -155,18 +454,28 @@ class GumbelLayer(nn.Module):
     # ACTUAL: regularizer used by the current main_gumbel training loss.
     def regularization_loss(self) -> torch.Tensor:
         """Compute regularization: sum of "on" state probabilities."""
+        if self._bypass:
+            return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
         return torch.mean(probs)
 
     # ACTUAL: probability readout used by current metrics/logging in the main_gumbel pipeline.
     def get_selection_probs(self) -> torch.Tensor:
         """Get selection probabilities for each feature."""
-        return F.softmax(self.logits, dim=1)[:, 1].detach()
+        if self._bypass:
+            return torch.ones(self.logits.shape[0], device=self.logits.device)
+        return F.softmax(self._effective_logits(), dim=1)[:, 1].detach()
 
     # ACTUAL: temperature control hook for the current Gumbel layer implementation.
     def set_temperature(self, temperature: float):
         """Update temperature for annealing schedule."""
         self.temperature = temperature
+
+    def set_beta(self, beta: float):
+        """Update the Gumbel noise scale."""
+        if beta < 0:
+            raise ValueError("beta must be non-negative for GumbelLayer.")
+        self.beta = float(beta)
 
 
 class STGChannelLayer(nn.Module):
@@ -278,13 +587,79 @@ class STGBottleneckLayer(Bottleneck):
         return x
 
 
+class GumbelBottleneckLayer(Bottleneck):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+    ):
+        super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.gumbel_layer = GumbelLayer(
+            input_dim=out_channels * self.expansion,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+        )
+
+    def forward(self, x):
+        identity = x
+
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+        x = self.batch_norm3(self.conv3(x))
+        x = self.gumbel_layer(x)
+
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
-    def __init__(self, in_planes, planes, stride=1, option: str = "A", temperature: float = 1):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        temperature: float = 1,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+    ):
         super().__init__(in_planes, planes, stride=stride, option=option)
         self.gumbel_layer = GumbelLayer(
             input_dim=planes * self.expansion,
             temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
         )
 
     def forward(self, x):
@@ -445,7 +820,7 @@ class AIGBottleneckLayer(Bottleneck):
         # todo: mb to register buffer?
         self.activations = w[:, 1].unsqueeze(1)
 
-        identity = x.clone()
+        identity = x
         x = self.relu(self.batch_norm1(self.conv1(x)))
 
         x = self.relu(self.batch_norm2(self.conv2(x)))
@@ -466,23 +841,27 @@ class AIGBottleneckLayer(Bottleneck):
 def parse_AIG_activations(model: nn.Module, buff=None, prefix: str = None):
     if buff is None:
         buff = {}
-    for name, module in model.named_modules():
-        if module is model:
-            continue
-        name = f'{prefix}.{name}' if prefix is not None else name
-        if isinstance(module, AIGBottleneckLayer):
-            buff[f'g_prob_{name}'] = (module.activations)
-        if module is not model:
-            parse_AIG_activations(module, buff, name)
+    for name, module in _get_aig_modules(model, buff={}, prefix=prefix).items():
+        activations = getattr(module, "activations", None)
+        if activations is not None:
+            buff[f'g_prob_{name}'] = activations
     return buff
 
 
 def get_AIG_regularization_loss(model: nn.Module):
-    activations_dict = parse_AIG_activations(model)
-    reg_loss = 0
-    for name, act in activations_dict.items():
+    aig_modules = _get_aig_modules(model)
+    activations = [
+        module.activations
+        for module in aig_modules.values()
+        if getattr(module, "activations", None) is not None
+    ]
+    if len(activations) == 0:
+        return 0.0
+
+    reg_loss = 0.0
+    for act in activations:
         reg_loss += act.mean()**2
-    reg_loss /= len(activations_dict)
+    reg_loss /= len(activations)
     return reg_loss
 
 
@@ -497,9 +876,35 @@ def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: 
     return buff
 
 
+def _get_cached_modules_by_type(model: nn.Module, cache_key: str, module_types):
+    cache_attr = "_net_complexity_module_cache"
+    cache = getattr(model, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(model, cache_attr, cache)
+
+    modules = cache.get(cache_key)
+    if modules is None:
+        modules = _collect_modules_by_type(model, module_types)
+        cache[cache_key] = modules
+    return modules
+
+
 # ACTUAL: helper used by the current main_gumbel pipeline to collect all Gumbel layers.
 def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
-    return _collect_modules_by_type(model, GumbelLayer, buff=buff, prefix=prefix)
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, GumbelLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "gumbel", GumbelLayer)
+
+
+def _get_aig_modules(model: nn.Module, buff=None, prefix: str = None):
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, AIGBottleneckLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "aig", AIGBottleneckLayer)
+
+
+def get_AIG_modules(model: nn.Module):
+    return _get_aig_modules(model)
 
 
 # ACTUAL: public wrapper used by the training/metrics pipeline after the recursive helper was internalized.
@@ -520,7 +925,9 @@ def get_gumbel_loss(model: nn.Module):
 
 
 def _get_stg_modules(model: nn.Module, buff=None, prefix: str = None):
-    return _collect_modules_by_type(model, STGChannelLayer, buff=buff, prefix=prefix)
+    if buff is not None or prefix is not None:
+        return _collect_modules_by_type(model, STGChannelLayer, buff=buff, prefix=prefix)
+    return _get_cached_modules_by_type(model, "stg", STGChannelLayer)
 
 
 def get_stg_modules(model: nn.Module):

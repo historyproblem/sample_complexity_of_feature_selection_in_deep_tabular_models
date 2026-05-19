@@ -1,0 +1,41 @@
+# @package _global_
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_gumbel_adaptive_lambda_recovery_v1_init_lambda_grid_1em8_1em3_10_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 3
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.00000001
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda1em8_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda1em8
+      mlflow.tags.initial_lambda: "1e-8"
+    - model.lambda_coef: 0.001
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda1em3_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda1em3
+      mlflow.tags.initial_lambda: "1e-3"
+    - model.lambda_coef: 10.0
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda10_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_lambda10
+      mlflow.tags.initial_lambda: "10"

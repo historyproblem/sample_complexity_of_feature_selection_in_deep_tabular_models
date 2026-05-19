@@ -23,6 +23,8 @@ def test_gumbel_cifar10_uses_article_training_stack_with_original_lambda():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.mlflow.tags.recipe == "gumbel_cifar10"
 
 
@@ -65,6 +67,8 @@ def test_before_refactor_gumbel_cifar10_preserves_old_recipe():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 1.479470
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.backbone.resnet_block.beta == 1.0
     assert cfg.mlflow.tags.recipe == "before_refactor_gumbel_cifar10"
 
 
@@ -87,6 +91,58 @@ def test_before_refactor_stg_cifar10_preserves_old_recipe():
     assert cfg.model.backbone.resnet_block.sigma == 0.5
     assert cfg.model.backbone.resnet_block.init_mu == 1.0
     assert cfg.mlflow.tags.recipe == "before_refactor_stg_cifar10"
+
+
+def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
+    cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel.yaml")
+
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.bypass_on_zero_lambda is True
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.model.backbone.resnet_block.force_ones_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
+    assert cfg.model.backbone.resnet_block.train_gate_mode is None
+    assert cfg.model.backbone.resnet_block.eval_gate_mode is None
+    assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
+
+
+def test_train_profiles_enable_batchnorm_recalibration_by_default():
+    default_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "default.yaml")
+    best_practice_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "best_practice.yaml")
+    resnet50_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "resnet50_best_practice.yaml")
+
+    for cfg in (default_cfg, best_practice_cfg, resnet50_cfg):
+        assert cfg.training_arguments.adaptive_lambda.enabled is False
+        assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
+        assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+        assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
+        assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
+        assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
+        assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 1
+        assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
+        assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
+        assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
+        assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_enabled is True
+        assert cfg.training_arguments.adaptive_lambda.prune_rate_low_per_epoch == 0.02
+        assert cfg.training_arguments.adaptive_lambda.prune_rate_high_per_epoch == 0.07
+        assert cfg.training_arguments.adaptive_lambda.log_step_boost_factor == 2.0
+        assert cfg.training_arguments.adaptive_lambda.log_step_max_boost_level == 2
+        assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_max_epoch is None
+        assert cfg.training_arguments.adaptive_lambda.recovery.enabled is True
+        assert cfg.training_arguments.adaptive_lambda.recovery.min_epoch == 80
+        assert cfg.training_arguments.adaptive_lambda.recovery.recovery_epochs == 5
+        assert cfg.training_arguments.adaptive_lambda.recovery.open_bias_start == 0.15
+        assert cfg.training_arguments.adaptive_lambda.recovery.p_open_min == 0.02
+        assert cfg.training_arguments.adaptive_lambda.recovery.p_open_max == 0.50
+        assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+        assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+        assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
+        assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+        assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
 
 
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
@@ -116,6 +172,523 @@ def test_best_practice_resnet50_aig_baseline_uses_full_cifar_recipe_with_zero_la
     assert cfg.model.lambda_coef == 0.0
     assert cfg.model.backbone.resnet_block.temperature == 1.0
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_aig_on_cifar10"
+
+
+def test_best_practice_resnet20_gumbel_baseline_sets_beta_to_one():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet20_on_cifar10.yaml")
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+
+
+def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero_lambda():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_on_cifar10.yaml")
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is True
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_on_cifar10"
+
+
+def test_resnet50_gumbel_adaptive_lambda_recovery_v1_config_enables_recovery():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_gumbel_adaptive_lambda_recovery_v1.yaml"
+    )
+
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert adaptive.adaptive_log_step_enabled is True
+    assert adaptive.prune_rate_low_per_epoch == 0.02
+    assert adaptive.prune_rate_high_per_epoch == 0.07
+    assert adaptive.log_step_boost_factor == 2.0
+    assert adaptive.log_step_max_boost_level == 2
+    assert adaptive.adaptive_log_step_max_epoch is None
+    recovery = cfg.training_arguments.adaptive_lambda.recovery
+    assert recovery.enabled is True
+    assert recovery.decay_lambda is False
+    assert recovery.open_bias_start == 0.15
+    assert recovery.open_bias_decay == 0.90
+    assert recovery.p_open_min == 0.02
+    assert recovery.p_open_max == 0.50
+    assert recovery.recovery_epochs == 5
+    assert recovery.patience == 5
+    assert recovery.max_reopen_delta == 0.02
+    assert recovery.min_epoch == 80
+    assert recovery.require_slow_recovery is True
+    assert recovery.recovery_slope_window == 5
+    assert recovery.min_acc_delta_over_window == 0.005
+    assert recovery.use_zero_prob_filter is True
+    assert recovery.zero_prob_window == 10
+    assert recovery.zero_prob_delta_min == 0.02
+
+
+def test_best_practice_resnet50_gumbel_paper_init_lambda0_disables_bypass_and_warmup():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_paper_init_lambda0_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_paper_init_lambda0_on_cifar10"
+
+
+def test_best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_uses_resnet50_specific_init():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_paper_resnet50_init_lambda0_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_starts_ramp_from_epoch_one():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 1
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_on_cifar10"
+    )
+
+
+def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid():
+    expected = {
+        "resnet50_adaptive_lambda_init5.yaml": 5.0,
+        "resnet50_adaptive_lambda_init15.yaml": 15.0,
+        "resnet50_adaptive_lambda_init25.yaml": 25.0,
+        "resnet50_adaptive_lambda_init35.yaml": 35.0,
+    }
+
+    for config_name, lambda_init in expected.items():
+        cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / config_name)
+        assert cfg.defaults == [
+            {"/data": "cifar10_best_practice"},
+            {"/model": "resnet50"},
+            {"/method": "gumbel"},
+            {"/train": "resnet50_best_practice"},
+            {"/optimizer": "sgd_resnet50"},
+            {"/scheduler": "cosine_200"},
+            {"/metrics": "gumbel_resnet50"},
+            {"/run_history": "valid_accuracy_max"},
+            {"/tracking": "default"},
+            "_self_",
+        ]
+        assert cfg.model.lambda_coef == lambda_init
+        assert cfg.model.gumbel_init_mode == "paper_resnet50"
+        assert cfg.model.bypass_on_zero_lambda is False
+        assert cfg.training_arguments.lambda_warmup.enabled is False
+        assert cfg.training_arguments.adaptive_lambda.enabled is True
+        assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 10
+        assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+        assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+        assert (
+            cfg.training_arguments.adaptive_lambda.baseline_history_dir
+            == "outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_1.0"
+        )
+        assert cfg.training_arguments.adaptive_lambda.lambda_min == 1e-8
+        assert cfg.training_arguments.adaptive_lambda.lambda_max == 80.0
+        assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.6931471805599453
+        assert cfg.training_arguments.adaptive_lambda.log_step_min == 0.04879016416943205
+        assert cfg.training_arguments.adaptive_lambda.soft_drop == 0.02
+        assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.05
+        assert cfg.training_arguments.adaptive_lambda.soft_step_shrink == 0.5
+        assert cfg.training_arguments.adaptive_lambda.hard_step_shrink == 0.25
+        assert cfg.training_arguments.adaptive_lambda.collapse_acc_threshold == 0.15
+        assert cfg.training_arguments.adaptive_lambda.collapse_loss_threshold == 2.15
+        assert cfg.training_arguments.adaptive_lambda.collapse_zero_prob_threshold == 0.90
+        assert cfg.training_arguments.adaptive_lambda.collapse_acc_drop_threshold == 0.40
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is True
+        assert cfg.training_arguments.adaptive_lambda.rollback_on_collapse is True
+        assert cfg.training_arguments.adaptive_lambda.max_rollbacks == 6
+        assert cfg.training_arguments.adaptive_lambda.freeze_on_rollback_limit is True
+        assert cfg.run_history.log_gate_history is True
+        assert cfg.mlflow.enabled is False
+        assert cfg.mlflow.tags.recipe == config_name.removesuffix(".yaml")
+
+
+def test_resnet50_adaptive_lambda_init1em6_no_warmup_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_adaptive_lambda_init1em6_no_warmup.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.0e-6
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 3
+    assert cfg.training_arguments.adaptive_lambda.acc_window == 3
+    assert (
+        cfg.training_arguments.adaptive_lambda.baseline_history_dir
+        == "outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_1.0"
+    )
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "resnet50_adaptive_lambda_init1em6_no_warmup"
+
+
+def test_resnet50_adaptive_lambda_step125_no_warmup_base_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_adaptive_lambda_step125_no_warmup_base.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.0e-3
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 1
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 100.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.22314355131420976
+    assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.04
+    assert cfg.training_arguments.adaptive_lambda.rollback_check_every_epochs == 1
+    assert cfg.training_arguments.adaptive_lambda.rollback_acc_drop_threshold == 0.20
+    assert cfg.training_arguments.adaptive_lambda.rollback_epoch_lookback == 20
+    assert cfg.training_arguments.adaptive_lambda.lambda_increase_cooldown_epochs == 10
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "resnet50_adaptive_lambda_step125_no_warmup_base"
+
+
+def test_best_practice_resnet50_gumbel_gate_modes_lambda001_uses_requested_base_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "best_practice_resnet50_gumbel_gate_modes_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.01
+    assert cfg.model.gumbel_init_mode == "paper"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.gate_mode_schedule.enabled is False
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_gumbel_gate_modes_lambda001_on_cifar10"
+
+
+def test_best_practice_resnet50_gumbel_bn_recalibration_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_bn_recalibration_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.01
+    assert cfg.model.gumbel_init_mode == "paper"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block._target_ == "net_complexity.wrappers.GumbelBottleneckLayer"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.gate_mode_schedule.enabled is False
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+    assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+    assert cfg.run_history.log_gate_history is True
+    assert cfg.mlflow.enabled is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_bn_recalibration_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet20_gumbel_warmup30_lambda1479470_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "cifar_resnet20"},
+        {"/method": "gumbel"},
+        {"/train": "best_practice"},
+        {"/optimizer": "sgd_resnet20"},
+        {"/scheduler": "multistep_91_136"},
+        {"/metrics": "gumbel"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 30
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 1.479470
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet20_gumbel_warmup30_lambda1479470_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "gumbel"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "sgd_resnet50"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel_resnet50"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 0.15
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.start_epoch == 30
+    assert cfg.training_arguments.lambda_warmup.initial_lambda_coef == 0.0
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.lambda_warmup.bypass_during_warmup is False
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+    assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_noise_scaling_only_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_gate_weight_decay_only_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 0.15
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
+    assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_noise_scaling_and_gate_weight_decay_lambda001_on_cifar10"
+    )
+
+
+def test_best_practice_resnet50_gumbel_warmup30_baseline_lambda001_uses_requested_recipe():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "best_practice_resnet50_gumbel_warmup30_baseline_lambda001_on_cifar10.yaml"
+    )
+
+    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.gumbel_init_mode == "fully_open"
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.training_arguments.lambda_warmup.enabled is True
+    assert cfg.training_arguments.lambda_warmup.target_lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.ramp_epochs == 30
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.run_history.log_gate_history is True
+    assert (
+        cfg.mlflow.tags.recipe
+        == "best_practice_resnet50_gumbel_warmup30_baseline_lambda001_on_cifar10"
+    )
+
+
+def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():
+    cfg = OmegaConf.load(CONFIGS_DIR / "metrics" / "gumbel_resnet50.yaml")
+
+    assert cfg.metrics.train_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.valid_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.test_metrics[2].log_channel_zero_probs is False
 
 
 def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_recipe():
@@ -178,6 +751,303 @@ def test_aig_lambda_grid_150ep_includes_baseline_and_requested_lambda_values_wit
     assert cfg.tuning.sampler is None
     assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
     assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.05, 0.5]
+
+
+def test_gumbel_resnet50_lambda_grid_150ep_includes_baseline_and_requested_lambda_values_without_pruning():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep.yaml")
+
+    assert cfg.training_arguments.num_epochs == 150
+    assert cfg.scheduler.T_max == 150
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.05, 0.5]
+
+
+def test_gumbel_resnet50_lambda_grid_150ep_narrow_uses_requested_manual_lambda_points():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tuning" / "gumbel_resnet50_lambda_grid_150ep_narrow.yaml")
+
+    assert cfg.training_arguments.num_epochs == 150
+    assert cfg.scheduler.T_max == 150
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet50_lambda_grid_150ep_narrow"
+    assert cfg.tuning.n_trials == 5
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert cfg.tuning.search_space["model.lambda_coef"].choices == [0.0, 0.01, 0.2, 0.25, 0.3]
+
+
+def test_gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_uses_requested_manual_lambda_points():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_5_15_25_35.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "gumbel_resnet50_paper_resnet50_ramp30_lambda_grid_200ep_5_15_25_35"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert (
+        cfg.tuning.search_space["training_arguments.lambda_warmup.target_lambda_coef"].choices
+        == [5.0, 15.0, 25.0, 35.0]
+    )
+
+
+def test_gumbel_resnet20_warmup30_lambda_grid_160ep_uses_requested_manual_lambda_points():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "gumbel_resnet20_warmup30_lambda_grid_160ep_5_15_25_35.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 160
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "gumbel_resnet20_warmup30_lambda_grid_160ep_5_15_25_35"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.sampler is None
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+    assert (
+        cfg.tuning.search_space["training_arguments.lambda_warmup.target_lambda_coef"].choices
+        == [5.0, 15.0, 25.0, 35.0]
+    )
+
+
+def test_resnet50_adaptive_lambda_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.study_name == "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [5.0, 15.0, 25.0, 35.0]
+
+
+def test_resnet50_adaptive_lambda_updatefreq_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [0.001, 0.1, 0.001, 0.1]
+    assert [
+        point["training_arguments.adaptive_lambda.update_every_epochs"]
+        for point in cfg.tuning.points
+    ] == [2, 2, 1, 1]
+
+
+def test_tune_resnet50_adaptive_lambda_nightly_uses_adaptive_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_adaptive_lambda_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_init5"},
+        {"tuning": "resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered"},
+        "_self_",
+    ]
+
+
+def test_tune_resnet50_adaptive_lambda_updatefreq_nightly_uses_adaptive_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_adaptive_lambda_updatefreq_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_step125_no_warmup_base"},
+        {"tuning": "resnet50_adaptive_lambda_updatefreq_grid_200ep_init1em3_1em1_ordered"},
+        "_self_",
+    ]
+
+
+def test_resnet50_adaptive_lambda_rollback5_base_disables_boost_and_recovery():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5.yaml"
+    )
+
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert cfg.model.lambda_coef == 0.001
+    assert adaptive.enabled is True
+    assert adaptive.adaptive_log_step_enabled is False
+    assert adaptive.recovery.enabled is False
+    assert adaptive.rollback_check_every_epochs == 1
+    assert adaptive.rollback_compare_epoch_lookback == 5
+    assert adaptive.rollback_epoch_lookback == 5
+
+
+def test_resnet50_adaptive_lambda_rollback5_step_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / (
+            "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+            "rollback5_step_grid_125_150_175_200_ordered.yaml"
+        )
+    )
+
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == (
+            "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+            "rollback5_step_grid_125_150_175_200_ordered"
+        )
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.001,
+        0.001,
+        0.001,
+        0.001,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in cfg.tuning.points
+    ] == [
+        0.22314355131420976,
+        0.4054651081081644,
+        0.5596157879354227,
+        0.6931471805599453,
+    ]
+    assert [point["mlflow.tags.lambda_multiplier"] for point in cfg.tuning.points] == [
+        "1.25",
+        "1.5",
+        "1.75",
+        "2",
+    ]
+
+
+def test_tune_resnet50_adaptive_lambda_rollback5_step_grid_uses_requested_defaults():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step_grid.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5"},
+        {
+            "tuning": (
+                "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_"
+                "rollback5_step_grid_125_150_175_200_ordered"
+            )
+        },
+        "_self_",
+    ]
+
+
+def test_resnet50_gumbel_adaptive_logstep_until50_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / (
+            "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+            "logstep_grid_1em6_1em4_boost5_until50_ordered.yaml"
+        )
+    )
+
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == (
+            "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+            "logstep_grid_1em6_1em4_boost5_until50_ordered"
+        )
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.000001,
+        0.0001,
+        0.000001,
+        0.0001,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in cfg.tuning.points
+    ] == [
+        0.22314355131420976,
+        0.22314355131420976,
+        0.09531017980432493,
+        0.09531017980432493,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_max_boost_level"]
+        for point in cfg.tuning.points
+    ] == [5, 5, 5, 5]
+    assert [
+        point["training_arguments.adaptive_lambda.adaptive_log_step_max_epoch"]
+        for point in cfg.tuning.points
+    ] == [50, 50, 50, 50]
+
+
+def test_tune_resnet50_gumbel_adaptive_logstep_until50_uses_recovery_base_and_ordered_grid():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_gumbel_adaptive_lambda_recovery_v1_logstep_grid_until50.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_gumbel_adaptive_lambda_recovery_v1"},
+        {
+            "tuning": (
+                "resnet50_gumbel_adaptive_lambda_recovery_v1_"
+                "logstep_grid_1em6_1em4_boost5_until50_ordered"
+            )
+        },
+        "_self_",
+    ]
+
+
+def test_resnet50_gumbel_constant_lambda_nightly_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [27.0, 28.0, 29.0, 31.0]
+
+
+def test_tune_resnet50_gumbel_constant_lambda_nightly_uses_stock_gumbel_base_and_ordered_grid():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_gumbel_constant_lambda_nightly.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "best_practice_resnet50_gumbel_on_cifar10"},
+        {"tuning": "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered"},
+        "_self_",
+    ]
 
 
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():

@@ -1,0 +1,9 @@
+defaults:
+  - experiment: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5
+  - tuning: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step_grid_125_150_175_200_ordered
+  - _self_
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra

@@ -1,0 +1,47 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+
+scheduler:
+  T_max: 200
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_gumbel_constant_lambda_grid_200ep_27_28_29_31_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 27.0
+      mlflow.run_name: best_practice_resnet50_gumbel_constant_lambda27_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: best_practice_resnet50_gumbel_constant_lambda27
+    - model.lambda_coef: 28.0
+      mlflow.run_name: best_practice_resnet50_gumbel_constant_lambda28_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: best_practice_resnet50_gumbel_constant_lambda28
+    - model.lambda_coef: 29.0
+      mlflow.run_name: best_practice_resnet50_gumbel_constant_lambda29_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: best_practice_resnet50_gumbel_constant_lambda29
+    - model.lambda_coef: 31.0
+      mlflow.run_name: best_practice_resnet50_gumbel_constant_lambda31_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: best_practice_resnet50_gumbel_constant_lambda31

@@ -1,0 +1,40 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: gumbel
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: gumbel_resnet50
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+optimizer:
+  gate_weight_decay_scale: 20.0
+
+model:
+  lambda_coef: 0.0
+  gumbel_init_mode: paper_resnet50
+  bypass_on_zero_lambda: true
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.GumbelBottleneckLayer
+      _partial_: true
+      temperature: 1.0
+      beta: 1.0
+
+run_history:
+  log_gate_history: true
+
+mlflow:
+  enabled: false
+  run_name: "best_practice_resnet50_gumbel_on_cifar10_lambda_${model.lambda_coef}_temp_${model.backbone.resnet_block.temperature}"
+  tags:
+    model_type: "ResNet50_Gumbel"
+    method: "gumbel"
+    recipe: "best_practice_resnet50_gumbel_on_cifar10"
