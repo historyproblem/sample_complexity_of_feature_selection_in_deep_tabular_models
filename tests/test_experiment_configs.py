@@ -189,13 +189,14 @@ def test_best_practice_resnet50_gumbel_baseline_uses_full_cifar_recipe_with_zero
         {"/model": "resnet50"},
         {"/method": "gumbel"},
         {"/train": "resnet50_best_practice"},
-        {"/optimizer": "sgd_resnet50"},
+        {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "gumbel_resnet50"},
         {"/run_history": "valid_accuracy_max"},
         {"/tracking": "default"},
         "_self_",
     ]
+    assert cfg.optimizer.gate_weight_decay_scale == 20.0
     assert cfg.model.lambda_coef == 0.0
     assert cfg.model.gumbel_init_mode == "paper_resnet50"
     assert cfg.model.bypass_on_zero_lambda is True

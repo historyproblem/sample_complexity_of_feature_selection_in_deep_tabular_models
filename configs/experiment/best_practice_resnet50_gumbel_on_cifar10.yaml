@@ -5,7 +5,7 @@ defaults:
   - /model: resnet50
   - /method: gumbel
   - /train: resnet50_best_practice
-  - /optimizer: sgd_resnet50
+  - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: gumbel_resnet50
   - /run_history: valid_accuracy_max
@@ -13,6 +13,9 @@ defaults:
   - _self_
 
 device: "cuda:0"
+
+optimizer:
+  gate_weight_decay_scale: 20.0
 
 model:
   lambda_coef: 0.0
