@@ -1,0 +1,9 @@
+defaults:
+  - experiment: resnet50_adaptive_lambda_init5
+  - tuning: resnet50_adaptive_lambda_init_grid_200ep_5_15_25_35_ordered
+  - _self_
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra

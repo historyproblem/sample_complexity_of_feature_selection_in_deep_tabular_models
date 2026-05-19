@@ -5,6 +5,8 @@ optimizer:
   gate_weight_decay_scale: null
 
 model:
+  gumbel_init_mode: auto
+  bypass_on_zero_lambda: true
   criterion:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:
@@ -15,3 +17,9 @@ model:
       _target_: net_complexity.wrappers.CIFARGumbelBasicBlock
       _partial_: true
       beta: 1.0
+      force_ones_mask: false
+      deterministic_soft_mask: false
+      deterministic_hard_mask: false
+      train_gate_mode: null
+      eval_gate_mode: null
+      gate_threshold: 0.5

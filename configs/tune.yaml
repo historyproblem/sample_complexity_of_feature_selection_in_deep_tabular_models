@@ -1,6 +1,6 @@
 defaults:
-  - experiment: best_practice_resnet50_aig_on_cifar10
-  - tuning: aig_lambda_grid_150ep
+  - experiment: best_practice_resnet50_gumbel_on_cifar10
+  - tuning: gumbel_resnet50_lambda_grid_150ep_narrow
   - _self_
 
 hydra:

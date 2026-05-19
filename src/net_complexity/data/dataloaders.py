@@ -6,6 +6,10 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader, Subset
 import os
 import json
+import subprocess
+import warnings
+from functools import lru_cache
+from pathlib import Path
 
 
 class Dataloaders:
@@ -14,13 +18,61 @@ class Dataloaders:
     test_dataloader: DataLoader = None
 
 
+@lru_cache(maxsize=1)
+def _torch_shm_manager_available() -> bool:
+    shm_manager = Path(torch.__file__).resolve().parent / "bin" / "torch_shm_manager"
+    if not shm_manager.exists():
+        return True
+
+    try:
+        probe = subprocess.run(
+            [str(shm_manager), "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, PermissionError):
+        return False
+    probe_output = f"{probe.stdout}\n{probe.stderr}"
+    if probe.returncode != 0 and "Operation not permitted" in probe_output:
+        return False
+    return True
+
+
+def _resolve_num_workers(num_workers: int) -> int:
+    requested_workers = max(0, int(num_workers))
+    if requested_workers == 0:
+        return 0
+    if _torch_shm_manager_available():
+        return requested_workers
+
+    warnings.warn(
+        "torch_shm_manager is unavailable in this environment; falling back to num_workers=0.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return 0
+
+
+def _resolve_pin_memory(pin_memory: bool | None) -> bool:
+    if pin_memory is not None:
+        return bool(pin_memory)
+    return torch.cuda.is_available()
+
+
 class ClassicCVDataloaders(Dataloaders):
     def __init__(self, path_to_data: str,
                  train_val_ratio: tuple[float, float],
                  batch_size: int,
-                 taskname: str = 'MNIST'):
+                 taskname: str = 'MNIST',
+                 num_workers: int = 2,
+                 pin_memory: bool | None = None):
         assert sum(train_val_ratio) <= 1.0001 and sum(
             train_val_ratio) >= 0.9999
+
+        resolved_num_workers = _resolve_num_workers(num_workers)
+        resolved_pin_memory = _resolve_pin_memory(pin_memory)
 
         task2class = {
             'MNIST': datasets.MNIST,
@@ -85,8 +137,8 @@ class ClassicCVDataloaders(Dataloaders):
             dataset=train_dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=2,
-            pin_memory=True,
+            num_workers=resolved_num_workers,
+            pin_memory=resolved_pin_memory,
             drop_last=True
         )
 
@@ -94,8 +146,8 @@ class ClassicCVDataloaders(Dataloaders):
             dataset=val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=2,
-            pin_memory=True,
+            num_workers=resolved_num_workers,
+            pin_memory=resolved_pin_memory,
             drop_last=False
         )
 
@@ -103,7 +155,7 @@ class ClassicCVDataloaders(Dataloaders):
             dataset=test_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=2,
-            pin_memory=True,
+            num_workers=resolved_num_workers,
+            pin_memory=resolved_pin_memory,
             drop_last=False
         )

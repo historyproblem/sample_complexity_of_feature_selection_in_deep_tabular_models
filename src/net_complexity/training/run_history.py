@@ -14,6 +14,8 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from net_complexity.models.feature_selection import get_gumbel_modules
+
 from .channel_history import CHANNEL_HISTORY_FIELDNAMES, resolve_channel_history_collector
 
 
@@ -46,6 +48,8 @@ class RunHistory:
         self.last_train_metrics: dict[str, Any] = {}
         self.last_valid_metrics: dict[str, Any] = {}
         self.best_valid_metrics: dict[str, Any] = {}
+        self.runtime_metadata: dict[str, Any] = {}
+        self.epoch_pass_counts: dict[int, int] = {}
 
         resolved_config = OmegaConf.to_container(config, resolve=True)
         run_name = "run"
@@ -80,9 +84,13 @@ class RunHistory:
         self.history_path = self.run_dir / "history.csv"
         self.batch_history_path = self.run_dir / "batch_history.csv"
         self.channel_history_path = self.run_dir / "channel_history.csv.gz"
+        self.gate_history_path = self.run_dir / "gate_history.jsonl.gz"
         self.summary_path = self.run_dir / "summary.json"
         self.config_path = self.run_dir / "config_resolved.yaml"
         self.checkpoints_dir.mkdir(parents=True, exist_ok=False)
+        self._history_fieldnames = ["epoch", "epoch_pass", "epoch_label"]
+        self._batch_fieldnames = ["global_batch_step", "stage", "stage_batch_step", "epoch", "batch_in_epoch"]
+        self._logged_gate_history_keys: set[tuple[int, str]] = set()
 
         self.channel_history_enabled = bool(
             getattr(run_history_cfg, "log_channel_history", False)
@@ -92,12 +100,18 @@ class RunHistory:
             if self.channel_history_enabled
             else None
         )
+        self.gate_history_enabled = bool(
+            getattr(run_history_cfg, "log_gate_history", False)
+        )
 
         OmegaConf.save(config=OmegaConf.create(resolved_config), f=str(self.config_path))
         if self.channel_history_enabled:
             with gzip.open(self.channel_history_path, "wt", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=CHANNEL_HISTORY_FIELDNAMES)
                 writer.writeheader()
+        if self.gate_history_enabled:
+            with gzip.open(self.gate_history_path, "wt", encoding="utf-8"):
+                pass
         self._write_json(
             self.run_dir / "run_info.json",
             {
@@ -128,6 +142,17 @@ class RunHistory:
 
     def _write_json(self, path: Path, payload: Mapping[str, Any]) -> None:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _build_epoch_label(self, epoch: int, epoch_pass: int) -> str:
+        return f"epoch_{int(epoch):03d}_pass_{int(epoch_pass):02d}"
+
+    def _append_csv_record(self, path: Path, fieldnames: list[str], record: Mapping[str, Any]) -> None:
+        needs_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(record)
 
     def _relative_to_run_dir(self, path: Path) -> str:
         return str(path.relative_to(self.run_dir))
@@ -166,6 +191,9 @@ class RunHistory:
             "git_dirty": git_dirty,
         }
 
+    def set_runtime_metadata(self, metadata: Mapping[str, Any]) -> None:
+        self.runtime_metadata = dict(metadata)
+
     def _to_cpu(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
             return value.detach().cpu()
@@ -181,14 +209,8 @@ class RunHistory:
         if not self.history_records:
             return
 
-        fieldnames = ["epoch"]
-        for record in self.history_records:
-            for key in record:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-
         with self.history_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=self._history_fieldnames)
             writer.writeheader()
             writer.writerows(self.history_records)
 
@@ -196,14 +218,8 @@ class RunHistory:
         if not self.batch_records:
             return
 
-        fieldnames = ["global_batch_step", "stage", "stage_batch_step", "epoch", "batch_in_epoch"]
-        for record in self.batch_records:
-            for key in record:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-
         with self.batch_history_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=self._batch_fieldnames)
             writer.writeheader()
             writer.writerows(self.batch_records)
 
@@ -212,22 +228,41 @@ class RunHistory:
         epoch: int,
         train_metrics: Mapping[str, Any],
         valid_metrics: Mapping[str, Any],
+        extra_metrics: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.last_train_metrics = _filter_channel_metrics(train_metrics)
         self.last_valid_metrics = _filter_channel_metrics(valid_metrics)
+        epoch = int(epoch)
+        epoch_pass = int(self.epoch_pass_counts.get(epoch, 0))
+        self.epoch_pass_counts[epoch] = epoch_pass + 1
         record = {
-            "epoch": int(epoch),
+            "epoch": epoch,
+            "epoch_pass": epoch_pass,
+            "epoch_label": self._build_epoch_label(epoch, epoch_pass),
             **self.last_train_metrics,
             **self.last_valid_metrics,
+            **dict(extra_metrics or {}),
         }
         self.history_records.append(record)
-        self._rewrite_history()
+        schema_changed = False
+        for key in record:
+            if key not in self._history_fieldnames:
+                self._history_fieldnames.append(key)
+                schema_changed = True
+
+        if schema_changed:
+            self._rewrite_history()
+        else:
+            self._append_csv_record(self.history_path, self._history_fieldnames, record)
         return record
 
     def update_last_epoch(self, extra_metrics: Mapping[str, Any]) -> None:
         if not self.history_records:
             return
         self.history_records[-1].update(dict(extra_metrics))
+        for key in self.history_records[-1]:
+            if key not in self._history_fieldnames:
+                self._history_fieldnames.append(key)
         self._rewrite_history()
 
     def log_batch(
@@ -250,7 +285,16 @@ class RunHistory:
             **dict(metrics),
         }
         self.batch_records.append(record)
-        self._rewrite_batch_history()
+        schema_changed = False
+        for key in record:
+            if key not in self._batch_fieldnames:
+                self._batch_fieldnames.append(key)
+                schema_changed = True
+
+        if schema_changed:
+            self._rewrite_batch_history()
+        else:
+            self._append_csv_record(self.batch_history_path, self._batch_fieldnames, record)
         return record
 
     def resolve_monitor(self, valid_metrics: Mapping[str, Any]) -> tuple[str | None, str]:
@@ -310,6 +354,53 @@ class RunHistory:
             writer.writerows(rows)
         return len(rows)
 
+    def log_gate_history(self, epoch: int, split: str, model: torch.nn.Module) -> int:
+        if not self.gate_history_enabled:
+            return 0
+
+        snapshot_key = (int(epoch), str(split))
+        if snapshot_key in self._logged_gate_history_keys:
+            return 0
+
+        gumbel_modules = get_gumbel_modules(model)
+        if not gumbel_modules:
+            return 0
+
+        rows: list[dict[str, Any]] = []
+        for layer_name, module in gumbel_modules.items():
+            probs_tensor = module.get_selection_probs().detach().cpu()
+            probs = [float(value) for value in probs_tensor.tolist()]
+            polarized_active_mask = [int(value > 0.5) for value in probs]
+            logits = module.logits.detach().cpu()
+            logit_off = [float(value) for value in logits[:, 0].tolist()]
+            logit_on = [float(value) for value in logits[:, 1].tolist()]
+
+            rows.append({
+                "epoch": int(epoch),
+                "split": str(split),
+                "layer_name": layer_name,
+                "num_channels": len(probs),
+                "temperature": float(module.temperature),
+                "beta": float(module.beta),
+                "selection_probs": probs,
+                "zero_probs": [float(1.0 - value) for value in probs],
+                "polarized_active_mask": polarized_active_mask,
+                "polarized_active_count": int(sum(polarized_active_mask)),
+                "logit_off": logit_off,
+                "logit_on": logit_on,
+                "logit_margin": [
+                    float(on_value - off_value)
+                    for off_value, on_value in zip(logit_off, logit_on, strict=False)
+                ],
+            })
+
+        with gzip.open(self.gate_history_path, "at", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+        self._logged_gate_history_keys.add(snapshot_key)
+        return len(rows)
+
     def save_checkpoint(
         self,
         file_name: str,
@@ -317,6 +408,9 @@ class RunHistory:
         optimizer: torch.optim.Optimizer,
         epoch: int,
         metrics: Mapping[str, Any],
+        scheduler_state: Any | None = None,
+        scaler: Any | None = None,
+        extra_state: Mapping[str, Any] | None = None,
     ) -> Path:
         checkpoint_path = self.checkpoints_dir / file_name
         payload = {
@@ -328,6 +422,15 @@ class RunHistory:
             "run_name": self.run_name,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if scheduler_state is not None and getattr(scheduler_state, "scheduler", None) is not None:
+            payload["scheduler_state_dict"] = self._to_cpu(
+                deepcopy(scheduler_state.scheduler.state_dict())
+            )
+            payload["scheduler_step_count"] = int(getattr(scheduler_state, "step_count", 0))
+        if scaler is not None and hasattr(scaler, "state_dict"):
+            payload["scaler_state_dict"] = self._to_cpu(deepcopy(scaler.state_dict()))
+        if extra_state:
+            payload["extra_state"] = self._to_cpu(deepcopy(dict(extra_state)))
         torch.save(payload, checkpoint_path)
         return checkpoint_path
 
@@ -340,6 +443,14 @@ class RunHistory:
     ) -> None:
         finished_at = datetime.now()
         duration_sec = (finished_at - self.started_at).total_seconds()
+        cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
+        warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
+        adaptive_lambda_cfg = OmegaConf.select(self.config, "training_arguments.adaptive_lambda")
+        gate_mode_schedule_cfg = OmegaConf.select(self.config, "training_arguments.gate_mode_schedule")
+        batchnorm_recalibration_cfg = OmegaConf.select(
+            self.config,
+            "training_arguments.batchnorm_recalibration",
+        )
         summary = {
             "schema_version": 2,
             "identity": {
@@ -348,6 +459,30 @@ class RunHistory:
                 "seed": getattr(self.config, "seed", None),
                 "run_dir": str(self.run_dir),
             },
+            "tracked_config": {
+                "model.lambda_coef": cfg_lambda,
+                "training_arguments.lambda_warmup": (
+                    OmegaConf.to_container(warmup_cfg, resolve=True)
+                    if warmup_cfg is not None
+                    else None
+                ),
+                "training_arguments.adaptive_lambda": (
+                    OmegaConf.to_container(adaptive_lambda_cfg, resolve=True)
+                    if adaptive_lambda_cfg is not None
+                    else None
+                ),
+                "training_arguments.gate_mode_schedule": (
+                    OmegaConf.to_container(gate_mode_schedule_cfg, resolve=True)
+                    if gate_mode_schedule_cfg is not None
+                    else None
+                ),
+                "training_arguments.batchnorm_recalibration": (
+                    OmegaConf.to_container(batchnorm_recalibration_cfg, resolve=True)
+                    if batchnorm_recalibration_cfg is not None
+                    else None
+                ),
+            },
+            "runtime": dict(self.runtime_metadata),
             "timing": {
                 "started_at": self.started_at.isoformat(timespec="seconds"),
                 "finished_at": finished_at.isoformat(timespec="seconds"),
@@ -368,6 +503,7 @@ class RunHistory:
                 "config_resolved": self._existing_relative_to_run_dir(self.config_path),
                 "history": self._existing_relative_to_run_dir(self.history_path),
                 "channel_history": self._existing_relative_to_run_dir(self.channel_history_path),
+                "gate_history": self._existing_relative_to_run_dir(self.gate_history_path),
                 "summary": self._relative_to_run_dir(self.summary_path),
                 "checkpoints": {
                     "best": self._existing_relative_to_run_dir(self.checkpoints_dir / "best.pt"),
@@ -376,6 +512,33 @@ class RunHistory:
             },
             "provenance": self._build_provenance(),
         }
+        adaptive_runtime = summary["runtime"].get("adaptive_lambda")
+        if isinstance(adaptive_runtime, Mapping):
+            for key in (
+                "recovery_num_attempts",
+                "recovery_total_epochs",
+                "recovery_was_used",
+                "recovery_final_active_delta",
+                "recovery_best_acc_after_recovery",
+                "recovery_config",
+            ):
+                if key in adaptive_runtime:
+                    summary[key] = adaptive_runtime[key]
         if stop_info is not None:
             summary["stop_info"] = dict(stop_info)
+        summary_lambda = summary["tracked_config"].get("model.lambda_coef")
+        if cfg_lambda is not None and summary_lambda is not None:
+            assert abs(float(cfg_lambda) - float(summary_lambda)) < 1e-12, (
+                f"summary tracked lambda {summary_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
+        runtime_cfg_lambda = summary["runtime"].get("cfg_model_lambda_coef")
+        if cfg_lambda is not None and runtime_cfg_lambda is not None:
+            assert abs(float(cfg_lambda) - float(runtime_cfg_lambda)) < 1e-12, (
+                f"summary runtime cfg lambda {runtime_cfg_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
+        runtime_model_lambda = summary["runtime"].get("model_lambda_coef")
+        if cfg_lambda is not None and runtime_model_lambda is not None:
+            assert abs(float(cfg_lambda) - float(runtime_model_lambda)) < 1e-12, (
+                f"summary runtime model lambda {runtime_model_lambda} does not match cfg.model.lambda_coef={cfg_lambda}."
+            )
         self._write_json(self.summary_path, summary)

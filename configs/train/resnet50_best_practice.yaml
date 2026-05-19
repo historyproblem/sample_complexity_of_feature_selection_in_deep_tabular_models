@@ -2,10 +2,74 @@
 
 training_arguments:
   num_epochs: 200
+  lambda_warmup:
+    enabled: false
+    start_epoch: 30
+    initial_lambda_coef: 0.0
+    target_lambda_coef: 0.0
+    ramp_epochs: 1
+    bypass_during_warmup: true
+  adaptive_lambda:
+    enabled: false
+    warmup_epochs: 10
+    update_every_epochs: 3
+    acc_window: 3
+    baseline_history_dir: null
+    lambda_min: 1e-8
+    lambda_max: 80.0
+    log_step_init: 0.6931471805599453
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: true
+    prune_rate_low_per_epoch: 0.02
+    prune_rate_high_per_epoch: 0.07
+    log_step_boost_factor: 2.0
+    log_step_max_boost_level: 2
+    adaptive_log_step_max_epoch: null
+    soft_drop: 0.02
+    hard_drop: 0.05
+    soft_step_shrink: 0.5
+    hard_step_shrink: 0.25
+    collapse_acc_threshold: 0.15
+    collapse_loss_threshold: 2.15
+    collapse_zero_prob_threshold: 0.90
+    collapse_acc_drop_threshold: 0.40
+    rollback_check_every_epochs: 1
+    rollback_acc_drop_threshold: 0.20
+    rollback_compare_epoch_lookback: null
+    rollback_epoch_lookback: 20
+    lambda_increase_cooldown_epochs: 10
+    rollback_on_degradation: true
+    rollback_on_collapse: true
+    max_rollbacks: 6
+    freeze_on_rollback_limit: true
+    recovery:
+      enabled: true
+      min_epoch: 80
+      drop_min: 0.02
+      drop_max: 0.20
+      patience: 5
+      recovery_slope_window: 5
+      require_slow_recovery: true
+      min_acc_delta_over_window: 0.005
+      use_zero_prob_filter: true
+      zero_prob_window: 10
+      zero_prob_delta_min: 0.02
+      recovery_epochs: 5
+      freeze_lambda_increase: true
+      decay_lambda: false
+      open_bias_start: 0.15
+      open_bias_decay: 0.90
+      p_open_min: 0.02
+      p_open_max: 0.50
+      max_reopen_delta: 0.02
+      target_acc_margin: 0.01
+      cooldown_epochs: 10
+      max_recovery_attempts: 3
   batchnorm_recalibration:
     enabled: true
     num_batches: 200
     reset_running_stats: true
-    deterministic_gumbel: true
+    train_gate_mode: deterministic_hard
+    eval_gate_mode: deterministic_hard
   collapse_guard:
     enabled: false

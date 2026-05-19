@@ -134,5 +134,7 @@ data
 .hydra
 mlflow
 mlruns
+mlflow.db
+mlflow.db-*
 outputs
 .vscode
