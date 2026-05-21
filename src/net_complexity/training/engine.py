@@ -411,6 +411,8 @@ def _ensure_adaptive_baseline_reference(
     baseline_config = _build_baseline_training_config(config, baseline_root_dir)
     baseline_progress_context = dict(progress_context or {})
     baseline_progress_context["baseline_reference_run"] = True
+    baseline_progress_context.pop("grid_params", None)
+    baseline_progress_context.pop("optuna_trial_params", None)
     run_training(
         baseline_config,
         epoch_end_callback=None,
