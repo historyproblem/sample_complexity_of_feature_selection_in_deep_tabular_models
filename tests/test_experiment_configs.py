@@ -958,6 +958,51 @@ def test_tune_resnet50_adaptive_lambda_rollback5_step_grid_uses_requested_defaul
     ]
 
 
+def test_resnet50_gumbel_adamw_lambda_grid_runs_requested_points():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_gumbel_adaptive_lambda_adamw_lambda_grid_ordered.yaml"
+    )
+
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert adaptive.update_every_epochs == 1
+    assert adaptive.rollback_on_degradation is False
+    assert adaptive.rollback_on_collapse is False
+    assert adaptive.recovery.enabled is False
+    assert cfg.tuning.study_name == "resnet50_gumbel_adaptive_lambda_adamw_lambda_grid_ordered"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.00000001,
+        0.000001,
+        10.0,
+        50.0,
+    ]
+    assert [point["mlflow.tags.recovery"] for point in cfg.tuning.points] == [
+        "disabled",
+        "disabled",
+        "disabled",
+        "disabled",
+    ]
+
+
+def test_tune_resnet50_gumbel_adamw_lambda_grid_uses_requested_defaults():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_gumbel_adaptive_lambda_adamw_lambda_grid.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_gumbel_adaptive_lambda_v1"},
+        {"tuning": "resnet50_gumbel_adaptive_lambda_adamw_lambda_grid_ordered"},
+        {"override /optimizer": "adamw"},
+        "_self_",
+    ]
+
+
 def test_resnet50_gumbel_adaptive_logstep_until50_grid_runs_requested_points_in_order():
     cfg = OmegaConf.load(
         CONFIGS_DIR
