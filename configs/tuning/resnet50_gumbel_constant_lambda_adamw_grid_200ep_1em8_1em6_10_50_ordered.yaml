@@ -1,0 +1,71 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+
+scheduler:
+  T_max: 200
+
+optimizer:
+  gate_weight_decay_scale: null
+  _target_: torch.optim.AdamW
+  lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.0005
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_gumbel_constant_lambda_adamw_grid_200ep_1em8_1em6_10_50_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.00000001
+      mlflow.run_name: resnet50_gumbel_constant_lambda_adamw_lambda1em8_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_constant_lambda_adamw_lambda1em8
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-8"
+      mlflow.tags.adaptive_lambda: "disabled"
+    - model.lambda_coef: 0.000001
+      mlflow.run_name: resnet50_gumbel_constant_lambda_adamw_lambda1em6_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_constant_lambda_adamw_lambda1em6
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-6"
+      mlflow.tags.adaptive_lambda: "disabled"
+    - model.lambda_coef: 10.0
+      mlflow.run_name: resnet50_gumbel_constant_lambda_adamw_lambda10_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_constant_lambda_adamw_lambda10
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "10"
+      mlflow.tags.adaptive_lambda: "disabled"
+    - model.lambda_coef: 50.0
+      mlflow.run_name: resnet50_gumbel_constant_lambda_adamw_lambda50_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_constant_lambda_adamw_lambda50
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "50"
+      mlflow.tags.adaptive_lambda: "disabled"

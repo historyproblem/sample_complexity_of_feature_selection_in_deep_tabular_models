@@ -1095,6 +1095,58 @@ def test_tune_resnet50_gumbel_constant_lambda_nightly_uses_stock_gumbel_base_and
     ]
 
 
+def test_resnet50_gumbel_constant_lambda_adamw_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_gumbel_constant_lambda_adamw_grid_200ep_1em8_1em6_10_50_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is False
+    assert cfg.scheduler.T_max == 200
+    assert cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert cfg.optimizer.lr == 0.001
+    assert cfg.optimizer.weight_decay == 0.0005
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet50_gumbel_constant_lambda_adamw_grid_200ep_1em8_1em6_10_50_ordered"
+    )
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.00000001,
+        0.000001,
+        10.0,
+        50.0,
+    ]
+    assert [point["mlflow.tags.adaptive_lambda"] for point in cfg.tuning.points] == [
+        "disabled",
+        "disabled",
+        "disabled",
+        "disabled",
+    ]
+
+
+def test_tune_resnet50_gumbel_constant_lambda_adamw_grid_uses_stock_gumbel_base():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet50_gumbel_constant_lambda_adamw_grid.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "best_practice_resnet50_gumbel_on_cifar10"},
+        {
+            "tuning": (
+                "resnet50_gumbel_constant_lambda_adamw_grid_200ep_"
+                "1em8_1em6_10_50_ordered"
+            )
+        },
+        {"override /optimizer": "adamw"},
+        "_self_",
+    ]
+
+
 def test_before_refactor_stg_cifar10_120_preserves_old_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "before_refactor" / "stg_cifar10_120.yaml")
 
