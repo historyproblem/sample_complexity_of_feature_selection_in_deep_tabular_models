@@ -821,6 +821,88 @@ def test_gumbel_resnet20_warmup30_lambda_grid_160ep_uses_requested_manual_lambda
     )
 
 
+def test_resnet20_gumbel_adaptive_lambda_adamw_base_uses_requested_recipe():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "resnet20_gumbel_adaptive_lambda_adamw_v1.yaml")
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "cifar_resnet20"},
+        {"/method": "gumbel"},
+        {"/train": "best_practice"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "gumbel"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1.0e-6
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.backbone.resnet_block.temperature == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.warmup_epochs == 0
+    assert adaptive.update_every_epochs == 1
+    assert (
+        adaptive.baseline_history_dir
+        == "outputs/baselines/resnet20_gumbel_cifar10_no_pruning_temp_1.0"
+    )
+    assert adaptive.lambda_min == 1e-8
+    assert adaptive.lambda_max == 100.0
+    assert adaptive.rollback_on_degradation is False
+    assert adaptive.rollback_on_collapse is False
+    assert adaptive.recovery.enabled is False
+    assert cfg.mlflow.tags.recipe == "resnet20_gumbel_adaptive_lambda_adamw_v1"
+
+
+def test_resnet20_gumbel_adaptive_lambda_adamw_grid_runs_requested_points_in_order():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet20_gumbel_adaptive_lambda_adamw_grid_200ep_1em6_20_50_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 1
+    assert cfg.training_arguments.adaptive_lambda.rollback_on_degradation is False
+    assert cfg.training_arguments.adaptive_lambda.rollback_on_collapse is False
+    assert cfg.training_arguments.adaptive_lambda.recovery.enabled is False
+    assert cfg.scheduler.T_max == 200
+    assert cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert cfg.optimizer.lr == 0.001
+    assert cfg.optimizer.weight_decay == 0.0005
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.tuning.mode == "grid"
+    assert (
+        cfg.tuning.study_name
+        == "resnet20_gumbel_adaptive_lambda_adamw_grid_200ep_1em6_20_50_ordered"
+    )
+    assert cfg.tuning.n_trials == 3
+    assert cfg.tuning.points_in_order is True
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [
+        0.000001,
+        20.0,
+        50.0,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.update_every_epochs"]
+        for point in cfg.tuning.points
+    ] == [1, 1, 1]
+
+
+def test_tune_resnet20_gumbel_adaptive_lambda_adamw_grid_uses_requested_defaults():
+    cfg = OmegaConf.load(CONFIGS_DIR / "tune_resnet20_gumbel_adaptive_lambda_adamw_grid.yaml")
+
+    assert cfg.defaults == [
+        {"experiment": "resnet20_gumbel_adaptive_lambda_adamw_v1"},
+        {"tuning": "resnet20_gumbel_adaptive_lambda_adamw_grid_200ep_1em6_20_50_ordered"},
+        "_self_",
+    ]
+
+
 def test_resnet50_adaptive_lambda_nightly_grid_runs_requested_points_in_order():
     cfg = OmegaConf.load(
         CONFIGS_DIR
