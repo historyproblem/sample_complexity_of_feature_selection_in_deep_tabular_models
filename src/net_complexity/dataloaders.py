@@ -1,3 +1,3 @@
-from .data.dataloaders import ClassicCVDataloaders, Dataloaders
+from .data.dataloaders import ClassicCVDataloaders, Dataloaders, TinyImageNetDataset
 
-__all__ = ["ClassicCVDataloaders", "Dataloaders"]
+__all__ = ["ClassicCVDataloaders", "Dataloaders", "TinyImageNetDataset"]
