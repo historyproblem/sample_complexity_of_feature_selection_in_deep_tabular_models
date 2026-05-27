@@ -1064,6 +1064,19 @@ def _format_bool(value: Any) -> str:
     return str(bool(value)).lower()
 
 
+def _device_is_cuda(device: str | torch.device) -> bool:
+    try:
+        return torch.device(device).type == "cuda" and torch.cuda.is_available()
+    except (RuntimeError, TypeError):
+        return False
+
+
+def _cuda_device(device: str | torch.device) -> torch.device | None:
+    if not _device_is_cuda(device):
+        return None
+    return torch.device(device)
+
+
 def _build_epoch_log_line(
     epoch: int,
     total_epochs: int,
@@ -1092,6 +1105,17 @@ def _build_epoch_log_line(
         ]
     )
 
+    extra_metrics = extra_metrics or {}
+    train_samples_per_sec = extra_metrics.get("train_samples_per_sec")
+    if train_samples_per_sec is not None:
+        parts.append(f"samples/sec={_format_metric(train_samples_per_sec)}")
+    train_batch_size = extra_metrics.get("train_batch_size")
+    if train_batch_size is not None:
+        parts.append(f"batch={_format_channel_count(train_batch_size)}")
+    train_max_memory_mb = extra_metrics.get("train_max_memory_allocated_mb")
+    if train_max_memory_mb is not None:
+        parts.append(f"max_memory={_format_metric(train_max_memory_mb)}MB")
+
     train_zero_prob = train_metrics.get("train_average_zero_prob")
     if train_zero_prob is not None:
         parts.append(f"train_zero={_format_metric(train_zero_prob)}")
@@ -1114,7 +1138,6 @@ def _build_epoch_log_line(
             f"{_format_channel_count(valid_total_channels)}"
         )
 
-    extra_metrics = extra_metrics or {}
     lambda_coef = extra_metrics.get("lambda_coef")
     if lambda_coef is not None:
         parts.append(f"lambda={_format_metric(lambda_coef)}")
@@ -1433,9 +1456,19 @@ def train_epoch(model,
                 progress_context: ProgressContext | None = None):
     """Train for one epoch."""
     model.train()
+    train_dataloader = dataloaders.train_dataloader
+    cuda_device = _cuda_device(device)
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        torch.cuda.reset_peak_memory_stats(cuda_device)
+    train_started_at = perf_counter()
+    n_seen = 0
 
-    for X, y in dataloaders.train_dataloader:
-        X, y = X.to(device), y.to(device)
+    for X, y in train_dataloader:
+        X = X.to(device, non_blocking=cuda_device is not None)
+        y = y.to(device, non_blocking=cuda_device is not None)
+        n_seen += int(X.shape[0])
+        optimizer.zero_grad(set_to_none=True)
         output = model(X, y)
 
         metrics.train_metrics.update(X, output, y, model)
@@ -1445,7 +1478,21 @@ def train_epoch(model,
         if scheduler_state is not None and scheduler_state.interval == "batch":
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
             scheduler_state.step(batch_metrics)
-        optimizer.zero_grad()
+
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        max_memory_allocated_mb = float(torch.cuda.max_memory_allocated(cuda_device) / 1024**2)
+    else:
+        max_memory_allocated_mb = None
+    train_time = perf_counter() - train_started_at
+    samples_per_sec = float(n_seen / train_time) if train_time > 0.0 else 0.0
+    return {
+        "train_time_sec": float(train_time),
+        "train_samples_seen": int(n_seen),
+        "train_samples_per_sec": samples_per_sec,
+        "train_batch_size": int(getattr(train_dataloader, "batch_size", 0) or 0),
+        "train_max_memory_allocated_mb": max_memory_allocated_mb,
+    }
 
 
 def train(model: nn.Module,
@@ -1511,8 +1558,7 @@ def train(model: nn.Module,
             gate_mode_schedule.step(epoch_num, model)
         epoch_started_at = perf_counter()
 
-        train_started_at = perf_counter()
-        train_epoch(
+        train_profile_metrics = train_epoch(
             model,
             optimizer,
             dataloaders,
@@ -1524,7 +1570,7 @@ def train(model: nn.Module,
             scheduler_state=scheduler_state,
             progress_context=progress_context,
         )
-        train_time = perf_counter() - train_started_at
+        train_time = float(train_profile_metrics["train_time_sec"])
 
         valid_started_at = perf_counter()
         evaluate(
@@ -1602,7 +1648,7 @@ def train(model: nn.Module,
                 run_history.set_runtime_metadata(runtime_metadata)
 
         post_epoch_extra_metrics = {
-            "train_time_sec": float(train_time),
+            **train_profile_metrics,
             "valid_time_sec": float(valid_time),
             "epoch_time_sec": float(perf_counter() - epoch_started_at),
             "model_lambda_coef": _resolve_model_lambda_coef(model),

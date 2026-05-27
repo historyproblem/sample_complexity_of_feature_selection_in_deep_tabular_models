@@ -1472,3 +1472,69 @@ def test_tinyimagenet_resnet50_only_ordered_lambda10_adaptive_config_uses_batch2
     assert points[1]["training_arguments.adaptive_lambda.collapse_loss_threshold"] == 5.3
     assert [point["mlflow.tags.optimizer"] for point in points] == ["AdamW", "AdamW"]
     assert [point["mlflow.tags.batch_size"] for point in points] == ["224", "224"]
+
+
+def test_tinyimagenet_resnet50_batch_size_benchmark_uses_ordered_adamw_points():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "tinyimagenet200_resnet50_batch_size_benchmark_3ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_tinyimagenet200_resnet50_batch_size_benchmark.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_gumbel_adaptive_lambda_tinyimagenet200_v1"},
+        {"tuning": "tinyimagenet200_resnet50_batch_size_benchmark_3ep_ordered"},
+        {"override /optimizer": "adamw"},
+        "_self_",
+    ]
+    assert tuning_cfg.training_arguments.num_epochs == 3
+    assert tuning_cfg.training_arguments.adaptive_lambda.enabled is False
+    assert tuning_cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
+    assert tuning_cfg.scheduler.T_max == 3
+    assert tuning_cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert tuning_cfg.optimizer.lr == 0.001
+    assert tuning_cfg.optimizer.weight_decay == 0.0005
+    assert tuning_cfg.optimizer.gate_weight_decay_scale is None
+    assert tuning_cfg.tuning.enabled is True
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.points_in_order is True
+    assert tuning_cfg.tuning.n_jobs == 1
+    assert tuning_cfg.tuning.n_trials == 4
+    assert (
+        tuning_cfg.tuning.study_name
+        == "tinyimagenet200_resnet50_batch_size_benchmark_3ep_ordered"
+    )
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["dataloaders.batch_size"] for point in points] == [128, 160, 192, 224]
+    assert [point["model.lambda_coef"] for point in points] == [10.0, 10.0, 10.0, 10.0]
+    assert [point["training_arguments.adaptive_lambda.enabled"] for point in points] == [
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert [
+        point["training_arguments.adaptive_lambda.baseline_history_dir"] for point in points
+    ] == [None, None, None, None]
+    assert [point["mlflow.tags.optimizer"] for point in points] == [
+        "AdamW",
+        "AdamW",
+        "AdamW",
+        "AdamW",
+    ]
+    assert [point["mlflow.tags.batch_size"] for point in points] == [
+        "128",
+        "160",
+        "192",
+        "224",
+    ]
+    assert [point["mlflow.tags.benchmark_warmup"] for point in points] == [
+        "ignore_epoch_1",
+        "ignore_epoch_1",
+        "ignore_epoch_1",
+        "ignore_epoch_1",
+    ]
