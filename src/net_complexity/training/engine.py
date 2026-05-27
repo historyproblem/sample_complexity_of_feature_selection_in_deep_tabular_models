@@ -1115,6 +1115,9 @@ def _build_epoch_log_line(
     train_max_memory_mb = extra_metrics.get("train_max_memory_allocated_mb")
     if train_max_memory_mb is not None:
         parts.append(f"max_memory={_format_metric(train_max_memory_mb)}MB")
+    train_data_wait_time = extra_metrics.get("train_data_wait_time_sec")
+    if train_data_wait_time is not None:
+        parts.append(f"data_wait={float(train_data_wait_time):.2f}s")
 
     train_zero_prob = train_metrics.get("train_average_zero_prob")
     if train_zero_prob is not None:
@@ -1462,9 +1465,13 @@ def train_epoch(model,
         torch.cuda.synchronize(cuda_device)
         torch.cuda.reset_peak_memory_stats(cuda_device)
     train_started_at = perf_counter()
+    data_wait_time = 0.0
     n_seen = 0
 
+    batch_fetch_started_at = perf_counter()
     for X, y in train_dataloader:
+        batch_fetch_finished_at = perf_counter()
+        data_wait_time += batch_fetch_finished_at - batch_fetch_started_at
         X = X.to(device, non_blocking=cuda_device is not None)
         y = y.to(device, non_blocking=cuda_device is not None)
         n_seen += int(X.shape[0])
@@ -1478,6 +1485,7 @@ def train_epoch(model,
         if scheduler_state is not None and scheduler_state.interval == "batch":
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
             scheduler_state.step(batch_metrics)
+        batch_fetch_started_at = perf_counter()
 
     if cuda_device is not None:
         torch.cuda.synchronize(cuda_device)
@@ -1488,6 +1496,8 @@ def train_epoch(model,
     samples_per_sec = float(n_seen / train_time) if train_time > 0.0 else 0.0
     return {
         "train_time_sec": float(train_time),
+        "train_data_wait_time_sec": float(data_wait_time),
+        "train_non_data_time_sec": float(max(0.0, train_time - data_wait_time)),
         "train_samples_seen": int(n_seen),
         "train_samples_per_sec": samples_per_sec,
         "train_batch_size": int(getattr(train_dataloader, "batch_size", 0) or 0),

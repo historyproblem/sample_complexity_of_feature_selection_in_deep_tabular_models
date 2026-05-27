@@ -6,6 +6,12 @@ training_arguments:
     enabled: false
     baseline_history_dir: null
 
+dataloaders:
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
 scheduler:
   T_max: 3
 

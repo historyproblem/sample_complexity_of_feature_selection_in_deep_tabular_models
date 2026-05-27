@@ -1493,6 +1493,10 @@ def test_tinyimagenet_resnet50_batch_size_benchmark_uses_ordered_adamw_points():
     assert tuning_cfg.training_arguments.num_epochs == 3
     assert tuning_cfg.training_arguments.adaptive_lambda.enabled is False
     assert tuning_cfg.training_arguments.adaptive_lambda.baseline_history_dir is None
+    assert tuning_cfg.dataloaders.num_workers == 8
+    assert tuning_cfg.dataloaders.pin_memory is True
+    assert tuning_cfg.dataloaders.persistent_workers is True
+    assert tuning_cfg.dataloaders.prefetch_factor == 2
     assert tuning_cfg.scheduler.T_max == 3
     assert tuning_cfg.optimizer._target_ == "torch.optim.AdamW"
     assert tuning_cfg.optimizer.lr == 0.001

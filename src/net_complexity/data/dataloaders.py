@@ -70,6 +70,24 @@ def _resolve_pin_memory(pin_memory: bool | None) -> bool:
     return torch.cuda.is_available()
 
 
+def _dataloader_kwargs(
+    *,
+    num_workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
+    prefetch_factor: int | None,
+) -> dict:
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(persistent_workers)
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = int(prefetch_factor)
+    return kwargs
+
+
 def _normalize_taskname(taskname: str) -> str:
     return str(taskname).replace("-", "").replace("_", "").upper()
 
@@ -157,6 +175,8 @@ class ClassicCVDataloaders(Dataloaders):
         taskname: str = "MNIST",
         num_workers: int = 2,
         pin_memory: bool | None = None,
+        persistent_workers: bool = False,
+        prefetch_factor: int | None = None,
         valid_ratio: float | None = None,
         valid_per_class: int | None = None,
         seed: int = 42,
@@ -173,6 +193,8 @@ class ClassicCVDataloaders(Dataloaders):
                 batch_size=batch_size,
                 num_workers=resolved_num_workers,
                 pin_memory=resolved_pin_memory,
+                persistent_workers=persistent_workers,
+                prefetch_factor=prefetch_factor,
                 valid_ratio=valid_ratio,
                 valid_per_class=valid_per_class,
                 seed=seed,
@@ -229,32 +251,35 @@ class ClassicCVDataloaders(Dataloaders):
             download=True
         )
         train_dataset = Subset(train_augmented_dataset, train_indices)
+        loader_kwargs = _dataloader_kwargs(
+            num_workers=resolved_num_workers,
+            pin_memory=resolved_pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        )
 
         self.train_dataloader = DataLoader(
             dataset=train_dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=resolved_num_workers,
-            pin_memory=resolved_pin_memory,
-            drop_last=True
+            drop_last=True,
+            **loader_kwargs,
         )
 
         self.valid_dataloader = DataLoader(
             dataset=val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=resolved_num_workers,
-            pin_memory=resolved_pin_memory,
-            drop_last=False
+            drop_last=False,
+            **loader_kwargs,
         )
 
         self.test_dataloader = DataLoader(
             dataset=test_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=resolved_num_workers,
-            pin_memory=resolved_pin_memory,
-            drop_last=False
+            drop_last=False,
+            **loader_kwargs,
         )
 
     def _init_tinyimagenet200(
@@ -264,6 +289,8 @@ class ClassicCVDataloaders(Dataloaders):
         batch_size: int,
         num_workers: int,
         pin_memory: bool,
+        persistent_workers: bool,
+        prefetch_factor: int | None,
         valid_ratio: float | None,
         valid_per_class: int | None,
         seed: int,
@@ -330,30 +357,33 @@ class ClassicCVDataloaders(Dataloaders):
             transform=test_transform,
             class_to_idx=class_to_idx,
         )
+        loader_kwargs = _dataloader_kwargs(
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        )
 
         self.train_dataloader = DataLoader(
             dataset=train_dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
             drop_last=True,
+            **loader_kwargs,
         )
         self.valid_dataloader = DataLoader(
             dataset=valid_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
             drop_last=False,
+            **loader_kwargs,
         )
         self.test_dataloader = DataLoader(
             dataset=test_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
             drop_last=False,
+            **loader_kwargs,
         )
 
     @staticmethod
