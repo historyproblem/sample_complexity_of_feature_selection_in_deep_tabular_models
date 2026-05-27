@@ -1425,3 +1425,50 @@ def test_tinyimagenet_resnet20_resnet50_ordered_lambda10_adaptive_config_runs_re
     )
     assert points[1]["training_arguments.adaptive_lambda.collapse_loss_threshold"] == 5.3
     assert points[3]["training_arguments.adaptive_lambda.collapse_loss_threshold"] == 5.3
+
+
+def test_tinyimagenet_resnet50_only_ordered_lambda10_adaptive_config_uses_batch224_adamw():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "tinyimagenet200_resnet50_lambda10_adaptive_init001_batch224_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_tinyimagenet200_resnet50_lambda10_adaptive_init001_batch224.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_gumbel_adaptive_lambda_tinyimagenet200_v1"},
+        {"tuning": "tinyimagenet200_resnet50_lambda10_adaptive_init001_batch224_ordered"},
+        {"override /optimizer": "adamw"},
+        "_self_",
+    ]
+    assert tuning_cfg.dataloaders.batch_size == 224
+    assert tuning_cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert tuning_cfg.optimizer.lr == 0.001
+    assert tuning_cfg.optimizer.weight_decay == 0.0005
+    assert tuning_cfg.optimizer.gate_weight_decay_scale is None
+    assert tuning_cfg.tuning.enabled is True
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.points_in_order is True
+    assert tuning_cfg.tuning.n_jobs == 1
+    assert tuning_cfg.tuning.n_trials == 2
+    assert (
+        tuning_cfg.tuning.study_name
+        == "tinyimagenet200_resnet50_lambda10_adaptive_init001_batch224_ordered"
+    )
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [10.0, 0.01]
+    assert [point["training_arguments.adaptive_lambda.enabled"] for point in points] == [
+        False,
+        True,
+    ]
+    assert points[0]["training_arguments.adaptive_lambda.baseline_history_dir"] is None
+    assert points[1]["training_arguments.adaptive_lambda.baseline_history_dir"].startswith(
+        "outputs/baselines/resnet50_gumbel_tinyimagenet200"
+    )
+    assert points[1]["training_arguments.adaptive_lambda.collapse_loss_threshold"] == 5.3
+    assert [point["mlflow.tags.optimizer"] for point in points] == ["AdamW", "AdamW"]
+    assert [point["mlflow.tags.batch_size"] for point in points] == ["224", "224"]
