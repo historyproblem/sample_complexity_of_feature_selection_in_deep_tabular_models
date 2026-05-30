@@ -15,8 +15,9 @@ class AIGActivationsMetric(BaseMetric):
             if value is None:
                 continue
             metric_name = f"g_prob_{name}"
-            self._activation_sums[metric_name] += float(value.detach().mean().item())
-            self._activation_counts[metric_name] += 1
+            detached_value = value.detach()
+            self._activation_sums[metric_name] += float(detached_value.sum().item())
+            self._activation_counts[metric_name] += detached_value.numel()
 
     def compute(self):
         activations_dict = {}
@@ -32,11 +33,17 @@ class AIGActivationsMetric(BaseMetric):
             activations_dict['average_prob'] = 0.0
             activations_dict['max_prob'] = 0.0
             activations_dict['min_prob'] = 0.0
+            activations_dict['average_zero_prob'] = 1.0
+            activations_dict['max_zero_prob'] = 1.0
+            activations_dict['min_zero_prob'] = 1.0
             return activations_dict
 
         activations_dict['average_prob'] = float(sum(means) / len(means))
         activations_dict['max_prob'] = float(max(means))
         activations_dict['min_prob'] = float(min(means))
+        activations_dict['average_zero_prob'] = float(1.0 - activations_dict['average_prob'])
+        activations_dict['max_zero_prob'] = float(1.0 - activations_dict['min_prob'])
+        activations_dict['min_zero_prob'] = float(1.0 - activations_dict['max_prob'])
         return activations_dict
 
     def reset(self):

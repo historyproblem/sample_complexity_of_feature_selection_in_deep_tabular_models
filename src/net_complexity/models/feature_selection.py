@@ -27,6 +27,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
+        self.set_aig_bypass(self._should_bypass_gumbel())
 
     def forward(self, X, y) -> ClassifModelOutput:
         logits = self.backbone(X)
@@ -69,6 +70,10 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         for module in get_gumbel_modules(self.backbone).values():
             module.set_bypass(enabled)
 
+    def set_aig_bypass(self, enabled: bool) -> None:
+        for module in get_AIG_modules(self.backbone).values():
+            module.set_bypass(enabled)
+
     def set_gumbel_gate_modes(
         self,
         *,
@@ -90,6 +95,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         if bypass_gumbel is None:
             bypass_gumbel = self._should_bypass_gumbel()
         self.set_gumbel_bypass(bool(bypass_gumbel))
+        self.set_aig_bypass(bool(bypass_gumbel))
 
 
 # LEGACY: old custom Gumbel-Softmax helper used only by legacy paths, not by the main_gumbel pipeline.
@@ -702,6 +708,7 @@ class AIGBottleneckLayer(Bottleneck):
         super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
         self.gumbel = GumbleSoftmax(hard=hard)
         self.temperature = temperature
+        self.bypass = False
         self.adapter = nn.Sequential(
             nn.Conv2d(in_channels=in_planes,
                       out_channels=16, kernel_size=1),
@@ -719,11 +726,17 @@ class AIGBottleneckLayer(Bottleneck):
             self.gumbel.cuda()
         return self
 
+    def set_bypass(self, enabled: bool) -> None:
+        self.bypass = bool(enabled)
+
     def forward(self, x):
-        w = self.adapter(F.avg_pool2d(x, x.size(2)))
-        w = self.gumbel(w, temp=self.temperature, force_hard=True)
-        # todo: mb to register buffer?
-        self.activations = w[:, 1].unsqueeze(1)
+        if self.bypass:
+            self.activations = x.new_ones((x.shape[0], 1, 1, 1))
+        else:
+            w = self.adapter(F.avg_pool2d(x, x.size(2)))
+            w = self.gumbel(w, temp=self.temperature, force_hard=True)
+            # todo: mb to register buffer?
+            self.activations = w[:, 1].unsqueeze(1)
 
         identity = x
         x = self.relu(self.batch_norm1(self.conv1(x)))
@@ -737,7 +750,7 @@ class AIGBottleneckLayer(Bottleneck):
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)
         # add identity
-        x = identity + x*w[:, 1].unsqueeze(1)
+        x = identity + x*self.activations
         x = self.relu(x)
 
         return x

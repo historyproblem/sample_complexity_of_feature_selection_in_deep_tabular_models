@@ -34,6 +34,7 @@ def _make_config(baseline_history_dir: str) -> object:
 
 def test_build_baseline_training_config_disables_pruning_and_redirects_run_history(tmp_path):
     config = _make_config(str(tmp_path / "baseline_root"))
+    OmegaConf.set_struct(config, True)
 
     baseline_config = engine._build_baseline_training_config(config, tmp_path / "baseline_root")
 

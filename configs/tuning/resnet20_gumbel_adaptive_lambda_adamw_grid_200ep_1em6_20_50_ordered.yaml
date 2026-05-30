@@ -5,8 +5,6 @@ training_arguments:
   adaptive_lambda:
     enabled: true
     update_every_epochs: 1
-    rollback_on_degradation: false
-    rollback_on_collapse: false
     recovery:
       enabled: false
 
@@ -55,7 +53,6 @@ tuning:
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-6"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
       mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 20.0
       training_arguments.adaptive_lambda.update_every_epochs: 1
@@ -64,7 +61,6 @@ tuning:
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "20"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
       mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 50.0
       training_arguments.adaptive_lambda.update_every_epochs: 1
@@ -73,5 +69,4 @@ tuning:
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "50"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
       mlflow.tags.recovery: "disabled"

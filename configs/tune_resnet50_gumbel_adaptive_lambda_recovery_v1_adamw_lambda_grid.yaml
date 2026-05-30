@@ -1,6 +1,6 @@
 defaults:
   - experiment: resnet50_gumbel_adaptive_lambda_recovery_v1
-  - tuning: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda_grid_ordered
+  - tuning: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda_grid_ordered
   - override /optimizer: adamw
   - _self_
 

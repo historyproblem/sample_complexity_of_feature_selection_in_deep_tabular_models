@@ -41,21 +41,6 @@ training_arguments:
     adaptive_log_step_enabled: false
     soft_drop: 0.02
     hard_drop: 0.04
-    soft_step_shrink: 0.5
-    hard_step_shrink: 0.25
-    collapse_acc_threshold: 0.15
-    collapse_loss_threshold: 2.15
-    collapse_zero_prob_threshold: 0.90
-    collapse_acc_drop_threshold: 0.40
-    rollback_check_every_epochs: 1
-    rollback_acc_drop_threshold: 0.20
-    rollback_compare_epoch_lookback: 5
-    rollback_epoch_lookback: 5
-    lambda_increase_cooldown_epochs: 10
-    rollback_on_degradation: true
-    rollback_on_collapse: true
-    max_rollbacks: 6
-    freeze_on_rollback_limit: true
     recovery:
       enabled: false
 
@@ -64,8 +49,8 @@ run_history:
 
 mlflow:
   enabled: false
-  run_name: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125_temp_${model.backbone.resnet_block.temperature}"
+  run_name: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step125_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_Gumbel"
     method: "gumbel"
-    recipe: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125"
+    recipe: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step125"

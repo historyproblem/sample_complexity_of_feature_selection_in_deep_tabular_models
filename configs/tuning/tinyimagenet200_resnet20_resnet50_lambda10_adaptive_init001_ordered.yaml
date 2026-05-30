@@ -86,10 +86,6 @@ tuning:
       training_arguments.adaptive_lambda.enabled: true
       training_arguments.adaptive_lambda.update_every_epochs: 1
       training_arguments.adaptive_lambda.baseline_history_dir: outputs/baselines/resnet20_gumbel_tinyimagenet200_no_pruning_temp_${model.backbone.resnet_block.temperature}
-      training_arguments.adaptive_lambda.collapse_acc_threshold: 0.01
-      training_arguments.adaptive_lambda.collapse_loss_threshold: 5.3
-      training_arguments.adaptive_lambda.rollback_on_degradation: false
-      training_arguments.adaptive_lambda.rollback_on_collapse: false
       training_arguments.adaptive_lambda.recovery.enabled: false
       scheduler.T_max: 200
       optimizer:
@@ -175,10 +171,6 @@ tuning:
       training_arguments.adaptive_lambda.enabled: true
       training_arguments.adaptive_lambda.update_every_epochs: 2
       training_arguments.adaptive_lambda.baseline_history_dir: outputs/baselines/resnet50_gumbel_tinyimagenet200_no_pruning_temp_${model.backbone.resnet_block.temperature}
-      training_arguments.adaptive_lambda.collapse_acc_threshold: 0.01
-      training_arguments.adaptive_lambda.collapse_loss_threshold: 5.3
-      training_arguments.adaptive_lambda.rollback_on_degradation: true
-      training_arguments.adaptive_lambda.rollback_on_collapse: true
       training_arguments.adaptive_lambda.recovery.enabled: false
       scheduler.T_max: 240
       optimizer:

@@ -9,7 +9,7 @@ scheduler:
 tuning:
   enabled: true
   mode: "grid"
-  study_name: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step_grid_125_150_175_200_ordered"
+  study_name: "resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step_grid_125_150_175_200_ordered"
   direction: "maximize"
   objective_metric: "valid_accuracy"
   n_trials: 4
@@ -35,25 +35,25 @@ tuning:
   points:
     - model.lambda_coef: 0.001
       training_arguments.adaptive_lambda.log_step_init: 0.22314355131420976
-      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step125
+      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step125_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step125
       mlflow.tags.initial_lambda: "1e-3"
       mlflow.tags.lambda_multiplier: "1.25"
     - model.lambda_coef: 0.001
       training_arguments.adaptive_lambda.log_step_init: 0.4054651081081644
-      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step150_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step150
+      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step150_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step150
       mlflow.tags.initial_lambda: "1e-3"
       mlflow.tags.lambda_multiplier: "1.5"
     - model.lambda_coef: 0.001
       training_arguments.adaptive_lambda.log_step_init: 0.5596157879354227
-      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step175_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step175
+      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step175_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step175
       mlflow.tags.initial_lambda: "1e-3"
       mlflow.tags.lambda_multiplier: "1.75"
     - model.lambda_coef: 0.001
       training_arguments.adaptive_lambda.log_step_init: 0.6931471805599453
-      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step200_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_rollback5_step200
+      mlflow.run_name: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step200_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_adaptive_lambda_init1em3_no_boost_no_recovery_step200
       mlflow.tags.initial_lambda: "1e-3"
       mlflow.tags.lambda_multiplier: "2"
