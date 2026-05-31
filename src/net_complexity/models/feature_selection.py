@@ -766,6 +766,19 @@ class SkippedCIFARBasicBlock(CIFARBasicBlock):
         return F.relu(self.shortcut(x))
 
 
+class SkippedBottleneck(Bottleneck):
+    """Bottleneck with its residual branch permanently disabled.
+
+    Forward pass returns only the shortcut output (identity or downsampled).
+    All conv/BN weights are retained for checkpoint compatibility but never executed.
+    """
+
+    def forward(self, x):
+        if self.i_downsample is not None:
+            x = self.i_downsample(x)
+        return self.relu(x)
+
+
 class CIFARSTGBasicBlock(CIFARBasicBlock):
     def __init__(
         self,

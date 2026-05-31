@@ -1,0 +1,41 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: classification
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+# optimizer:
+#   gate_weight_decay_scale: 1.0
+
+model:
+  lambda_coef: 0.0
+
+layer_skipping:
+  enabled: true
+  # List blocks to skip. Examples:
+  #   []                        — no skipping, full ResNet20
+  #   [layer3.2]                — skip last block of stage 3
+  #   [layer3.0, layer3.1, layer3.2]  — skip all of stage 3
+  disabled_layers: [layer4.0, layer4.1, layer4.2, layer2.0, layer2.1, layer2.2, layer2.3, layer1.0, layer1.1, layer1.2]
+
+run_history:
+  log_gate_history: true
+
+mlflow:
+  enabled: True
+  experiment_name: feature_selection_experiment
+  run_name: "resnet50_gumbel_on_cifar10_threshold_0.988"
+  tags:
+    model_type: "ResNet50_pruned"
+    method: "gumbel"
+    recipe: "resnet50_gumbel_on_cifar10_threshold_0.988"

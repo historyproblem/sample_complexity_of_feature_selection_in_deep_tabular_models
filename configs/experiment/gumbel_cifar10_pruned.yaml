@@ -1,25 +1,4 @@
 # @package _global_
-#
-# Second-pass training: CIFARResNet20 on CIFAR-10 with channels zeroed by
-# a prior Gumbel run permanently disabled.
-#
-# Workflow:
-#   Step 1 — run the standard Gumbel experiment to learn which channels are
-#             irrelevant (lambda_coef > 0 encourages sparsity):
-#
-#               python src/net_complexity/train.py \
-#                   experiment=gumbel_cifar10 \
-#                   run_history.log_channel_history=true
-#
-#   Step 2 — find the run directory in outputs/runs/ and set source_run_dir
-#             below (or override on the command line):
-#
-#               python src/net_complexity/train.py \
-#                   experiment=gumbel_cifar10_pruned \
-#                   channel_pruning.source_run_dir=outputs/runs/YOUR_RUN_DIR
-#
-# With lambda_coef=0 no sparsity pressure is applied in the second pass —
-# the architecture is already sparse by construction.
 
 defaults:
   - /data: cifar10_best_practice

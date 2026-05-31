@@ -23,7 +23,8 @@ import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
 from .cifar_resnet import CIFARBasicBlock
-from .feature_selection import SkippedCIFARBasicBlock
+from .feature_selection import SkippedBottleneck, SkippedCIFARBasicBlock
+from .resnet import Bottleneck
 
 
 def _replace_block_with_skipped(backbone: nn.Module, key: str) -> bool:
@@ -56,32 +57,45 @@ def _replace_block_with_skipped(backbone: nn.Module, key: str) -> bool:
         return False
 
     old_block = layer[block_idx]
-    if not isinstance(old_block, CIFARBasicBlock):
+    if isinstance(old_block, CIFARBasicBlock):
+        in_planes = old_block.conv1.in_channels
+        planes = old_block.conv2.out_channels
+        stride = old_block.conv1.stride[0]
+        option = "B" if isinstance(old_block.shortcut, nn.Sequential) else "A"
+        new_block = SkippedCIFARBasicBlock(
+            in_planes=in_planes,
+            planes=planes,
+            stride=stride,
+            option=option,
+        )
+        layer[block_idx] = new_block
+        print(
+            f"[layer_skipping] '{key}': disabled "
+            f"(in_planes={in_planes}, planes={planes}, stride={stride})"
+        )
+        return True
+    elif isinstance(old_block, Bottleneck):
+        in_channels = old_block.conv1.in_channels
+        out_channels = old_block.conv1.out_channels
+        stride = old_block.stride
+        new_block = SkippedBottleneck(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            i_downsample=old_block.i_downsample,
+            stride=stride,
+        )
+        layer[block_idx] = new_block
+        print(
+            f"[layer_skipping] '{key}': disabled "
+            f"(in_channels={in_channels}, out_channels={out_channels}, stride={stride})"
+        )
+        return True
+    else:
         print(
             f"[layer_skipping] Warning: block at '{key}' is "
-            f"{type(old_block).__name__}, not CIFARBasicBlock — skipped."
+            f"{type(old_block).__name__}, not CIFARBasicBlock or Bottleneck — skipped."
         )
         return False
-
-    # Reconstruct constructor args from the existing block's convolution layers
-    in_planes = old_block.conv1.in_channels
-    planes = old_block.conv2.out_channels
-    stride = old_block.conv1.stride[0]
-    # Option B uses a Sequential shortcut (1×1 conv); everything else is option A
-    option = "B" if isinstance(old_block.shortcut, nn.Sequential) else "A"
-
-    new_block = SkippedCIFARBasicBlock(
-        in_planes=in_planes,
-        planes=planes,
-        stride=stride,
-        option=option,
-    )
-    layer[block_idx] = new_block
-    print(
-        f"[layer_skipping] '{key}': disabled "
-        f"(in_planes={in_planes}, planes={planes}, stride={stride})"
-    )
-    return True
 
 
 def apply_layer_skipping(model: nn.Module, disabled_layers: list[str]) -> None:
