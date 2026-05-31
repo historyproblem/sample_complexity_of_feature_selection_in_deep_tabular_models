@@ -374,7 +374,7 @@ def _build_baseline_training_config(config: DictConfig, baseline_root_dir: Path)
     baseline_run_name = (
         f"{_resolve_expected_run_name(config) or 'run'}_baseline_no_pruning"
     )
-    OmegaConf.update(baseline_config, "run_history.run_name", baseline_run_name, merge=False)
+    OmegaConf.update(baseline_config, "run_history.run_name", baseline_run_name, merge=False, force_add=True)
     if _config_has_path(baseline_config, "mlflow.run_name"):
         OmegaConf.update(baseline_config, "mlflow.run_name", baseline_run_name, merge=False)
     if _config_has_path(baseline_config, "mlflow.enabled"):

@@ -5,7 +5,7 @@ defaults:
   - /model: resnet50
   - /method: plain
   - /train: resnet50_best_practice
-  - /optimizer: sgd_resnet50
+  - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: classification
   - /run_history: valid_accuracy_max
@@ -26,7 +26,7 @@ layer_skipping:
   #   []                        — no skipping, full ResNet20
   #   [layer3.2]                — skip last block of stage 3
   #   [layer3.0, layer3.1, layer3.2]  — skip all of stage 3
-  disabled_layers: [layer4.0, layer4.1, layer4.2, layer2.0, layer2.1, layer2.2, layer2.3, layer1.0, layer1.1, layer1.2]
+  disabled_layers: [layer4.0, layer4.1, layer4.2, layer2.0, layer2.1, layer2.2, layer2.3, layer1.0, layer1.1, layer1.2, layer3.5, layer3.4, layer3.3, layer3.2]
 
 run_history:
   log_gate_history: true
@@ -34,8 +34,8 @@ run_history:
 mlflow:
   enabled: True
   experiment_name: feature_selection_experiment
-  run_name: "resnet50_gumbel_on_cifar10_threshold_0.988"
+  run_name: "resnet50_adaptive_gumbel_on_cifar10_threshold_0.99"
   tags:
     model_type: "ResNet50_pruned"
     method: "gumbel"
-    recipe: "resnet50_gumbel_on_cifar10_threshold_0.988"
+    recipe: "resnet50_gumbel_on_cifar10_threshold_0.99"

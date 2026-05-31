@@ -5,7 +5,7 @@ defaults:
   - /model: resnet50
   - /method: gumbel
   - /train: resnet50_best_practice
-  - /optimizer: sgd_resnet50
+  - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: gumbel_resnet50
   - /run_history: valid_accuracy_max
@@ -55,7 +55,8 @@ run_history:
   log_gate_history: true
 
 mlflow:
-  enabled: false
+  enabled: true
+  experiment_name: feature_selection_experiment
   run_name: "resnet50_adaptive_lambda_init5_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_Gumbel"
