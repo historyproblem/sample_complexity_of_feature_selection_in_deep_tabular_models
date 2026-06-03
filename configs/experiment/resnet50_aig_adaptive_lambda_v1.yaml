@@ -34,7 +34,7 @@ training_arguments:
     lambda_max: 1.0
     log_step_init: 0.22314355131420976
     log_step_min: 0.04879016416943205
-    adaptive_log_step_enabled: true
+    adaptive_log_step_enabled: false
     prune_rate_low_per_epoch: 0.02
     prune_rate_high_per_epoch: 0.07
     log_step_boost_factor: 2.0
