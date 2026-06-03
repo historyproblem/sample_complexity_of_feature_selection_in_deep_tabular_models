@@ -8,7 +8,9 @@ from net_complexity.data.dataloaders import (
     ClassicCVDataloaders,
     _resolve_num_workers,
     _resolve_pin_memory,
+    _suppress_torchvision_download_progress,
 )
+from net_complexity.data import dataloaders as dataloaders_module
 
 
 def test_resolve_num_workers_keeps_requested_value_when_shm_manager_is_available(monkeypatch):
@@ -44,6 +46,32 @@ def test_resolve_pin_memory_defaults_to_false_without_cuda(monkeypatch):
 def test_resolve_pin_memory_respects_explicit_override():
     assert _resolve_pin_memory(True) is True
     assert _resolve_pin_memory(False) is False
+
+
+def test_suppress_torchvision_download_progress_disables_tqdm(monkeypatch):
+    calls = []
+
+    class FakeTqdm:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, value):
+            pass
+
+    monkeypatch.setattr(dataloaders_module.torchvision_datasets_utils, "tqdm", FakeTqdm)
+    patched_tqdm = dataloaders_module.torchvision_datasets_utils.tqdm
+
+    with _suppress_torchvision_download_progress():
+        dataloaders_module.torchvision_datasets_utils.tqdm(total=10)
+
+    assert calls == [{"total": 10, "disable": True}]
+    assert dataloaders_module.torchvision_datasets_utils.tqdm is patched_tqdm
 
 
 def _write_rgb_image(path: Path, color: tuple[int, int, int]) -> None:

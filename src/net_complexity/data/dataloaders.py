@@ -4,11 +4,13 @@ import random
 import subprocess
 import warnings
 from collections.abc import Iterable
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
 import torch
 import torchvision.datasets as datasets
+import torchvision.datasets.utils as torchvision_datasets_utils
 import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -86,6 +88,24 @@ def _build_cifar_transforms() -> tuple[transforms.Compose, transforms.Compose]:
         transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD),
     ])
     return train_transform, test_transform
+
+
+@contextmanager
+def _suppress_torchvision_download_progress():
+    original_tqdm = getattr(torchvision_datasets_utils, "tqdm", None)
+    if original_tqdm is None:
+        yield
+        return
+
+    def quiet_tqdm(*args, **kwargs):
+        kwargs["disable"] = True
+        return original_tqdm(*args, **kwargs)
+
+    torchvision_datasets_utils.tqdm = quiet_tqdm
+    try:
+        yield
+    finally:
+        torchvision_datasets_utils.tqdm = original_tqdm
 
 
 def _build_tinyimagenet_transforms(
@@ -196,18 +216,19 @@ class ClassicCVDataloaders(Dataloaders):
             raise ValueError(f"Unknown taskname={taskname!r}. Known tasks: {known_tasks}.")
         train_transform, test_transform = _build_cifar_transforms()
 
-        full_train_dataset = task2class[normalized_taskname](
-            root=path_to_data,
-            train=True,
-            transform=test_transform,
-            download=True
-        )
-        test_dataset = task2class[normalized_taskname](
-            root=path_to_data,
-            train=False,
-            transform=test_transform,
-            download=True
-        )
+        with _suppress_torchvision_download_progress():
+            full_train_dataset = task2class[normalized_taskname](
+                root=path_to_data,
+                train=True,
+                transform=test_transform,
+                download=True
+            )
+            test_dataset = task2class[normalized_taskname](
+                root=path_to_data,
+                train=False,
+                transform=test_transform,
+                download=True
+            )
 
         train_size = int(len(full_train_dataset))
         val_size = int(train_val_ratio[1]*train_size)
@@ -222,12 +243,13 @@ class ClassicCVDataloaders(Dataloaders):
 
         val_dataset = Subset(full_train_dataset, val_indices)
 
-        train_augmented_dataset = task2class[normalized_taskname](
-            root=path_to_data,
-            train=True,
-            transform=train_transform,
-            download=True
-        )
+        with _suppress_torchvision_download_progress():
+            train_augmented_dataset = task2class[normalized_taskname](
+                root=path_to_data,
+                train=True,
+                transform=train_transform,
+                download=True
+            )
         train_dataset = Subset(train_augmented_dataset, train_indices)
 
         self.train_dataloader = DataLoader(
