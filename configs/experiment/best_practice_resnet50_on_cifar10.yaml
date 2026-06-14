@@ -5,7 +5,7 @@ defaults:
   - /model: resnet50
   - /method: plain
   - /train: resnet50_best_practice
-  - /optimizer: sgd_resnet50
+  - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: classification
   - /run_history: valid_accuracy_max
@@ -18,8 +18,10 @@ model:
   lambda_coef: 0.0
 
 mlflow:
-  run_name: "best_practice_resnet50_on_cifar10"
+  enabled: True
+  experiment_name: feature_selection_experiment
+  run_name: "adaptive_lambda_baseline"
   tags:
     model_type: "ResNet50"
     method: "plain"
-    recipe: "best_practice_resnet50_on_cifar10"
+    recipe: "adaptive_lambda_baseline"

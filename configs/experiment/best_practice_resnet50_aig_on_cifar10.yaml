@@ -5,7 +5,7 @@ defaults:
   - /model: resnet50
   - /method: aig
   - /train: resnet50_best_practice
-  - /optimizer: sgd_resnet50
+  - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: aig
   - /run_history: valid_accuracy_max
@@ -15,12 +15,14 @@ defaults:
 device: "cuda:0"
 
 model:
-  lambda_coef: 0.0
+  lambda_coef: 20.0
   backbone:
     resnet_block:
       temperature: 1.0
 
 mlflow:
+  enabled: True
+  experiment_name: feature_selection_experiment
   run_name: "best_practice_resnet50_aig_on_cifar10_lambda_${model.lambda_coef}_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_AIG"

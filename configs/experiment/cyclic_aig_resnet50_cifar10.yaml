@@ -1,0 +1,108 @@
+# @package _global_
+#
+# Cyclic AIG layer-dropping experiment for ResNet50 on CIFAR-10.
+#
+# Each cycle trains the model with AIG regularisation and then permanently
+# drops every residual block whose validation gate probability (valid_g_prob_*)
+# falls below g_prob_threshold.  The loop repeats until no further blocks are
+# dropped (convergence) or max_cycles is reached.  A final plain training run
+# is then executed on the surviving architecture.
+#
+# Launch:
+#   python src/net_complexity/cli/cyclic_train.py \
+#       experiment=cyclic_aig_resnet50_cifar10
+#
+# Override individual params from the CLI, e.g.:
+#   cyclic_layer_dropping.max_cycles=3
+#   cyclic_layer_dropping.g_prob_threshold=0.7
+#   cyclic_layer_dropping.aig_epochs=100
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: aig
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.01
+  bypass_on_zero_lambda: false
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+training_arguments:
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: true
+    warmup_epochs: 0
+    update_every_epochs: 2
+    acc_window: 3
+    baseline_history_dir: outputs/runs/20260531_231500_best_practice_resnet50_on_cifar10
+    lambda_min: 1e-8
+    lambda_max: 1.0
+    log_step_init: 0.22314355131420976
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: false
+    prune_rate_low_per_epoch: 0.02
+    prune_rate_high_per_epoch: 0.07
+    log_step_boost_factor: 2.0
+    log_step_max_boost_level: 2
+    adaptive_log_step_max_epoch: null
+    soft_drop: 0.02
+    hard_drop: 0.04
+    recovery:
+      enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+# Blocks pre-disabled before the first cycle (empty = full ResNet50).
+layer_skipping:
+  enabled: true
+  disabled_layers: []
+
+# ── Cyclic layer-dropping config ─────────────────────────────────────────────
+cyclic_layer_dropping:
+  enabled: true
+
+  # Maximum number of AIG training cycles.
+  max_cycles: 10
+
+  # Drop a block when its mean validation gate probability (valid_g_prob_*)
+  # is below this threshold.  Near 0 = always skipped by AIG, near 1 = always active.
+  g_prob_threshold: 0.1
+
+  # Epochs per intermediate AIG cycle.
+  # Overrides training_arguments.num_epochs for each cycle sub-run.
+  aig_epochs: 200
+
+  # Epochs for the final plain-training run on the surviving architecture.
+  final_epochs: 200
+
+  # Replace AIGBottleneckLayer with standard Bottleneck in the final run so
+  # there is no stochastic gate noise during final training.
+  use_plain_model_for_final: true
+
+  # Suppress intermediate MLflow logging; only the final run is logged.
+  disable_mlflow_for_cycles: false
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "cyclic_aig_resnet50_cifar10_thr${cyclic_layer_dropping.g_prob_threshold}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "cyclic_aig"
+    recipe: "cyclic_aig_resnet50_cifar10"
+
+run_history:
+  log_gate_history: true
