@@ -2,8 +2,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 import matplotlib.pyplot as plt
+
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 STUDIES_ROOT = Path("PUT_YOUR_STUDIES_ROOT_HERE")
@@ -12,6 +17,20 @@ CONFIG_NAMES = [
     "config_resolved.yaml",
     "configs_resolved.yaml",
     "resolved_config.yaml",
+    "config.yaml",
+    "configs.yaml",
+]
+
+# Backward-compatible alias for older imports.
+CONFIG_NAME = CONFIG_NAMES[0]
+
+
+ACC_CANDIDATES = [
+    "valid_accuracy",
+    "val_accuracy",
+    "valid_acc",
+    "val_acc",
+    "accuracy",
 ]
 
 
@@ -46,7 +65,20 @@ def flatten_dict(d: dict, prefix: str = "") -> dict:
     return result
 
 
+def _get_nested(d: dict, keys: list[str], default=None):
+    cur = d
+
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+
+    return cur
+
+
 def find_config_path(run_dir: Path) -> Path | None:
+    run_dir = Path(run_dir)
+
     for name in CONFIG_NAMES:
         path = run_dir / name
         if path.exists():
@@ -56,27 +88,81 @@ def find_config_path(run_dir: Path) -> Path | None:
 
 
 def read_config(config_path: Path | None) -> dict:
-    if config_path is None:
+    if yaml is None or config_path is None:
         return {}
 
     with open(config_path, "r") as f:
         return yaml.safe_load(f) or {}
 
 
+def _read_yaml(path: Path) -> dict:
+    if yaml is None or not path.exists():
+        return {}
+
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
+
+
+def extract_lambda_from_config(config: dict):
+    """
+    Поддерживает два случая:
+    1. Обычный запуск: model.lambda_coef
+    2. Warmup/adaptive lambda: training_arguments.lambda_warmup.target_lambda_coef
+    """
+
+    warmup_cfg = _get_nested(config, ["training_arguments", "lambda_warmup"], {})
+    if isinstance(warmup_cfg, dict):
+        enabled = warmup_cfg.get("enabled", False)
+        target = warmup_cfg.get("target_lambda_coef", None)
+
+        if enabled and target is not None:
+            return target
+
+    value = _get_nested(config, ["model", "lambda_coef"], None)
+    if value is not None:
+        return value
+
+    value = _get_nested(config, ["training_arguments", "lambda_coef"], None)
+    if value is not None:
+        return value
+
+    return np.nan
+
+
+def get_lambda_coef_from_config(run_dir: Path):
+    config_path = find_config_path(run_dir)
+    if config_path is None:
+        return np.nan
+
+    config = _read_yaml(config_path)
+    return extract_lambda_from_config(config)
+
+
 def get_config_lambda_coef(cfg: dict) -> float | None:
-    warmup = cfg.get("training_arguments", {}).get("lambda_warmup", {})
+    value = extract_lambda_from_config(cfg)
 
-    if warmup.get("enabled", False):
-        value = warmup.get("target_lambda_coef")
-    else:
-        value = cfg.get("model", {}).get("lambda_coef")
+    if pd.isna(value):
+        return None
 
-    return None if value is None else float(value)
+    return float(value)
 
 
 # backward-compatible alias
 def get_lambda_coef(cfg: dict) -> float | None:
     return get_config_lambda_coef(cfg)
+
+
+def _find_acc_col(df: pd.DataFrame) -> str | None:
+    for col in ACC_CANDIDATES:
+        if col in df.columns:
+            return col
+
+    for col in df.columns:
+        low = col.lower()
+        if "valid" in low and ("acc" in low or "accuracy" in low):
+            return col
+
+    return None
 
 
 # =========================
@@ -119,6 +205,62 @@ def make_run_label(
     return run_name
 
 
+def _add_zero_prob_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Для Gumbel-логов:
+    valid_*zero_prob* — вероятность зануления канала.
+
+    Добавляет:
+    - zero_channels: сколько каналов считаются закрытыми
+    - open_channels: сколько каналов считаются открытыми
+    - expected_open_channels: сумма вероятностей открытия
+    """
+
+    df = df.copy()
+
+    zero_cols = [
+        c for c in df.columns
+        if "zero_prob" in c.lower() and c.startswith("valid")
+    ]
+
+    if len(zero_cols) == 0:
+        return df
+
+    zero_probs = df[zero_cols].apply(pd.to_numeric, errors="coerce")
+
+    df["zero_channels"] = (zero_probs >= 0.5).sum(axis=1)
+    df["open_channels"] = (zero_probs < 0.5).sum(axis=1)
+    df["expected_open_channels"] = (1.0 - zero_probs).sum(axis=1)
+    df["mean_zero_prob"] = zero_probs.mean(axis=1)
+
+    return df
+
+
+def _add_aig_gate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Для AIG-логов:
+    valid_g_prob_backbone.layer* — средняя вероятность/частота открытия блока.
+    """
+
+    df = df.copy()
+
+    gate_cols = [
+        c for c in df.columns
+        if c.startswith("valid_g_prob_backbone.layer")
+    ]
+
+    if len(gate_cols) == 0:
+        return df
+
+    gates = df[gate_cols].apply(pd.to_numeric, errors="coerce")
+
+    df["valid_active_blocks_expected"] = gates.sum(axis=1)
+    df["valid_inactive_blocks_expected"] = len(gate_cols) - gates.sum(axis=1)
+    df["valid_mean_gate_prob"] = gates.mean(axis=1)
+
+    return df
+
+
 def normalize_history_columns(
     history: pd.DataFrame,
     config_lambda_coef: float | None = None,
@@ -139,6 +281,8 @@ def normalize_history_columns(
     # epoch
     if "epoch" in history.columns:
         history["epoch"] = pd.to_numeric(history["epoch"], errors="coerce")
+    else:
+        history["epoch"] = np.arange(len(history))
 
     # lambda_coef: берем из таблицы, если он там есть.
     # Если нет — fallback из model_lambda_coef, log_lambda или config.
@@ -191,6 +335,9 @@ def normalize_history_columns(
 
     if "train_real_zero_channels" in history.columns:
         history["train_zero_channels"] = history["train_real_zero_channels"]
+
+    history = _add_zero_prob_columns(history)
+    history = _add_aig_gate_columns(history)
 
     return history
 
@@ -430,6 +577,129 @@ def perform_last_exp(
     return perform_exp(exp_dir)
 
 
+def load_history(run_dir: Path) -> pd.DataFrame:
+    run_dir = Path(run_dir)
+
+    history, _ = load_single_run(
+        run_dir=run_dir,
+        experiment_name=run_dir.parent.name,
+        experiment_dir=run_dir.parent,
+        run_name=run_dir.name,
+    )
+
+    return history
+
+
+def summarize_one_run(run_dir: Path) -> dict:
+    run_dir = Path(run_dir)
+    df = load_history(run_dir)
+
+    acc_col = _find_acc_col(df)
+
+    result = {
+        "run_name": run_dir.name,
+        "run_dir": str(run_dir),
+        "config_lambda_coef": df["config_lambda_coef"].iloc[0],
+        "lambda_str": df["lambda_str"].iloc[0],
+        "num_epochs": len(df),
+        "final_epoch": df["epoch"].iloc[-1],
+    }
+
+    if acc_col is not None:
+        best_idx = df[acc_col].idxmax()
+        best_row = df.loc[best_idx]
+        final_row = df.iloc[-1]
+
+        result.update({
+            "acc_col": acc_col,
+            "best_epoch": best_row["epoch"],
+            "best_valid_accuracy": best_row[acc_col],
+            "final_valid_accuracy": final_row[acc_col],
+        })
+
+    for col in [
+        "zero_channels",
+        "open_channels",
+        "expected_open_channels",
+        "mean_zero_prob",
+        "valid_active_blocks_expected",
+        "valid_inactive_blocks_expected",
+        "valid_mean_gate_prob",
+        "valid_active_channels",
+        "valid_zero_channels",
+        "valid_active_ratio",
+        "valid_zero_ratio",
+        "lambda_coef",
+    ]:
+        if col in df.columns:
+            result[f"final_{col}"] = df[col].iloc[-1]
+
+            if acc_col is not None:
+                best_idx = df[acc_col].idxmax()
+                result[f"best_{col}"] = df.loc[best_idx, col]
+
+    return result
+
+
+def _find_run_dirs(study_dir: Path) -> list[Path]:
+    study_dir = Path(study_dir)
+
+    if (study_dir / "runs").exists():
+        root = study_dir / "runs"
+    else:
+        root = study_dir
+
+    run_dirs = [
+        p for p in root.iterdir()
+        if p.is_dir() and (p / "history.csv").exists()
+    ]
+
+    return sorted(run_dirs)
+
+
+def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Возвращает:
+    - summary_df: одна строка на запуск
+    - history_df: все эпохи всех запусков
+    """
+
+    run_dirs = _find_run_dirs(Path(study_dir))
+
+    summaries = []
+    histories = []
+
+    for run_dir in run_dirs:
+        try:
+            history = load_history(run_dir)
+            summary = summarize_one_run(run_dir)
+        except Exception as e:
+            print(f"[skip] {run_dir}: {e}")
+            continue
+
+        histories.append(history)
+        summaries.append(summary)
+
+    history_df = (
+        pd.concat(histories, ignore_index=True)
+        if histories
+        else pd.DataFrame()
+    )
+
+    summary_df = pd.DataFrame(summaries)
+
+    if not summary_df.empty:
+        if "best_valid_accuracy" in summary_df.columns:
+            summary_df = summary_df.sort_values(
+                "best_valid_accuracy",
+                ascending=False,
+            )
+        else:
+            summary_df = summary_df.sort_values("run_name")
+
+    return summary_df, history_df
+
+
 # =========================
 # SUMMARY
 # =========================
@@ -439,7 +709,11 @@ def make_summary(
     metric_col: str = "valid_accuracy",
 ) -> pd.DataFrame:
     if metric_col not in df_history.columns:
-        raise ValueError(f"Column '{metric_col}' not found in df_history")
+        acc_col = _find_acc_col(df_history)
+        if metric_col == "valid_accuracy" and acc_col is not None:
+            metric_col = acc_col
+        else:
+            raise ValueError(f"Column '{metric_col}' not found in df_history")
 
     rows = []
 
@@ -449,7 +723,7 @@ def make_summary(
         best_row = g.loc[g[metric_col].idxmax()]
         final_row = g.iloc[-1]
 
-        rows.append({
+        row = {
             "run_name": run_name,
             "run_label": final_row.get("run_label"),
             "config_lambda_coef": final_row.get("config_lambda_coef"),
@@ -470,7 +744,26 @@ def make_summary(
             "num_epochs": int(g["epoch"].nunique()) if "epoch" in g.columns else len(g),
             "num_rows": len(g),
             "run_dir": final_row.get("run_dir"),
-        })
+        }
+
+        for col in [
+            "zero_channels",
+            "open_channels",
+            "expected_open_channels",
+            "mean_zero_prob",
+            "valid_active_blocks_expected",
+            "valid_inactive_blocks_expected",
+            "valid_mean_gate_prob",
+            "valid_active_channels",
+            "valid_zero_channels",
+            "valid_active_ratio",
+            "valid_zero_ratio",
+        ]:
+            if col in g.columns:
+                row[f"best_{col}"] = best_row[col]
+                row[f"final_{col}"] = final_row[col]
+
+        rows.append(row)
 
     return (
         pd.DataFrame(rows)
@@ -482,6 +775,124 @@ def make_summary(
 # =========================
 # PLOTTING
 # =========================
+
+def plot_metric(
+    history_df: pd.DataFrame,
+    metric: str,
+    *,
+    x_col: str = "epoch",
+    run_col: str = "run_name",
+    label_col: str = "lambda_str",
+    yscale: str = "linear",
+    title: str | None = None,
+    figsize: tuple = (10, 5),
+    alpha: float = 0.75,
+    linewidth: float = 1.6,
+    show_legend: bool = True,
+    show_mean: bool = False,
+):
+    """
+    Универсальный график metric / epoch.
+
+    yscale:
+    - "linear"
+    - "log"
+    """
+
+    if history_df.empty:
+        raise ValueError("history_df is empty")
+
+    if metric not in history_df.columns:
+        raise ValueError(
+            f"No column '{metric}' in history_df. "
+            f"Available columns: {list(history_df.columns)}"
+        )
+
+    if x_col not in history_df.columns:
+        raise ValueError(f"No x_col '{x_col}' in history_df")
+
+    plt.figure(figsize=figsize)
+    ax = plt.gca()
+
+    plot_df = history_df.copy()
+    plot_df = plot_df.sort_values([run_col, x_col])
+
+    for run_name, g in plot_df.groupby(run_col):
+        g = g.dropna(subset=[x_col, metric])
+
+        if g.empty:
+            continue
+
+        if label_col in g.columns:
+            label_value = str(g[label_col].iloc[0])
+            if label_value.startswith("λ=") or label_value.startswith("adaptive"):
+                label = f"{run_name}, {label_value}"
+            else:
+                label = f"{run_name}, λ={label_value}"
+        else:
+            label = str(run_name)
+
+        ax.plot(
+            g[x_col],
+            g[metric],
+            alpha=alpha,
+            linewidth=linewidth,
+            label=label,
+        )
+
+    if show_mean and label_col in plot_df.columns:
+        for label_value, g in plot_df.groupby(label_col):
+            mean_df = (
+                g.groupby(x_col, as_index=False)[metric]
+                .mean()
+                .dropna(subset=[metric])
+            )
+
+            ax.plot(
+                mean_df[x_col],
+                mean_df[metric],
+                linewidth=3.0,
+                linestyle="--",
+                label=f"mean {label_value}",
+            )
+
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(metric)
+    ax.set_title(title or f"{metric} / {x_col}")
+    ax.set_yscale(yscale)
+
+    ax.minorticks_on()
+    ax.grid(True, which="major", alpha=0.35)
+    ax.grid(True, which="minor", alpha=0.15)
+
+    if show_legend:
+        ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_acc_epoch(
+    history_df: pd.DataFrame,
+    *,
+    acc_col: str | None = None,
+    yscale: str = "linear",
+    show_mean: bool = False,
+):
+    if acc_col is None:
+        acc_col = _find_acc_col(history_df)
+
+    if acc_col is None:
+        raise ValueError("Cannot find accuracy column")
+
+    plot_metric(
+        history_df,
+        acc_col,
+        yscale=yscale,
+        title=f"{acc_col} / epoch",
+        show_mean=show_mean,
+    )
+
 
 def plot_metric_by_epoch(
     df_history: pd.DataFrame,
