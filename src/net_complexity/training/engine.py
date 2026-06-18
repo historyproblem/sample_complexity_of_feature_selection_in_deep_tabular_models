@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
-from net_complexity.models.feature_selection import get_gumbel_modules, get_stg_modules
+from net_complexity.models.feature_selection import get_AIG_modules, get_gumbel_modules, get_stg_modules
 from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, AdaptiveLambdaController
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
@@ -411,6 +411,8 @@ def _ensure_adaptive_baseline_reference(
     baseline_config = _build_baseline_training_config(config, baseline_root_dir)
     baseline_progress_context = dict(progress_context or {})
     baseline_progress_context["baseline_reference_run"] = True
+    baseline_progress_context.pop("grid_params", None)
+    baseline_progress_context.pop("optuna_trial_params", None)
     run_training(
         baseline_config,
         epoch_end_callback=None,
@@ -1276,6 +1278,11 @@ def _build_adaptive_lambda(
         if recovery_cfg is not None
         else None
     )
+    if get_AIG_modules(model) and bool((recovery_config or {}).get("enabled", True)):
+        raise ValueError(
+            "AIG adaptive lambda requires training_arguments.adaptive_lambda.recovery.enabled=false "
+            "because open-bias recovery is only implemented for Gumbel selectors."
+        )
     adaptive_log_step_max_epoch = getattr(cfg, "adaptive_log_step_max_epoch", None)
 
     return AdaptiveLambdaController(
@@ -1300,27 +1307,6 @@ def _build_adaptive_lambda(
         ),
         soft_drop=float(getattr(cfg, "soft_drop", 0.02)),
         hard_drop=float(getattr(cfg, "hard_drop", 0.05)),
-        soft_step_shrink=float(getattr(cfg, "soft_step_shrink", 0.5)),
-        hard_step_shrink=float(getattr(cfg, "hard_step_shrink", 0.25)),
-        collapse_acc_threshold=float(getattr(cfg, "collapse_acc_threshold", 0.15)),
-        collapse_loss_threshold=float(getattr(cfg, "collapse_loss_threshold", 2.15)),
-        collapse_zero_prob_threshold=float(getattr(cfg, "collapse_zero_prob_threshold", 0.90)),
-        collapse_acc_drop_threshold=float(getattr(cfg, "collapse_acc_drop_threshold", 0.40)),
-        rollback_check_every_epochs=int(getattr(cfg, "rollback_check_every_epochs", 1)),
-        rollback_acc_drop_threshold=float(getattr(cfg, "rollback_acc_drop_threshold", 0.20)),
-        rollback_compare_epoch_lookback=(
-            None
-            if getattr(cfg, "rollback_compare_epoch_lookback", None) is None
-            else int(getattr(cfg, "rollback_compare_epoch_lookback"))
-        ),
-        rollback_epoch_lookback=int(getattr(cfg, "rollback_epoch_lookback", 20)),
-        lambda_increase_cooldown_epochs=int(
-            getattr(cfg, "lambda_increase_cooldown_epochs", 10)
-        ),
-        rollback_on_degradation=bool(getattr(cfg, "rollback_on_degradation", True)),
-        rollback_on_collapse=bool(getattr(cfg, "rollback_on_collapse", True)),
-        max_rollbacks=int(getattr(cfg, "max_rollbacks", 6)),
-        freeze_on_rollback_limit=bool(getattr(cfg, "freeze_on_rollback_limit", True)),
         recovery_config=recovery_config,
     )
 
@@ -1572,28 +1558,14 @@ def train(model: nn.Module,
             )
 
         controller_metrics: dict[str, Any] = {}
-        adaptive_collapse_handled = False
-        next_epoch_num = epoch_num + 1
         if adaptive_lambda is not None:
             adaptive_step_result = adaptive_lambda.on_epoch_end(
                 epoch=epoch_num,
                 model=model,
-                optimizer=optimizer,
                 valid_metrics=valid_metrics,
-                scheduler_state=scheduler_state,
-                scaler=None,
                 apply_lambda=_apply_adaptive_lambda,
             )
             controller_metrics = dict(adaptive_step_result.metrics)
-            adaptive_collapse_handled = (
-                adaptive_step_result.rolled_back
-                or (
-                    adaptive_step_result.collapse_detected
-                    and adaptive_step_result.action in {"collapse_rollback", "rollback_limit_freeze"}
-                )
-            )
-            if adaptive_step_result.resume_epoch is not None:
-                next_epoch_num = int(adaptive_step_result.resume_epoch)
             if run_history is not None:
                 runtime_metadata = dict(run_history.runtime_metadata)
                 runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
@@ -1650,7 +1622,7 @@ def train(model: nn.Module,
             )
 
         collapse_detected: CollapseDetected | None = None
-        if collapse_guard is not None and not adaptive_collapse_handled:
+        if collapse_guard is not None:
             try:
                 collapse_guard(
                     epoch_num,
@@ -1668,7 +1640,7 @@ def train(model: nn.Module,
 
         should_stop = False
         stop_message: str | None = None
-        if early_stopping is not None and not adaptive_collapse_handled:
+        if early_stopping is not None:
             should_stop = early_stopping.step(epoch_num, valid_metrics)
             if should_stop:
                 stop_message = (
@@ -1722,7 +1694,7 @@ def train(model: nn.Module,
 
         if should_stop:
             break
-        epoch_num = next_epoch_num
+        epoch_num += 1
 
     final_epoch = completed_epochs or total_epochs
     if batchnorm_recalibration is not None:

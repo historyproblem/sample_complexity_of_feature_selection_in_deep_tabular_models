@@ -1,6 +1,7 @@
 # @package _global_
 
 model:
+  bypass_on_zero_lambda: false
   criterion:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:

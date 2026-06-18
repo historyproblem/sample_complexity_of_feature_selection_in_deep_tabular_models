@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "net_complexity" / "tuning" / "search.py"
@@ -14,6 +15,7 @@ SPEC.loader.exec_module(MODULE)
 
 build_grid_values = MODULE.build_grid_values
 build_grid_search_space = MODULE.build_grid_search_space
+build_grid_points = MODULE.build_grid_points
 count_grid_trials = MODULE.count_grid_trials
 
 
@@ -58,3 +60,29 @@ def test_build_grid_values_rejects_log_numeric_ranges():
 def test_build_grid_values_requires_step_for_float_ranges():
     with pytest.raises(ValueError, match="must define step"):
         build_grid_values({"type": "float", "low": 0.1, "high": 0.3})
+
+
+def test_build_grid_points_converts_nested_omegaconf_values_to_plain_containers():
+    points = OmegaConf.create([
+        {
+            "optimizer": {
+                "_target_": "torch.optim.AdamW",
+                "betas": [0.9, 0.999],
+            },
+            "model.lambda_coef": 0.01,
+        }
+    ])
+
+    resolved = build_grid_points(points)
+
+    assert resolved == [
+        {
+            "optimizer": {
+                "_target_": "torch.optim.AdamW",
+                "betas": [0.9, 0.999],
+            },
+            "model.lambda_coef": 0.01,
+        }
+    ]
+    assert isinstance(resolved[0]["optimizer"], dict)
+    assert isinstance(resolved[0]["optimizer"]["betas"], list)

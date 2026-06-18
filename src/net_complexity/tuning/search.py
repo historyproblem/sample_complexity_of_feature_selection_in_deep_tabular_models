@@ -5,6 +5,8 @@ from functools import reduce
 from operator import mul
 from typing import Any, Mapping
 
+from omegaconf import DictConfig, ListConfig, OmegaConf
+
 GRID_POINT_INDEX_PARAM = "__grid_point_index__"
 
 
@@ -82,6 +84,18 @@ def build_grid_search_space(search_space: Mapping[str, Any]) -> dict[str, list[A
     return {str(path): build_grid_values(spec) for path, spec in search_space.items()}
 
 
+def _to_plain_value(value: Any) -> Any:
+    if isinstance(value, (DictConfig, ListConfig)):
+        return OmegaConf.to_container(value, resolve=False)
+    if isinstance(value, Mapping):
+        return {str(key): _to_plain_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_plain_value(item) for item in value]
+    return value
+
+
 def build_grid_points(points: Any) -> list[dict[str, Any]]:
     if points is None:
         return []
@@ -93,7 +107,10 @@ def build_grid_points(points: Any) -> list[dict[str, Any]]:
                 "Each explicit grid point must be a mapping of config paths to values. "
                 f"Got {type(point).__name__} at index {index}."
             )
-        normalized_point = {str(path): value for path, value in point.items()}
+        normalized_point = {
+            str(path): _to_plain_value(value)
+            for path, value in point.items()
+        }
         if not normalized_point:
             raise ValueError(f"Explicit grid point at index {index} must not be empty.")
         resolved_points.append(normalized_point)

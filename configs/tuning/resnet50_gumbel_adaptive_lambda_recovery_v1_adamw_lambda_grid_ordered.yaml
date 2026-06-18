@@ -1,0 +1,73 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  adaptive_lambda:
+    update_every_epochs: 1
+
+scheduler:
+  T_max: 200
+
+optimizer:
+  gate_weight_decay_scale: null
+  _target_: torch.optim.AdamW
+  lr: 0.001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.0005
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda_grid_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 3
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.00000001
+      training_arguments.adaptive_lambda.update_every_epochs: 1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda1em8_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda1em8_update1
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-8"
+      mlflow.tags.lambda_update_every_epochs: "1"
+    - model.lambda_coef: 0.000001
+      training_arguments.adaptive_lambda.update_every_epochs: 1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda1em6_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda1em6_update1
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-6"
+      mlflow.tags.lambda_update_every_epochs: "1"
+    - model.lambda_coef: 10.0
+      training_arguments.adaptive_lambda.update_every_epochs: 1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda10_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda10_update1
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "10"
+      mlflow.tags.lambda_update_every_epochs: "1"
+    - model.lambda_coef: 50.0
+      training_arguments.adaptive_lambda.update_every_epochs: 1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda50_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_lambda50_update1
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "50"
+      mlflow.tags.lambda_update_every_epochs: "1"

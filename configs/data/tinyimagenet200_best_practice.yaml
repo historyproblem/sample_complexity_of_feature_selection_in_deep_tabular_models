@@ -1,0 +1,11 @@
+# @package _global_
+
+dataloaders:
+  _target_: net_complexity.dataloaders.ClassicCVDataloaders
+  path_to_data: ${hydra:runtime.cwd}/data/tiny-imagenet-200
+  batch_size: 128
+  taskname: tinyimagenet200
+  num_classes: 200
+  image_size: 64
+  valid_ratio: 0.1
+  seed: 42

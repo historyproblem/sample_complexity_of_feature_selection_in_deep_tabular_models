@@ -1,0 +1,32 @@
+# @package _global_
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet50_tinyimagenet200
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: classification
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+training_arguments:
+  num_epochs: 240
+
+scheduler:
+  T_max: 240
+
+model:
+  lambda_coef: 0.0
+
+mlflow:
+  run_name: "best_practice_resnet50_on_tinyimagenet200"
+  tags:
+    model_type: "ResNet50"
+    method: "plain"
+    dataset: "tinyimagenet200"
+    recipe: "best_practice_resnet50_on_tinyimagenet200"
