@@ -1647,3 +1647,54 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_recipe_uses_step150():
     assert cfg.mlflow.tags.initial_lambda == "1e-8"
     assert cfg.mlflow.tags.lambda_multiplier == "1.5"
     assert cfg.mlflow.tags.lambda_max == "none"
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_init_grid_runs_requested_initial_lambdas():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_no_lambda_max_init_grid_5_1_1em1_1em2_1em3_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_adaptive_lambda_no_lambda_max_init_grid.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_init1em8_step150_no_lambda_max_200ep"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_no_lambda_max_"
+                "init_grid_5_1_1em1_1em2_1em3_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.log_step_init == 0.4054651081081644
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.adaptive_log_step_enabled is False
+    assert adaptive.recovery.enabled is False
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.training_arguments.collapse_guard.enabled is False
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 5
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [
+        5.0,
+        1.0,
+        0.1,
+        0.01,
+        0.001,
+    ]
+    assert [point["mlflow.tags.initial_lambda"] for point in points] == [
+        "5",
+        "1",
+        "0.1",
+        "0.01",
+        "0.001",
+    ]
+    assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
