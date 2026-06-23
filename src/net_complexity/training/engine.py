@@ -1291,6 +1291,8 @@ def _build_adaptive_lambda(
         )
     adaptive_log_step_max_epoch = getattr(cfg, "adaptive_log_step_max_epoch", None)
 
+    lambda_max = getattr(cfg, "lambda_max", 80.0)
+
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
         reference_accuracy_by_epoch=baseline_accuracy_by_epoch,
@@ -1298,7 +1300,7 @@ def _build_adaptive_lambda(
         update_every_epochs=int(getattr(cfg, "update_every_epochs", 3)),
         acc_window=int(getattr(cfg, "acc_window", 3)),
         lambda_min=float(getattr(cfg, "lambda_min", 1e-8)),
-        lambda_max=float(getattr(cfg, "lambda_max", 80.0)),
+        lambda_max=None if lambda_max is None else float(lambda_max),
         log_step_init=float(getattr(cfg, "log_step_init", 0.6931471805599453)),
         log_step_min=float(getattr(cfg, "log_step_min", 0.04879016416943205)),
         adaptive_log_step_enabled=bool(getattr(cfg, "adaptive_log_step_enabled", True)),

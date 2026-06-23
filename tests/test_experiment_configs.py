@@ -1613,3 +1613,37 @@ def test_resnet50_aig_adaptive_lambda_no_extra_grid_runs_requested_initial_lambd
         "1e-2",
         "1",
     ]
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_recipe_uses_step150():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "resnet50_aig_adaptive_lambda_init1em8_step150_no_lambda_max_200ep.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "aig"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "aig"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1e-8
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.lambda_min == 1e-8
+    assert adaptive.lambda_max is None
+    assert adaptive.log_step_init == 0.4054651081081644
+    assert adaptive.adaptive_log_step_enabled is False
+    assert adaptive.recovery.enabled is False
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.mlflow.tags.initial_lambda == "1e-8"
+    assert cfg.mlflow.tags.lambda_multiplier == "1.5"
+    assert cfg.mlflow.tags.lambda_max == "none"

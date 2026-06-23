@@ -418,6 +418,18 @@ def test_disabled_adaptive_log_step_keeps_base_log_step():
     assert model.lambda_coef == pytest.approx(1.25**2)
 
 
+def test_lambda_max_none_leaves_lambda_unbounded_above():
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=100.0,
+        lambda_min=1e-8,
+        lambda_max=None,
+    )
+
+    assert controller.lambda_coef == pytest.approx(100.0)
+    assert controller._clamp_lambda(1e200) == pytest.approx(1e200)
+    assert controller._clamp_log_lambda(math.log(1e200)) == pytest.approx(math.log(1e200))
+
+
 def test_adaptive_log_step_max_epoch_resets_to_base_step_after_cutoff():
     model = _DummyModel(lambda_coef=1.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
