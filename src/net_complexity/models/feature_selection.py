@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
+from .efficientnet_v2_aig import AIGBlockGate
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
 
@@ -768,19 +769,20 @@ def parse_AIG_activations(model: nn.Module, buff=None, prefix: str = None):
 
 def get_AIG_regularization_loss(model: nn.Module):
     aig_modules = _get_aig_modules(model)
-    activations = [
-        module.activations
-        for module in aig_modules.values()
-        if getattr(module, "activations", None) is not None
-    ]
-    if len(activations) == 0:
+    reg_terms = []
+    for module in aig_modules.values():
+        if hasattr(module, "regularization_loss"):
+            reg_terms.append(module.regularization_loss())
+            continue
+
+        activations = getattr(module, "activations", None)
+        if activations is not None:
+            reg_terms.append(activations.mean() ** 2)
+
+    if len(reg_terms) == 0:
         return 0.0
 
-    reg_loss = 0.0
-    for act in activations:
-        reg_loss += act.mean()**2
-    reg_loss /= len(activations)
-    return reg_loss
+    return sum(reg_terms) / len(reg_terms)
 
 
 def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):
@@ -817,8 +819,13 @@ def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
 
 def _get_aig_modules(model: nn.Module, buff=None, prefix: str = None):
     if buff is not None or prefix is not None:
-        return _collect_modules_by_type(model, AIGBottleneckLayer, buff=buff, prefix=prefix)
-    return _get_cached_modules_by_type(model, "aig", AIGBottleneckLayer)
+        return _collect_modules_by_type(
+            model,
+            (AIGBottleneckLayer, AIGBlockGate),
+            buff=buff,
+            prefix=prefix,
+        )
+    return _get_cached_modules_by_type(model, "aig", (AIGBottleneckLayer, AIGBlockGate))
 
 
 def get_AIG_modules(model: nn.Module):

@@ -1,0 +1,9 @@
+defaults:
+  - experiment: efficientnetv2_s_aig_adaptive_lambda_init1em4_cifar10
+  - tuning: efficientnetv2_s_aig_adaptive_lambda_init1em4_scaled_step_epochs_50_70_90_140_200_ordered
+  - _self_
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra
