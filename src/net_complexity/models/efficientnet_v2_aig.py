@@ -301,23 +301,48 @@ class EfficientNetV2AIGBlock(nn.Module):
         return x + self.gate(x) * residual
 
 
+def efficientnet_v2_structure(
+    variant: str,
+) -> list[tuple[float, int, int, int, int, int, bool, bool]]:
+    variant = str(variant).lower()
+    if variant in {"s", "efficientnet_v2_s", "efficientnetv2_s"}:
+        return [
+            # expand, kernel, stride, in, out, layers, se, fused
+            (1, 3, 1, 24, 24, 2, False, True),
+            (4, 3, 2, 24, 48, 4, False, True),
+            (4, 3, 2, 48, 64, 4, False, True),
+            (4, 3, 2, 64, 128, 6, True, False),
+            (6, 3, 1, 128, 160, 9, True, False),
+            (6, 3, 2, 160, 256, 15, True, False),
+        ]
+    if variant in {"m", "efficientnet_v2_m", "efficientnetv2_m"}:
+        return [
+            # expand, kernel, stride, in, out, layers, se, fused
+            (1, 3, 1, 24, 24, 3, False, True),
+            (4, 3, 2, 24, 48, 5, False, True),
+            (4, 3, 2, 48, 80, 5, False, True),
+            (4, 3, 2, 80, 160, 7, True, False),
+            (6, 3, 1, 160, 176, 14, True, False),
+            (6, 3, 2, 176, 304, 18, True, False),
+            (6, 3, 1, 304, 512, 5, True, False),
+        ]
+    raise ValueError("EfficientNetV2 AIG variant must be one of: 's', 'm'.")
+
+
 def efficientnet_v2_s_structure() -> list[tuple[float, int, int, int, int, int, bool, bool]]:
-    return [
-        # expand, kernel, stride, in, out, layers, se, fused
-        (1, 3, 1, 24, 24, 2, False, True),
-        (4, 3, 2, 24, 48, 4, False, True),
-        (4, 3, 2, 48, 64, 4, False, True),
-        (4, 3, 2, 64, 128, 6, True, False),
-        (6, 3, 1, 128, 160, 9, True, False),
-        (6, 3, 2, 160, 256, 15, True, False),
-    ]
+    return efficientnet_v2_structure("s")
 
 
-class AIGEfficientNetV2S(nn.Module):
+def efficientnet_v2_m_structure() -> list[tuple[float, int, int, int, int, int, bool, bool]]:
+    return efficientnet_v2_structure("m")
+
+
+class AIGEfficientNetV2(nn.Module):
     def __init__(
         self,
         num_classes: int = 10,
         in_channels: int = 3,
+        variant: str = "s",
         lambda_coef: float = 0.0,
         bypass_on_zero_lambda: bool = False,
         dropout: float = 0.1,
@@ -329,13 +354,14 @@ class AIGEfficientNetV2S(nn.Module):
         criterion: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self.variant = str(variant).lower()
         self.lambda_coef = float(lambda_coef)
         self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
         self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
 
         layer_infos = [
             MBConvConfig(*layer_config)
-            for layer_config in efficientnet_v2_s_structure()
+            for layer_config in efficientnet_v2_structure(self.variant)
         ]
         self.in_channel = layer_infos[0].in_channels
         self.final_stage_channel = layer_infos[-1].out_channels
@@ -526,3 +552,15 @@ class AIGEfficientNetV2S(nn.Module):
             logits=logits,
             mean_activations=[aux["mean_active_ratio"]],
         )
+
+
+class AIGEfficientNetV2S(AIGEfficientNetV2):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("variant", "s")
+        super().__init__(*args, **kwargs)
+
+
+class AIGEfficientNetV2M(AIGEfficientNetV2):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("variant", "m")
+        super().__init__(*args, **kwargs)

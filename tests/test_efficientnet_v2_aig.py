@@ -4,7 +4,7 @@ import torch
 from omegaconf import OmegaConf
 
 from net_complexity.metrics.aig import AIGFLOPsMetric
-from net_complexity.models.efficientnet_v2_aig import AIGEfficientNetV2S
+from net_complexity.models.efficientnet_v2_aig import AIGEfficientNetV2M, AIGEfficientNetV2S
 from net_complexity.models.feature_selection import get_AIG_modules
 from net_complexity.models.outputs import ClassifModelOutput
 
@@ -45,6 +45,24 @@ def test_aig_efficientnetv2_s_gates_only_shape_safe_blocks():
     assert len(get_AIG_modules(model)) == len(safe_blocks)
     assert all(block.gate is not None for block in safe_blocks)
     assert all(block.gate is None for block in changing_blocks)
+
+
+def test_aig_efficientnetv2_m_smoke_forward_32x32_and_gates_shape_safe_blocks():
+    model = AIGEfficientNetV2M(num_classes=10, lambda_coef=0.001)
+    model.train()
+
+    logits, aux = model(torch.randn(2, 3, 32, 32))
+    safe_blocks = [
+        block
+        for block in model.blocks
+        if getattr(block, "use_skip_connection", False)
+    ]
+
+    assert logits.shape == (2, 10)
+    assert aux["gate_probabilities"].shape == (2, 51)
+    assert aux["gate_values"].shape == (2, 51)
+    assert len(safe_blocks) == 51
+    assert len(get_AIG_modules(model)) == 51
 
 
 def test_aig_efficientnetv2_s_training_engine_forward_contract():
@@ -171,3 +189,32 @@ def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
     ]
     assert cfg.model.lambda_coef == 0.0001
     assert cfg.training_arguments.adaptive_lambda.lambda_max is None
+
+
+def test_efficientnetv2_m_aig_init1em4_experiment_and_tuning_config():
+    exp_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "efficientnetv2_m_aig_adaptive_lambda_init1em4_cifar10.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_epochs_50_70_90_140_200_ordered.yaml"
+    )
+
+    assert exp_cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "efficientnetv2_m_aig"},
+        {"/train": "resnet50_best_practice"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "aig_train_valid_flops"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert exp_cfg.model.lambda_coef == 0.0001
+    assert exp_cfg.mlflow.tags.model_type == "EfficientNetV2-M_AIG"
+    assert tune_cfg.training_arguments.adaptive_lambda.lambda_max is None
+    assert len(tune_cfg.tuning.points) == 5
+    assert tune_cfg.tuning.points[0]["training_arguments.num_epochs"] == 50
+    assert tune_cfg.tuning.points[-1]["training_arguments.num_epochs"] == 200

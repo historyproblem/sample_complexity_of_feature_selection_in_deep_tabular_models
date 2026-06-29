@@ -1,5 +1,5 @@
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet, LambdaLayer
-from .efficientnet_v2_aig import AIGBlockGate, AIGEfficientNetV2S
+from .efficientnet_v2_aig import AIGBlockGate, AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .feature_selection import (
     AIGBottleneckLayer,
     CIFARGumbelBasicBlock,
@@ -38,6 +38,8 @@ from .resnet import Block, Bottleneck, ResNet
 __all__ = [
     "AIGBlockGate",
     "AIGBottleneckLayer",
+    "AIGEfficientNetV2",
+    "AIGEfficientNetV2M",
     "AIGEfficientNetV2S",
     "Block",
     "Bottleneck",
