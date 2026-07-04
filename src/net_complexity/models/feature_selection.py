@@ -891,6 +891,53 @@ def get_AIG_regularization_loss(model: nn.Module):
     return reg_loss
 
 
+class AIGRegularizationLoss:
+    """Callable regularization loss over AIG gate activations.
+
+    Supports L1 (linear penalty on mean gate probability, encourages sparser gates)
+    and L2 (quadratic penalty, matches the legacy ``get_AIG_regularization_loss`` behaviour).
+
+    Args:
+        norm: ``"l1"`` or ``"l2"`` (default).
+
+    Example YAML usage::
+
+        model:
+          regularization_loss:
+            _target_: net_complexity.wrappers.AIGRegularizationLoss
+            norm: l1
+    """
+
+    _SUPPORTED_NORMS = frozenset({"l1", "l2"})
+
+    def __init__(self, norm: str = "l2") -> None:
+        if norm not in self._SUPPORTED_NORMS:
+            raise ValueError(
+                f"AIGRegularizationLoss: norm must be one of "
+                f"{sorted(self._SUPPORTED_NORMS)}, got {norm!r}"
+            )
+        self.norm = norm
+
+    def __call__(self, model: nn.Module):
+        aig_modules = _get_aig_modules(model)
+        activations = [
+            module.activations
+            for module in aig_modules.values()
+            if getattr(module, "activations", None) is not None
+        ]
+        if not activations:
+            return 0.0
+
+        reg_loss = 0.0
+        for act in activations:
+            mean_act = act.mean()
+            reg_loss = reg_loss + (mean_act.abs() if self.norm == "l1" else mean_act ** 2)
+        return reg_loss / len(activations)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(norm={self.norm!r})"
+
+
 def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):
     if buff is None:
         buff = {}

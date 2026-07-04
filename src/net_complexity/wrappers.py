@@ -2,6 +2,7 @@ from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .models.feature_selection import (
     AIGBottleneckLayer,
+    AIGRegularizationLoss,
     CIFARGumbelBasicBlock,
     CIFARMaskedGumbelBasicBlock,
     CIFARSTGBasicBlock,
@@ -37,6 +38,7 @@ from .models.feature_selection import (
 )
 
 __all__ = [
+    "AIGRegularizationLoss",
     "CIFARPrunedGumbelBasicBlock",
     "PrunedCIFARResNet",
     "apply_layer_skipping",

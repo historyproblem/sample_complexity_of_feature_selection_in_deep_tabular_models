@@ -6,7 +6,7 @@ model:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:
     _target_: net_complexity.wrappers.AIGRegularizationLoss
-    norm: l2
+    norm: l1
   backbone:
     resnet_block:
       _target_: net_complexity.wrappers.AIGBottleneckLayer

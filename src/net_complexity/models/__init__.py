@@ -1,6 +1,7 @@
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet, LambdaLayer
 from .feature_selection import (
     AIGBottleneckLayer,
+    AIGRegularizationLoss,
     CIFARGumbelBasicBlock,
     CIFARSTGBasicBlock,
     CIFARResNet20,
@@ -36,6 +37,7 @@ from .resnet import Block, Bottleneck, ResNet
 
 __all__ = [
     "AIGBottleneckLayer",
+    "AIGRegularizationLoss",
     "Block",
     "Bottleneck",
     "CIFARBasicBlock",
