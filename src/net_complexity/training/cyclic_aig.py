@@ -34,13 +34,21 @@ from .engine import run_training
 # ---------------------------------------------------------------------------
 
 def _extract_layer_g_probs(valid_metrics: Mapping[str, Any]) -> dict[str, float]:
-    """Return {layer_name: g_prob} for every ``valid_g_prob_layer*`` metric."""
+    """Return {layer_name: g_prob} for every ``valid_g_prob_*layer*`` metric.
+
+    Strips an optional ``backbone.`` prefix so that metric keys like
+    ``valid_g_prob_backbone.layer2.0`` are stored as ``layer2.0``, matching
+    the format expected by ``layer_skipping.disabled_layers``.
+    """
     result: dict[str, float] = {}
     prefix = "valid_g_prob_"
     for key, value in valid_metrics.items():
         if not key.startswith(prefix):
             continue
         layer_name = key[len(prefix):]
+        # Strip optional "backbone." prefix (ResNet metrics include it)
+        if layer_name.startswith("backbone."):
+            layer_name = layer_name[len("backbone."):]
         # Skip aggregate keys: average_prob, max_prob, min_prob, …
         if layer_name.startswith("layer"):
             result[layer_name] = float(value)
@@ -127,6 +135,7 @@ def _build_final_config(
 
     # Disable AIG regularization — purely CE-driven final training
     OmegaConf.update(cfg, "model.lambda_coef", 0.0, merge=False)
+    OmegaConf.update(cfg, "training_arguments.adaptive_lambda.enabled", False, merge=False)
 
     # Optionally swap AIGBottleneckLayer → standard Bottleneck so the gate
     # adapter is absent and there is no stochastic noise during final training.
