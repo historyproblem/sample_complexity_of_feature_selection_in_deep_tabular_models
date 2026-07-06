@@ -705,10 +705,26 @@ class CIFARSTGBasicBlock(CIFARBasicBlock):
 
 
 class AIGBottleneckLayer(Bottleneck):
-    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1, hard: bool = False):
+    VALID_GATE_PLACEMENTS = {"residual_branch", "after_skip"}
+
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1,
+        hard: bool = False,
+        gate_placement: str = "residual_branch",
+    ):
         super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
+        gate_placement = str(gate_placement)
+        if gate_placement not in self.VALID_GATE_PLACEMENTS:
+            allowed = ", ".join(sorted(self.VALID_GATE_PLACEMENTS))
+            raise ValueError(f"gate_placement must be one of: {allowed}. Got: {gate_placement!r}")
         self.gumbel = GumbleSoftmax(hard=hard)
         self.temperature = temperature
+        self.gate_placement = gate_placement
         self.bypass = False
         self.adapter = nn.Sequential(
             nn.Conv2d(in_channels=in_planes,
@@ -751,7 +767,10 @@ class AIGBottleneckLayer(Bottleneck):
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)
         # add identity
-        x = identity + x*self.activations
+        if self.gate_placement == "after_skip":
+            x = (identity + x) * self.activations
+        else:
+            x = identity + x*self.activations
         x = self.relu(x)
 
         return x

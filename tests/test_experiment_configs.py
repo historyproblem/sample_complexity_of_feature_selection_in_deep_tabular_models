@@ -1570,6 +1570,54 @@ def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
     assert point["mlflow.tags.recovery"] == "disabled"
 
 
+def test_resnet50_aig_gate_after_skip_config_runs_two_requested_points():
+    experiment_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_aig_adaptive_lambda_gate_after_skip_v1.yaml"
+    )
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_gate_after_skip_scaled_step_init1em5_1em4_90ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_adaptive_lambda_gate_after_skip_scaled_step_init1em5_1em4_90ep.yaml"
+    )
+
+    assert experiment_cfg.defaults == [
+        "resnet50_aig_adaptive_lambda_v1",
+        "_self_",
+    ]
+    assert experiment_cfg.model.backbone.resnet_block.gate_placement == "after_skip"
+    assert experiment_cfg.mlflow.tags.gate_placement == "after_skip"
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_gate_after_skip_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_gate_after_skip_"
+                "scaled_step_init1em5_1em4_90ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    assert tuning_cfg.training_arguments.num_epochs == 90
+    assert tuning_cfg.scheduler.T_max == 90
+    assert tuning_cfg.tuning.n_trials == 2
+    assert tuning_cfg.tuning.study_name.endswith("_90ep_ordered")
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [1e-5, 1e-4]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in points
+    ] == [0.9210340371976182, 0.7675283643313485]
+    assert {point["mlflow.tags.gate_placement"] for point in points} == {"after_skip"}
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"90"}
+    assert {point["mlflow.tags.target_lambda"] for point in points} == {"10"}
+    assert {point["mlflow.tags.target_growth_epochs"] for point in points} == {"30"}
+
+
 def test_resnet50_aig_adaptive_lambda_no_extra_grid_runs_requested_initial_lambdas():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR

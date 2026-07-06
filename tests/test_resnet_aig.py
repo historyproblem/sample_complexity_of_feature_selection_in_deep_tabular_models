@@ -39,6 +39,17 @@ def test_resnet50_accepts_partial_aig_blocks_and_exposes_gate_activations():
     assert reg_loss.item() >= 0
 
 
+def test_aig_bottleneck_accepts_after_skip_gate_placement():
+    block = AIGBottleneckLayer(in_planes=64, planes=16, gate_placement="after_skip")
+
+    assert block.gate_placement == "after_skip"
+
+
+def test_aig_bottleneck_rejects_unknown_gate_placement():
+    with pytest.raises(ValueError, match="gate_placement"):
+        AIGBottleneckLayer(in_planes=64, planes=16, gate_placement="unknown")
+
+
 def test_resnet50_supports_cifar_style_stem_without_maxpool():
     model = ResNet50(
         num_classes=4,

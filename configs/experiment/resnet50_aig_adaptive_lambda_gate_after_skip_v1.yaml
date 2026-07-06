@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - resnet50_aig_adaptive_lambda_v1
+  - _self_
+
+model:
+  backbone:
+    resnet_block:
+      gate_placement: after_skip
+
+mlflow:
+  run_name: "resnet50_aig_adaptive_lambda_gate_after_skip_v1_temp_${model.backbone.resnet_block.temperature}"
+  tags:
+    recipe: "resnet50_aig_adaptive_lambda_gate_after_skip_v1"
+    gate_placement: "after_skip"
