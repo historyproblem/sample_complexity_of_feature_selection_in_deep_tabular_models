@@ -1,22 +1,38 @@
 """Cyclic AIG layer-dropping training loop.
 
-Algorithm:
-  1. Train with AIG for ``aig_epochs`` epochs.
-  2. Collect per-layer gate probabilities (``valid_g_prob_<layer>``).
-  3. Drop every layer whose gate probability is below ``g_prob_threshold``.
-  4. Repeat until no new layers are dropped (convergence) or ``max_cycles`` is reached.
-  5. Run a final plain training on the surviving-layer model.
+Two layer-selection modes are supported via ``cyclic_layer_dropping.drop_mode``:
+
+``threshold`` (default, legacy)
+    Drop every layer whose mean validation gate probability is below
+    ``g_prob_threshold``.  Converges when no layer falls below the threshold.
+
+``param_budget``
+    Dynamically select the subset of layers to drop each cycle so that the
+    freed parameter count stays within ``max_param_fraction`` of the current
+    model size.  Layers are considered in ascending g_prob order (most prunable
+    first) and greedily added until the budget would be exceeded.  Converges
+    when no candidate layer fits within the remaining budget.
 
 Config section (``cyclic_layer_dropping``)::
 
     cyclic_layer_dropping:
       enabled: true
-      max_cycles: 5
-      g_prob_threshold: 0.5
-      aig_epochs: 200         # epochs per AIG cycle (overrides training_arguments.num_epochs)
-      final_epochs: 200       # epochs for the final plain-training run
-      use_plain_model_for_final: true   # replace AIGBottleneck with Bottleneck in final run
-      disable_mlflow_for_cycles: true   # suppress MLflow logging in intermediate cycles
+      max_cycles: 10
+
+      # --- layer-selection mode ---
+      drop_mode: threshold      # "threshold" (default) or "param_budget"
+
+      # used when drop_mode: threshold
+      g_prob_threshold: 0.1
+
+      # used when drop_mode: param_budget
+      max_param_fraction: 0.10  # remove at most 10 % of current params per cycle
+
+      # --- training schedule ---
+      aig_epochs: 200           # epochs per AIG cycle (overrides training_arguments.num_epochs)
+      final_epochs: 200         # epochs for the final plain-training run
+      use_plain_model_for_final: true
+      disable_mlflow_for_cycles: false
 """
 from __future__ import annotations
 
@@ -24,9 +40,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
+import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf, open_dict
 
 from .engine import run_training
+
+_VALID_DROP_MODES = {"threshold", "param_budget"}
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +65,8 @@ def _extract_layer_g_probs(valid_metrics: Mapping[str, Any]) -> dict[str, float]
         if not key.startswith(prefix):
             continue
         layer_name = key[len(prefix):]
-        # Strip optional "backbone." prefix (ResNet metrics include it)
         if layer_name.startswith("backbone."):
             layer_name = layer_name[len("backbone."):]
-        # Skip aggregate keys: average_prob, max_prob, min_prob, …
         if layer_name.startswith("layer"):
             result[layer_name] = float(value)
     return result
@@ -66,6 +83,117 @@ def _layers_to_drop(
         for name, prob in sorted(layer_probs.items())
         if prob < threshold and name not in disabled_set
     ]
+
+
+# ---------------------------------------------------------------------------
+# Param-budget helpers
+# ---------------------------------------------------------------------------
+
+def _pruneable_param_counts(config: DictConfig) -> tuple[dict[str, int], int]:
+    """Instantiate a temporary CPU model and return per-block freeable param counts.
+
+    Freeable params = block's total params minus what ``PrunedBottleneck``
+    would keep (only the downsample projection, if any).
+
+    Args:
+        config: Cycle config — must already have ``layer_skipping.disabled_layers``
+                set to the current set of disabled layers.
+
+    Returns:
+        ``(freeable, total_params)`` where ``freeable`` maps ``'layerN.B'``
+        to the number of parameters that would be freed by pruning that block.
+    """
+    from hydra.utils import instantiate as hydra_instantiate
+
+    from net_complexity.models.cifar_resnet import CIFARBasicBlock
+    from net_complexity.models.feature_selection import PrunedBottleneck, PrunedCIFARBasicBlock
+    from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
+    from net_complexity.models.resnet import Bottleneck
+
+    model = hydra_instantiate(config.model)
+
+    layer_skipping_cfg = getattr(config, "layer_skipping", None)
+    if layer_skipping_cfg is not None and bool(getattr(layer_skipping_cfg, "enabled", True)):
+        apply_layer_skipping_from_config(model, layer_skipping_cfg)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    backbone = getattr(model, "backbone", model)
+
+    raw_disabled = OmegaConf.to_container(
+        getattr(layer_skipping_cfg, "disabled_layers", []), resolve=True
+    ) if layer_skipping_cfg is not None else []
+    disabled_set = {str(k) for k in raw_disabled}
+
+    freeable: dict[str, int] = {}
+    for stage_name in ("layer1", "layer2", "layer3", "layer4"):
+        stage = getattr(backbone, stage_name, None)
+        if stage is None:
+            continue
+        for block_idx, block in enumerate(stage):
+            key = f"{stage_name}.{block_idx}"
+            if key in disabled_set or isinstance(block, (PrunedBottleneck, PrunedCIFARBasicBlock)):
+                continue
+            block_params = sum(p.numel() for p in block.parameters())
+            kept = 0
+            if isinstance(block, Bottleneck):
+                ds = getattr(block, "i_downsample", None)
+                if ds is not None:
+                    kept = sum(p.numel() for p in ds.parameters())
+            elif isinstance(block, CIFARBasicBlock):
+                sc = getattr(block, "shortcut", None)
+                if sc is not None and not isinstance(sc, nn.Identity):
+                    kept = sum(p.numel() for p in sc.parameters())
+            freeable[key] = block_params - kept
+
+    return freeable, total_params
+
+
+def _layers_to_drop_by_param_budget(
+    layer_probs: dict[str, float],
+    already_disabled: list[str],
+    freeable_counts: dict[str, int],
+    total_params: int,
+    max_param_fraction: float,
+) -> list[str]:
+    """Select layers to drop without exceeding ``max_param_fraction`` of params.
+
+    Candidates are sorted by g_prob ascending (most prunable first).  Layers
+    that individually exceed the remaining budget are skipped so that smaller
+    layers can still fill the slot.
+
+    Args:
+        layer_probs: ``{layer_name: g_prob}`` from the last validation pass.
+        already_disabled: Layers already pruned in previous cycles.
+        freeable_counts: ``{layer_name: params_freed_if_pruned}`` from
+                         ``_pruneable_param_counts``.
+        total_params: Current total parameter count of the model.
+        max_param_fraction: Upper bound on the fraction of params to remove
+                            (e.g. 0.10 = at most 10 %).
+
+    Returns:
+        Sorted list of layer names to drop this cycle.
+    """
+    disabled_set = set(already_disabled)
+    budget = int(total_params * max_param_fraction)
+
+    candidates = sorted(
+        (
+            (name, prob)
+            for name, prob in layer_probs.items()
+            if name not in disabled_set and name in freeable_counts
+        ),
+        key=lambda x: x[1],  # ascending g_prob
+    )
+
+    selected: list[str] = []
+    remaining = budget
+    for name, _ in candidates:
+        cost = freeable_counts[name]
+        if cost <= remaining:
+            selected.append(name)
+            remaining -= cost
+
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +226,6 @@ def _build_cycle_config(
     cfg = deepcopy(base_config)
     cyclic_cfg = cfg.cyclic_layer_dropping
 
-    # Epoch count for this AIG cycle
     aig_epochs = getattr(cyclic_cfg, "aig_epochs", None)
     if aig_epochs is not None:
         OmegaConf.update(cfg, "training_arguments.num_epochs", int(aig_epochs), merge=False)
@@ -128,18 +255,13 @@ def _build_final_config(
     cfg = deepcopy(base_config)
     cyclic_cfg = cfg.cyclic_layer_dropping
 
-    # Epoch count for the final run
     final_epochs = getattr(cyclic_cfg, "final_epochs", None)
     if final_epochs is not None:
         OmegaConf.update(cfg, "training_arguments.num_epochs", int(final_epochs), merge=False)
 
-    # Disable AIG regularization — purely CE-driven final training
     OmegaConf.update(cfg, "model.lambda_coef", 0.0, merge=False)
     OmegaConf.update(cfg, "training_arguments.adaptive_lambda.enabled", False, merge=False)
 
-    # Optionally swap AIGBottleneckLayer → standard Bottleneck so the gate
-    # adapter is absent and there is no stochastic noise during final training.
-    # We delete the key so ResNet50() falls back to its default Bottleneck arg.
     if bool(getattr(cyclic_cfg, "use_plain_model_for_final", True)):
         if (
             hasattr(cfg, "model")
@@ -159,7 +281,6 @@ def _build_final_config(
     )
     _set_run_name(cfg, f"{base_name}_final")
 
-    # Re-enable MLflow for the final (summary) run
     if hasattr(cfg, "mlflow"):
         OmegaConf.update(cfg, "mlflow.enabled", True, merge=False)
 
@@ -206,7 +327,18 @@ def run_cyclic_aig_training(
     """
     cyclic_cfg = config.cyclic_layer_dropping
     max_cycles = int(cyclic_cfg.max_cycles)
-    threshold = float(cyclic_cfg.g_prob_threshold)
+    drop_mode = str(getattr(cyclic_cfg, "drop_mode", "threshold"))
+
+    if drop_mode not in _VALID_DROP_MODES:
+        raise ValueError(
+            f"cyclic_layer_dropping.drop_mode must be one of {_VALID_DROP_MODES}, "
+            f"got {drop_mode!r}"
+        )
+
+    if drop_mode == "threshold":
+        threshold = float(cyclic_cfg.g_prob_threshold)
+    else:
+        max_param_fraction = float(cyclic_cfg.max_param_fraction)
 
     disabled_layers: list[str] = _read_initial_disabled_layers(config)
     cycle_results: list[dict[str, Any]] = []
@@ -215,11 +347,18 @@ def run_cyclic_aig_training(
 
     for cycle in range(max_cycles):
         print(f"\n{_banner}")
-        print(
-            f"Cyclic AIG Training | cycle {cycle + 1}/{max_cycles}"
-            f" | disabled={len(disabled_layers)}"
-            f" | threshold={threshold}"
-        )
+        if drop_mode == "threshold":
+            print(
+                f"Cyclic AIG Training | cycle {cycle + 1}/{max_cycles}"
+                f" | disabled={len(disabled_layers)}"
+                f" | mode=threshold | threshold={threshold}"
+            )
+        else:
+            print(
+                f"Cyclic AIG Training | cycle {cycle + 1}/{max_cycles}"
+                f" | disabled={len(disabled_layers)}"
+                f" | mode=param_budget | max_param_fraction={max_param_fraction:.1%}"
+            )
         if disabled_layers:
             print(f"  Currently disabled: {disabled_layers}")
         print(_banner)
@@ -238,15 +377,33 @@ def run_cyclic_aig_training(
 
         print(f"\nCycle {cycle + 1} | layer g_probs: {layer_probs}")
 
-        new_drop = _layers_to_drop(layer_probs, threshold, disabled_layers)
+        if drop_mode == "threshold":
+            new_drop = _layers_to_drop(layer_probs, threshold, disabled_layers)
+            if not new_drop:
+                print(
+                    f"Cycle {cycle + 1} | no layers with g_prob < {threshold} — converged."
+                )
+                break
+            print(f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s): {new_drop}")
 
-        if not new_drop:
-            print(
-                f"Cycle {cycle + 1} | no layers with g_prob < {threshold} — converged."
+        else:  # param_budget
+            freeable_counts, total_params = _pruneable_param_counts(cycle_cfg)
+            new_drop = _layers_to_drop_by_param_budget(
+                layer_probs, disabled_layers, freeable_counts, total_params, max_param_fraction,
             )
-            break
+            if not new_drop:
+                print(
+                    f"Cycle {cycle + 1} | no layers fit within "
+                    f"{max_param_fraction:.1%} budget — converged."
+                )
+                break
+            freed = sum(freeable_counts[n] for n in new_drop)
+            print(
+                f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s)"
+                f" — {freed:,} params freed ({freed / total_params:.1%} of {total_params:,}): "
+                f"{new_drop}"
+            )
 
-        print(f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s): {new_drop}")
         disabled_layers = disabled_layers + new_drop
 
     print(f"\n{_banner}")

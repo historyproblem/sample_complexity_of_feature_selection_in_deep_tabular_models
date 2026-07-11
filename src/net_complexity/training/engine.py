@@ -1937,6 +1937,10 @@ def run_training(
         from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
         apply_layer_skipping_from_config(model, layer_skipping_cfg)
 
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[model] Parameters: {total_params:,} total | {trainable_params:,} trainable")
+
     model = model.to(device)
     lambda_warmup = _build_lambda_warmup(config.training_arguments)
     if lambda_warmup is not None and _adaptive_lambda_enabled(config.training_arguments):

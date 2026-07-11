@@ -1,0 +1,97 @@
+# @package _global_
+#
+# Cyclic AIG layer-dropping for ResNet50 on TinyImageNet200.
+# Layer selection: param_budget — remove at most max_param_fraction per cycle.
+# Layer removal:   prune       — physically deletes conv/BN weights (reduces param count).
+#
+# Launch:
+#   python src/net_complexity/cli/cyclic_train.py \
+#       experiment=cyclic_aig_resnet50_tinyimagenet200_param_budget
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet50_tinyimagenet200
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: aig
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.01
+  bypass_on_zero_lambda: false
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+training_arguments:
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: true
+    warmup_epochs: 0
+    update_every_epochs: 2
+    acc_window: 3
+    baseline_history_dir: outputs/runs/20260620_233938_best_practice_resnet50_on_tinyimagenet200
+    lambda_min: 1e-8
+    lambda_max: 1.0
+    log_step_init: 0.22314355131420976
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: false
+    prune_rate_low_per_epoch: 0.02
+    prune_rate_high_per_epoch: 0.07
+    log_step_boost_factor: 2.0
+    log_step_max_boost_level: 2
+    adaptive_log_step_max_epoch: null
+    soft_drop: 0.02
+    hard_drop: 0.04
+    recovery:
+      enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 240
+
+# ── Layer removal ─────────────────────────────────────────────────────────────
+# mode: prune  — physically deletes residual branch weights (conv/BN),
+#                model parameter count decreases after each cycle.
+# mode: skip   — bypasses forward but retains all weights (checkpoint compat).
+layer_skipping:
+  enabled: true
+  mode: prune
+  disabled_layers: []
+
+# ── Cyclic layer-dropping ─────────────────────────────────────────────────────
+cyclic_layer_dropping:
+  enabled: true
+  max_cycles: 10
+
+  # drop_mode: param_budget — select layers greedily (lowest g_prob first)
+  # until the total freed params would exceed max_param_fraction.
+  drop_mode: param_budget
+  max_param_fraction: 0.10   # remove at most 10% of current model params per cycle
+
+  aig_epochs: 240
+  final_epochs: 240
+  use_plain_model_for_final: true
+  disable_mlflow_for_cycles: false
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "cyclic_aig_resnet50_tinyimagenet200_param_budget_${cyclic_layer_dropping.max_param_fraction}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "cyclic_aig"
+    drop_mode: "param_budget"
+    recipe: "cyclic_aig_resnet50_tinyimagenet200_param_budget"
+
+run_history:
+  log_gate_history: true

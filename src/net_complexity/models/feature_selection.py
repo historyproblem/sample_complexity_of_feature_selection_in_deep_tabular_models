@@ -785,6 +785,43 @@ class SkippedBottleneck(Bottleneck):
         return self.relu(x)
 
 
+class PrunedCIFARBasicBlock(nn.Module):
+    """CIFARBasicBlock with its residual branch physically removed.
+
+    Unlike SkippedCIFARBasicBlock, this class does NOT inherit the conv/BN
+    parameters — they are discarded entirely, reducing model parameter count.
+    Only the shortcut projection is retained when stride != 1 (option B).
+    """
+
+    def __init__(self, shortcut: nn.Module | None = None) -> None:
+        super().__init__()
+        self.shortcut = shortcut if shortcut is not None else nn.Identity()
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return self.relu(self.shortcut(x))
+
+
+class PrunedBottleneck(nn.Module):
+    """Bottleneck block with its residual branch physically removed.
+
+    Unlike SkippedBottleneck, this class does NOT inherit conv/BN parameters —
+    they are discarded entirely, reducing model parameter count and memory.
+    Only the downsample projection is retained when the block changes spatial
+    dimensions or channel count (stride != 1 or in_channels != out_channels * 4).
+    """
+
+    def __init__(self, i_downsample: nn.Module | None = None) -> None:
+        super().__init__()
+        self.i_downsample = i_downsample
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        if self.i_downsample is not None:
+            x = self.i_downsample(x)
+        return self.relu(x)
+
+
 class CIFARSTGBasicBlock(CIFARBasicBlock):
     def __init__(
         self,

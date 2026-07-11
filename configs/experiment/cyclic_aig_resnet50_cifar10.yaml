@@ -76,9 +76,19 @@ cyclic_layer_dropping:
   # Maximum number of AIG training cycles.
   max_cycles: 10
 
+  # Layer-selection mode:
+  #   "threshold"   — drop blocks with g_prob < g_prob_threshold (legacy default)
+  #   "param_budget"— drop blocks greedily (lowest g_prob first) up to max_param_fraction
+  drop_mode: threshold
+
+  # Used when drop_mode: threshold
   # Drop a block when its mean validation gate probability (valid_g_prob_*)
   # is below this threshold.  Near 0 = always skipped by AIG, near 1 = always active.
   g_prob_threshold: 0.1
+
+  # Used when drop_mode: param_budget
+  # Remove at most this fraction of current model parameters per cycle.
+  max_param_fraction: 0.10
 
   # Epochs per intermediate AIG cycle.
   # Overrides training_arguments.num_epochs for each cycle sub-run.
