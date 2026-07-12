@@ -34,6 +34,7 @@ def _make_config(baseline_history_dir: str) -> object:
 
 def test_build_baseline_training_config_disables_pruning_and_redirects_run_history(tmp_path):
     config = _make_config(str(tmp_path / "baseline_root"))
+    OmegaConf.set_struct(config, True)
 
     baseline_config = engine._build_baseline_training_config(config, tmp_path / "baseline_root")
 
@@ -51,9 +52,11 @@ def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(t
     baseline_root = tmp_path / "baseline_root"
     config = _make_config(str(baseline_root))
     calls: list[Path] = []
+    observed_progress_contexts: list[dict] = []
 
     def _fake_run_training(baseline_config, epoch_end_callback=None, progress_context=None):
-        del epoch_end_callback, progress_context
+        del epoch_end_callback
+        observed_progress_contexts.append(dict(progress_context or {}))
         run_root = Path(str(baseline_config.run_history.root_dir))
         run_dir = run_root / "generated_baseline_run"
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -66,9 +69,22 @@ def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(t
 
     monkeypatch.setattr(engine, "run_training", _fake_run_training)
 
-    baseline_reference = engine._ensure_adaptive_baseline_reference(config)
+    baseline_reference = engine._ensure_adaptive_baseline_reference(
+        config,
+        progress_context={
+            "display_trial_idx": 1,
+            "grid_params": {"model.lambda_coef": 1e-8},
+            "optuna_trial_params": {"model.lambda_coef": 1e-8},
+        },
+    )
 
     assert calls == [baseline_root / "generated_baseline_run"]
+    assert observed_progress_contexts == [
+        {
+            "display_trial_idx": 1,
+            "baseline_reference_run": True,
+        }
+    ]
     assert baseline_reference is not None
     assert baseline_reference.metric_name == "valid_accuracy"
     assert baseline_reference.history_path == baseline_root / "generated_baseline_run" / "history.csv"

@@ -1,6 +1,7 @@
 # @package _global_
 
 model:
+  bypass_on_zero_lambda: false
   criterion:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:
@@ -10,3 +11,4 @@ model:
     resnet_block:
       _target_: net_complexity.wrappers.AIGBottleneckLayer
       _partial_: true
+      gate_regularization: l2_activation

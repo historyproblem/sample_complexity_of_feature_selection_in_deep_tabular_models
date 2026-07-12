@@ -4,8 +4,8 @@ training_arguments:
   num_epochs: 200
   adaptive_lambda:
     update_every_epochs: 1
-    rollback_on_degradation: false
-    rollback_on_collapse: false
+    recovery:
+      enabled: false
 
 scheduler:
   T_max: 200
@@ -21,7 +21,7 @@ optimizer:
 tuning:
   enabled: true
   mode: "grid"
-  study_name: "resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda_grid_ordered"
+  study_name: "resnet50_gumbel_adaptive_lambda_adamw_lambda_grid_ordered"
   direction: "maximize"
   objective_metric: "valid_accuracy"
   n_trials: 4
@@ -47,33 +47,33 @@ tuning:
   points:
     - model.lambda_coef: 0.00000001
       training_arguments.adaptive_lambda.update_every_epochs: 1
-      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda1em8_update1_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda1em8_update1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_adamw_lambda1em8_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_adamw_lambda1em8_update1
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-8"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
+      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.000001
       training_arguments.adaptive_lambda.update_every_epochs: 1
-      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda1em6_update1_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda1em6_update1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_adamw_lambda1em6_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_adamw_lambda1em6_update1
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-6"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
+      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 10.0
       training_arguments.adaptive_lambda.update_every_epochs: 1
-      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda10_update1_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda10_update1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_adamw_lambda10_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_adamw_lambda10_update1
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "10"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
+      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 50.0
       training_arguments.adaptive_lambda.update_every_epochs: 1
-      mlflow.run_name: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda50_update1_temp_${model.backbone.resnet_block.temperature}
-      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_recovery_v1_adamw_no_rollback_lambda50_update1
+      mlflow.run_name: resnet50_gumbel_adaptive_lambda_adamw_lambda50_update1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_gumbel_adaptive_lambda_adamw_lambda50_update1
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "50"
       mlflow.tags.lambda_update_every_epochs: "1"
-      mlflow.tags.rollback: "disabled"
+      mlflow.tags.recovery: "disabled"

@@ -78,9 +78,6 @@ def _make_controller(**recovery_overrides) -> AdaptiveLambdaController:
         adaptive_log_step_enabled=adaptive_log_step_enabled,
         soft_drop=0.02,
         hard_drop=0.04,
-        rollback_check_every_epochs=1,
-        rollback_acc_drop_threshold=0.20,
-        rollback_epoch_lookback=20,
         recovery_config=recovery_config,
     )
 
@@ -140,21 +137,18 @@ def test_recovery_starts_on_slow_recovery_and_blocks_only_lambda_increase():
     controller.on_epoch_end(
         epoch=1,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.90, 0.10),
         apply_lambda=_apply_lambda,
     )
     controller.on_epoch_end(
         epoch=2,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.877, 0.11),
         apply_lambda=_apply_lambda,
     )
     result = controller.on_epoch_end(
         epoch=3,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.880, 0.14),
         apply_lambda=_apply_lambda,
     )
@@ -177,21 +171,18 @@ def test_recovery_disabled_keeps_adaptive_lambda_behavior_unchanged():
     controller.on_epoch_end(
         epoch=1,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.90, 0.10),
         apply_lambda=_apply_lambda,
     )
     controller.on_epoch_end(
         epoch=2,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.877, 0.11),
         apply_lambda=_apply_lambda,
     )
     result = controller.on_epoch_end(
         epoch=3,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.880, 0.14),
         apply_lambda=_apply_lambda,
     )
@@ -220,7 +211,6 @@ def test_recovery_does_not_block_regular_lambda_decrease():
     result = controller.on_epoch_end(
         epoch=10,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.80, 0.20),
         apply_lambda=_apply_lambda,
     )
@@ -249,7 +239,6 @@ def test_recovery_stops_when_reopen_budget_is_exhausted():
     result = controller.on_epoch_end(
         epoch=10,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.85, 0.17),
         apply_lambda=_apply_lambda,
     )
@@ -278,7 +267,6 @@ def test_recovery_unblocks_lambda_increase_on_stop_epoch():
     result = controller.on_epoch_end(
         epoch=10,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.895, 0.20),
         apply_lambda=_apply_lambda,
     )
@@ -290,36 +278,6 @@ def test_recovery_unblocks_lambda_increase_on_stop_epoch():
     assert model.gate.open_bias == 0.0
 
 
-def test_hard_rollback_has_priority_over_recovery():
-    model = TinyRecoveryModel()
-    controller = _make_controller(min_epoch=1)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
-    controller.apply_initial_state(model, apply_lambda=_apply_lambda)
-
-    for epoch in range(1, 25):
-        controller.on_epoch_end(
-            epoch=epoch,
-            model=model,
-            optimizer=optimizer,
-            valid_metrics=_metrics(0.90, 0.10 + epoch / 1000.0),
-            apply_lambda=_apply_lambda,
-        )
-
-    result = controller.on_epoch_end(
-        epoch=25,
-        model=model,
-        optimizer=optimizer,
-        valid_metrics=_metrics(0.65, 0.20),
-        apply_lambda=_apply_lambda,
-    )
-
-    assert result.rolled_back is True
-    assert result.action == "periodic_rollback"
-    assert result.resume_epoch == 6
-    assert result.metrics["recovery_action"] == "blocked_by_rollback"
-    assert result.metrics["recovery_active"] is False
-    assert model.gate.open_bias == 0.0
-
 
 def test_recovery_metrics_are_written_to_history_and_summary(tmp_path):
     model = TinyRecoveryModel()
@@ -329,21 +287,18 @@ def test_recovery_metrics_are_written_to_history_and_summary(tmp_path):
     controller.on_epoch_end(
         epoch=1,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.90, 0.10),
         apply_lambda=_apply_lambda,
     )
     controller.on_epoch_end(
         epoch=2,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.877, 0.11),
         apply_lambda=_apply_lambda,
     )
     result = controller.on_epoch_end(
         epoch=3,
         model=model,
-        optimizer=optimizer,
         valid_metrics=_metrics(0.880, 0.14),
         apply_lambda=_apply_lambda,
     )

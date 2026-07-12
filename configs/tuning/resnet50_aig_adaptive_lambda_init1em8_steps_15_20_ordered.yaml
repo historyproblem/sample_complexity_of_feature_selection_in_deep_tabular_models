@@ -1,0 +1,52 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  adaptive_lambda:
+    enabled: true
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 200
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_init1em8_steps_15_20_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 2
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.00000001
+      training_arguments.adaptive_lambda.update_every_epochs: 2
+      training_arguments.adaptive_lambda.log_step_init: 0.4054651081081644
+      mlflow.run_name: resnet50_aig_adaptive_lambda_init1em8_step150_update2_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_init1em8_step150_update2
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-8"
+      mlflow.tags.lambda_multiplier: "1.5"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+    - model.lambda_coef: 0.00000001
+      training_arguments.adaptive_lambda.update_every_epochs: 2
+      training_arguments.adaptive_lambda.log_step_init: 0.6931471805599453
+      mlflow.run_name: resnet50_aig_adaptive_lambda_init1em8_step200_update2_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_init1em8_step200_update2
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-8"
+      mlflow.tags.lambda_multiplier: "2.0"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"

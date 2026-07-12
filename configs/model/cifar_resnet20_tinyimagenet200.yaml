@@ -1,0 +1,8 @@
+# @package _global_
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.CIFARResNet20
+    num_classes: 200
+    in_channels: 3

@@ -1,0 +1,37 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  adaptive_lambda:
+    enabled: true
+
+scheduler:
+  T_max: 200
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_init001_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 1
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.01
+      training_arguments.adaptive_lambda.enabled: true
+      mlflow.run_name: resnet50_aig_adaptive_lambda_init001_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: "resnet50_aig_adaptive_lambda_init001"
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.01"
+      mlflow.tags.adaptive_lambda: "enabled"

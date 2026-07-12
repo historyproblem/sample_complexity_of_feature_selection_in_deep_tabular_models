@@ -1,0 +1,32 @@
+# @package _global_
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: cifar_resnet20_tinyimagenet200
+  - /method: plain
+  - /train: best_practice
+  - /optimizer: sgd_resnet20
+  - /scheduler: cosine_200
+  - /metrics: classification
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+training_arguments:
+  num_epochs: 200
+
+scheduler:
+  T_max: 200
+
+model:
+  lambda_coef: 0.0
+
+mlflow:
+  run_name: "best_practice_resnet20_on_tinyimagenet200"
+  tags:
+    model_type: "CIFARResNet20"
+    method: "plain"
+    dataset: "tinyimagenet200"
+    recipe: "best_practice_resnet20_on_tinyimagenet200"

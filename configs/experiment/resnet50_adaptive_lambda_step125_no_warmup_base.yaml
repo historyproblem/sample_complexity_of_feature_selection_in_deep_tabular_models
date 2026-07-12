@@ -40,20 +40,6 @@ training_arguments:
     log_step_min: 0.04879016416943205
     soft_drop: 0.02
     hard_drop: 0.04
-    soft_step_shrink: 0.5
-    hard_step_shrink: 0.25
-    collapse_acc_threshold: 0.15
-    collapse_loss_threshold: 2.15
-    collapse_zero_prob_threshold: 0.90
-    collapse_acc_drop_threshold: 0.40
-    rollback_check_every_epochs: 1
-    rollback_acc_drop_threshold: 0.20
-    rollback_epoch_lookback: 20
-    lambda_increase_cooldown_epochs: 10
-    rollback_on_degradation: true
-    rollback_on_collapse: true
-    max_rollbacks: 6
-    freeze_on_rollback_limit: true
 
 run_history:
   log_gate_history: true

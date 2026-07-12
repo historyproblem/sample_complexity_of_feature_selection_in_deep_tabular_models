@@ -239,14 +239,14 @@ def _add_zero_prob_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _add_aig_gate_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Для AIG-логов:
-    valid_g_prob_backbone.layer* — средняя вероятность/частота открытия блока.
+    valid_g_prob_* — средняя вероятность/частота открытия блока.
     """
 
     df = df.copy()
 
     gate_cols = [
         c for c in df.columns
-        if c.startswith("valid_g_prob_backbone.layer")
+        if c.startswith("valid_g_prob_")
     ]
 
     if len(gate_cols) == 0:
@@ -629,6 +629,12 @@ def summarize_one_run(run_dir: Path) -> dict:
         "valid_zero_channels",
         "valid_active_ratio",
         "valid_zero_ratio",
+        "valid_aig_static_flops_per_sample",
+        "valid_aig_active_flops_per_sample",
+        "valid_aig_skipped_flops_per_sample",
+        "valid_aig_flops_skip_ratio",
+        "valid_aig_flops_active_ratio",
+        "valid_aig_gated_branch_flops_per_sample",
         "lambda_coef",
     ]:
         if col in df.columns:
@@ -758,6 +764,12 @@ def make_summary(
             "valid_zero_channels",
             "valid_active_ratio",
             "valid_zero_ratio",
+            "valid_aig_static_flops_per_sample",
+            "valid_aig_active_flops_per_sample",
+            "valid_aig_skipped_flops_per_sample",
+            "valid_aig_flops_skip_ratio",
+            "valid_aig_flops_active_ratio",
+            "valid_aig_gated_branch_flops_per_sample",
         ]:
             if col in g.columns:
                 row[f"best_{col}"] = best_row[col]
@@ -1037,6 +1049,8 @@ def print_available_metrics(df_history: pd.DataFrame) -> None:
         "lambda",
         "zero",
         "active",
+        "flops",
+        "compute",
         "real_prob",
         "estim_prob",
     ]

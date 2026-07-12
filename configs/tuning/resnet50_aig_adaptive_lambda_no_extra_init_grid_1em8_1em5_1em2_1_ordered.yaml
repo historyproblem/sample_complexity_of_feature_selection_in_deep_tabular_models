@@ -1,0 +1,56 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 200
+  adaptive_lambda:
+    enabled: true
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 200
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_no_extra_init_grid_1em8_1em5_1em2_1_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.00000001
+      mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1em8_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1em8
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-8"
+      mlflow.tags.adaptive_lambda: "enabled"
+    - model.lambda_coef: 0.00001
+      mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1em5_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1em5
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-5"
+      mlflow.tags.adaptive_lambda: "enabled"
+    - model.lambda_coef: 0.01
+      mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1em2_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1em2
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1e-2"
+      mlflow.tags.adaptive_lambda: "enabled"
+    - model.lambda_coef: 1.0
+      mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "1"
+      mlflow.tags.adaptive_lambda: "enabled"
