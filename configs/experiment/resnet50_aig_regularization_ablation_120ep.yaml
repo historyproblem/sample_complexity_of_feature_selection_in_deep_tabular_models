@@ -23,7 +23,7 @@ model:
       gate_regularization: l2_gate
 
 training_arguments:
-  num_epochs: 200
+  num_epochs: 120
   adaptive_lambda:
     enabled: true
     warmup_epochs: 0
@@ -39,17 +39,20 @@ training_arguments:
   batchnorm_recalibration:
     enabled: false
 
+scheduler:
+  T_max: 120
+
 run_history:
   root_dir: outputs/runs
-  run_name: resnet50_aig_regularization_ablation_200ep
+  run_name: resnet50_aig_regularization_ablation_120ep
 
 mlflow:
   enabled: false
-  run_name: "resnet50_aig_regularization_ablation_200ep_${model.backbone.resnet_block.gate_regularization}_temp_${model.backbone.resnet_block.temperature}"
+  run_name: "resnet50_aig_regularization_ablation_120ep_${model.backbone.resnet_block.gate_regularization}_temp_${model.backbone.resnet_block.temperature}"
   tags:
     model_type: "ResNet50_AIG"
     method: "aig"
-    recipe: "resnet50_aig_regularization_ablation_200ep"
+    recipe: "resnet50_aig_regularization_ablation_120ep"
     initial_lambda: "1e-6"
     target_lambda: "10"
-    num_epochs: "200"
+    num_epochs: "120"

@@ -1,6 +1,6 @@
 defaults:
-  - experiment: resnet50_aig_regularization_ablation_200ep
-  - tuning: resnet50_aig_regularization_ablation_200ep_ordered
+  - experiment: resnet50_aig_regularization_ablation_120ep
+  - tuning: resnet50_aig_regularization_ablation_120ep_ordered
   - _self_
 
 hydra:

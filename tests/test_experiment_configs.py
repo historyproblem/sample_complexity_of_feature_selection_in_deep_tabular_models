@@ -1789,32 +1789,32 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_epochs_grid():
 
 def test_resnet50_aig_regularization_ablation_grid_covers_gate_and_probability_losses():
     experiment_cfg = OmegaConf.load(
-        CONFIGS_DIR / "experiment" / "resnet50_aig_regularization_ablation_200ep.yaml"
+        CONFIGS_DIR / "experiment" / "resnet50_aig_regularization_ablation_120ep.yaml"
     )
     tuning_cfg = OmegaConf.load(
-        CONFIGS_DIR / "tuning" / "resnet50_aig_regularization_ablation_200ep_ordered.yaml"
+        CONFIGS_DIR / "tuning" / "resnet50_aig_regularization_ablation_120ep_ordered.yaml"
     )
     tune_cfg = OmegaConf.load(
-        CONFIGS_DIR / "tune_resnet50_aig_regularization_ablation_200ep.yaml"
+        CONFIGS_DIR / "tune_resnet50_aig_regularization_ablation_120ep.yaml"
     )
 
     assert tune_cfg.defaults == [
-        {"experiment": "resnet50_aig_regularization_ablation_200ep"},
-        {"tuning": "resnet50_aig_regularization_ablation_200ep_ordered"},
+        {"experiment": "resnet50_aig_regularization_ablation_120ep"},
+        {"tuning": "resnet50_aig_regularization_ablation_120ep_ordered"},
         "_self_",
     ]
     assert experiment_cfg.model.lambda_coef == 1e-6
     assert experiment_cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
     adaptive = experiment_cfg.training_arguments.adaptive_lambda
     assert adaptive.enabled is True
-    assert adaptive.update_every_epochs == 2
+    assert adaptive.update_every_epochs == 1
     assert adaptive.lambda_max == 10.0
     assert adaptive.log_step_init == "auto"
     _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
 
-    assert tuning_cfg.training_arguments.num_epochs == 200
+    assert tuning_cfg.training_arguments.num_epochs == 120
     assert tuning_cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
-    assert tuning_cfg.scheduler.T_max == 200
+    assert tuning_cfg.scheduler.T_max == 120
     assert tuning_cfg.tuning.n_trials == 4
     assert tuning_cfg.tuning.points_in_order is True
 
