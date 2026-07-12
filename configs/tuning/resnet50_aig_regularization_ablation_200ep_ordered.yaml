@@ -5,7 +5,7 @@ training_arguments:
   adaptive_lambda:
     enabled: true
     warmup_epochs: 0
-    update_every_epochs: 2
+    update_every_epochs: 1
     acc_window: 3
     lambda_min: 1e-8
     lambda_max: 10.0
