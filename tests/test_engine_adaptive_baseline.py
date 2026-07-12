@@ -1,8 +1,17 @@
+import math
 from pathlib import Path
 
+import pytest
+import torch.nn as nn
 from omegaconf import OmegaConf
 
 from net_complexity.training import engine
+
+
+class _LambdaModel(nn.Module):
+    def __init__(self, lambda_coef: float = 1e-6):
+        super().__init__()
+        self.lambda_coef = float(lambda_coef)
 
 
 def _make_config(baseline_history_dir: str) -> object:
@@ -46,6 +55,35 @@ def test_build_baseline_training_config_disables_pruning_and_redirects_run_histo
     assert baseline_config.run_history.use_hydra_output_dir is False
     assert baseline_config.run_history.root_dir == str(tmp_path / "baseline_root")
     assert baseline_config.run_history.run_name == "adaptive_demo_baseline_no_pruning"
+
+
+def test_adaptive_lambda_auto_log_step_matches_missing_config_value():
+    expected = math.log(10.0 / 1e-6) / 33.0
+
+    def _build(log_step_init):
+        adaptive = {
+            "enabled": True,
+            "warmup_epochs": 0,
+            "update_every_epochs": 2,
+            "lambda_max": 10.0,
+        }
+        if log_step_init != "missing":
+            adaptive["log_step_init"] = log_step_init
+        training_arguments = OmegaConf.create(
+            {
+                "num_epochs": 200,
+                "adaptive_lambda": adaptive,
+            }
+        )
+        return engine._build_adaptive_lambda(training_arguments, _LambdaModel())
+
+    missing_controller = _build("missing")
+    auto_controller = _build("auto")
+    explicit_controller = _build(0.25)
+
+    assert missing_controller.step == pytest.approx(expected)
+    assert auto_controller.step == pytest.approx(expected)
+    assert explicit_controller.step == pytest.approx(0.25)
 
 
 def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(tmp_path, monkeypatch):

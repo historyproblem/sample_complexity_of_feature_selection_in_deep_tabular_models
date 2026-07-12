@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,9 @@ EpochEndCallback = Callable[
 ProgressContext = Mapping[str, Any]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
+AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
+AUTO_LOG_STEP_TARGET_LAMBDA = 1e1
+AUTO_LOG_STEP_EPOCH_FRACTION = 1.0 / 3.0
 
 
 def _is_mlflow_enabled(config: DictConfig) -> bool:
@@ -1261,6 +1265,39 @@ def _build_lambda_warmup(training_arguments: DictConfig) -> LambdaWarmupState | 
     )
 
 
+def _is_auto_log_step(value: Any) -> bool:
+    return value is None or str(value).strip().lower() == "auto"
+
+
+def _resolve_adaptive_lambda_log_step_init(
+    training_arguments: DictConfig,
+    adaptive_cfg: DictConfig,
+    *,
+    warmup_epochs: int,
+    update_every_epochs: int,
+) -> float:
+    raw_value = getattr(adaptive_cfg, "log_step_init", "auto")
+    if not _is_auto_log_step(raw_value):
+        return float(raw_value)
+
+    num_epochs = int(getattr(training_arguments, "num_epochs", 200))
+    if num_epochs <= 0:
+        raise ValueError("training_arguments.num_epochs must be > 0 for adaptive_lambda.log_step_init=auto.")
+    if update_every_epochs <= 0:
+        raise ValueError("adaptive_lambda.update_every_epochs must be >= 1.")
+
+    target_epoch = float(num_epochs) * AUTO_LOG_STEP_EPOCH_FRACTION
+    update_window = target_epoch - float(warmup_epochs)
+    update_slots = math.floor(update_window / float(update_every_epochs))
+    if update_slots <= 0:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires at least one lambda update "
+            "within the first third of training."
+        )
+
+    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / AUTO_LOG_STEP_INITIAL_LAMBDA) / float(update_slots)
+
+
 def _build_adaptive_lambda(
     training_arguments: DictConfig,
     model: nn.Module,
@@ -1292,16 +1329,24 @@ def _build_adaptive_lambda(
     adaptive_log_step_max_epoch = getattr(cfg, "adaptive_log_step_max_epoch", None)
 
     lambda_max = getattr(cfg, "lambda_max", 80.0)
+    warmup_epochs = int(getattr(cfg, "warmup_epochs", 10))
+    update_every_epochs = int(getattr(cfg, "update_every_epochs", 3))
+    log_step_init = _resolve_adaptive_lambda_log_step_init(
+        training_arguments,
+        cfg,
+        warmup_epochs=warmup_epochs,
+        update_every_epochs=update_every_epochs,
+    )
 
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
         reference_accuracy_by_epoch=baseline_accuracy_by_epoch,
-        warmup_epochs=int(getattr(cfg, "warmup_epochs", 10)),
-        update_every_epochs=int(getattr(cfg, "update_every_epochs", 3)),
+        warmup_epochs=warmup_epochs,
+        update_every_epochs=update_every_epochs,
         acc_window=int(getattr(cfg, "acc_window", 3)),
         lambda_min=float(getattr(cfg, "lambda_min", 1e-8)),
         lambda_max=None if lambda_max is None else float(lambda_max),
-        log_step_init=float(getattr(cfg, "log_step_init", 0.6931471805599453)),
+        log_step_init=log_step_init,
         log_step_min=float(getattr(cfg, "log_step_min", 0.04879016416943205)),
         adaptive_log_step_enabled=bool(getattr(cfg, "adaptive_log_step_enabled", False)),
         prune_rate_low_per_epoch=float(getattr(cfg, "prune_rate_low_per_epoch", 0.02)),

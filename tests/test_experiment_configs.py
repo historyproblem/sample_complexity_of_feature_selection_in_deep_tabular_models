@@ -178,7 +178,7 @@ def test_aig_adaptive_lambda_train_profile_keeps_only_bn_recalibration_extra():
     assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
     assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 2
     assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
-    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.4835428695287496
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
     _assert_clean_aig_adaptive_lambda(cfg.training_arguments)
     assert cfg.training_arguments.batchnorm_recalibration.enabled is True
     assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
@@ -1572,7 +1572,7 @@ def test_resnet50_aig_adaptive_lambda_config_uses_clean_adaptive_profile():
         "outputs/baselines/resnet50_aig_cifar10_no_pruning"
     )
     assert adaptive_cfg.lambda_max == 10.0
-    assert adaptive_cfg.log_step_init == 0.4835428695287496
+    assert adaptive_cfg.log_step_init == "auto"
     _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
     assert experiment_cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert experiment_cfg.mlflow.tags.method == "aig"
