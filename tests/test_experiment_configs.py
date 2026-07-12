@@ -1809,10 +1809,11 @@ def test_resnet50_aig_regularization_ablation_grid_covers_gate_and_probability_l
     assert adaptive.enabled is True
     assert adaptive.update_every_epochs == 2
     assert adaptive.lambda_max == 10.0
-    assert adaptive.log_step_init == 0.4835428695287496
+    assert adaptive.log_step_init == "auto"
     _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
 
     assert tuning_cfg.training_arguments.num_epochs == 200
+    assert tuning_cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
     assert tuning_cfg.scheduler.T_max == 200
     assert tuning_cfg.tuning.n_trials == 4
     assert tuning_cfg.tuning.points_in_order is True

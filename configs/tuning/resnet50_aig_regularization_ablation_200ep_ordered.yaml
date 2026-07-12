@@ -9,7 +9,7 @@ training_arguments:
     acc_window: 3
     lambda_min: 1e-8
     lambda_max: 10.0
-    log_step_init: 0.4835428695287496
+    log_step_init: auto
     log_step_min: 0.04879016416943205
 
 scheduler:
