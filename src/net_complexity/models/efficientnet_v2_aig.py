@@ -108,7 +108,7 @@ class EfficientNetV2AIGBlock(nn.Module):
         keep_prob_init: float = 0.9,
         gate_threshold: float = 0.5,
         gate_temperature: float = 1.0,
-        gate_regularization: str = "l1_probability",
+        gate_regularization: str = "l2_gate",
         act_layer: type[nn.Module] = nn.SiLU,
         norm_layer: type[nn.Module] = nn.BatchNorm2d,
     ) -> None:
@@ -285,7 +285,7 @@ class AIGEfficientNetV2(nn.Module):
         keep_prob_init: float = 0.9,
         gate_threshold: float = 0.5,
         gate_temperature: float = 1.0,
-        gate_regularization: str = "l1_probability",
+        gate_regularization: str = "l2_gate",
         stem_stride: int = 1,
         criterion: nn.Module | None = None,
     ) -> None:

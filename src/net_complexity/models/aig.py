@@ -39,7 +39,7 @@ class AIGBlockGate(nn.Module):
         keep_prob_init: float | None = None,
         threshold: float = 0.5,
         temperature: float = 1.0,
-        regularization: str = "l2_activation",
+        regularization: str = "l2_gate",
         init_logits: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()

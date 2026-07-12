@@ -126,8 +126,12 @@ def test_efficientnetv2_aig_experiment_config_points_to_cifar10_adaptive_lambda(
         {"/tracking": "default"},
         "_self_",
     ]
-    assert cfg.model.lambda_coef == 0.001
+    assert cfg.model.lambda_coef == 1e-6
+    assert cfg.model.gate_regularization == "l2_gate"
     assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.4835428695287496
     _assert_clean_adaptive_lambda_cfg(cfg)
     assert cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert cfg.dataloaders.taskname == "CIFAR10"
@@ -205,8 +209,9 @@ def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 0.0001
-    assert cfg.model.gate_regularization == "l1_probability"
-    assert cfg.training_arguments.adaptive_lambda.lambda_max is None
+    assert cfg.model.gate_regularization == "l2_gate"
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.3453877639491068
     _assert_clean_adaptive_lambda_cfg(cfg)
     assert cfg.training_arguments.batchnorm_recalibration.enabled is False
 
@@ -233,10 +238,12 @@ def test_efficientnetv2_m_aig_init1em4_experiment_and_tuning_config():
         "_self_",
     ]
     assert exp_cfg.model.lambda_coef == 0.0001
-    assert exp_cfg.model.gate_regularization == "l1_probability"
+    assert exp_cfg.model.gate_regularization == "l2_gate"
     assert exp_cfg.mlflow.tags.model_type == "EfficientNetV2-M_AIG"
     _assert_clean_adaptive_lambda_cfg(exp_cfg)
     assert exp_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert exp_cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert exp_cfg.training_arguments.adaptive_lambda.log_step_init == 0.3453877639491068
     assert tune_cfg.training_arguments.adaptive_lambda.lambda_max is None
     assert len(tune_cfg.tuning.points) == 5
     assert tune_cfg.tuning.points[0]["training_arguments.num_epochs"] == 50

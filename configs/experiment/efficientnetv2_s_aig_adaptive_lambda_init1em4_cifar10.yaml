@@ -25,7 +25,7 @@ model:
   keep_prob_init: 0.9
   gate_threshold: 0.5
   gate_temperature: 1.0
-  gate_regularization: l1_probability
+  gate_regularization: l2_gate
   stem_stride: 1
 
 training_arguments:
@@ -37,8 +37,8 @@ training_arguments:
     acc_window: 3
     baseline_history_dir: null
     lambda_min: 1e-8
-    lambda_max: null
-    log_step_init: 0.1726938819745534
+    lambda_max: 10.0
+    log_step_init: 0.3453877639491068
     log_step_min: 0.04879016416943205
     soft_drop: 0.02
     hard_drop: 0.04
@@ -57,3 +57,5 @@ mlflow:
     method: "aig"
     recipe: "efficientnetv2_s_aig_adaptive_lambda_init1em4_cifar10"
     initial_lambda: "0.0001"
+    gate_regularization: "l2_gate"
+    target_lambda: "10"

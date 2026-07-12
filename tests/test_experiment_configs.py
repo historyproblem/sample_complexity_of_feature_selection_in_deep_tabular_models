@@ -175,6 +175,10 @@ def test_aig_adaptive_lambda_train_profile_keeps_only_bn_recalibration_extra():
     cfg = OmegaConf.load(CONFIGS_DIR / "train" / "aig_adaptive_lambda.yaml")
 
     assert cfg.training_arguments.adaptive_lambda.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 2
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.4835428695287496
     _assert_clean_aig_adaptive_lambda(cfg.training_arguments)
     assert cfg.training_arguments.batchnorm_recalibration.enabled is True
     assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
@@ -1559,17 +1563,22 @@ def test_resnet50_aig_adaptive_lambda_config_uses_clean_adaptive_profile():
         {"/tracking": "default"},
         "_self_",
     ]
-    assert experiment_cfg.model.lambda_coef == 0.01
+    assert experiment_cfg.model.lambda_coef == 1e-6
     assert experiment_cfg.model.bypass_on_zero_lambda is False
+    assert experiment_cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
     adaptive_cfg = experiment_cfg.training_arguments.adaptive_lambda
     assert adaptive_cfg.enabled is True
     assert adaptive_cfg.baseline_history_dir.startswith(
         "outputs/baselines/resnet50_aig_cifar10_no_pruning"
     )
-    assert adaptive_cfg.lambda_max == 1.0
+    assert adaptive_cfg.lambda_max == 10.0
+    assert adaptive_cfg.log_step_init == 0.4835428695287496
     _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
     assert experiment_cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert experiment_cfg.mlflow.tags.method == "aig"
+    assert experiment_cfg.mlflow.tags.gate_regularization == "l2_gate"
+    assert experiment_cfg.mlflow.tags.initial_lambda == "1e-6"
+    assert experiment_cfg.mlflow.tags.target_lambda == "10"
 
     assert tune_cfg.defaults == [
         {"experiment": "resnet50_aig_adaptive_lambda_v1"},

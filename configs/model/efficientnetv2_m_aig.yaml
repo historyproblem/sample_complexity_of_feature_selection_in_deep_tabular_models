@@ -4,7 +4,7 @@ model:
   _target_: net_complexity.wrappers.AIGEfficientNetV2M
   num_classes: 10
   in_channels: 3
-  lambda_coef: 0.0001
+  lambda_coef: 0.000001
   bypass_on_zero_lambda: false
   dropout: 0.1
   stochastic_depth: 0.0
@@ -12,7 +12,7 @@ model:
   keep_prob_init: 0.9
   gate_threshold: 0.5
   gate_temperature: 1.0
-  gate_regularization: l1_probability
+  gate_regularization: l2_gate
   stem_stride: 1
   criterion:
     _target_: torch.nn.CrossEntropyLoss

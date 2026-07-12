@@ -18,27 +18,27 @@ dataloaders:
   taskname: CIFAR10
 
 model:
-  lambda_coef: 0.001
+  lambda_coef: 0.000001
   bypass_on_zero_lambda: false
   dropout: 0.1
   stochastic_depth: 0.0
   keep_prob_init: 0.9
   gate_threshold: 0.5
   gate_temperature: 1.0
-  gate_regularization: l1_probability
+  gate_regularization: l2_gate
   stem_stride: 1
 
 training_arguments:
   num_epochs: 200
   adaptive_lambda:
     enabled: true
-    warmup_epochs: 5
+    warmup_epochs: 0
     update_every_epochs: 2
     acc_window: 3
     baseline_history_dir: null
     lambda_min: 1e-8
-    lambda_max: 1.0
-    log_step_init: 0.22314355131420976
+    lambda_max: 10.0
+    log_step_init: 0.4835428695287496
     log_step_min: 0.04879016416943205
     soft_drop: 0.02
     hard_drop: 0.04
@@ -56,3 +56,6 @@ mlflow:
     model_type: "EfficientNetV2-S_AIG"
     method: "aig"
     recipe: "efficientnetv2_s_aig_adaptive_lambda_cifar10"
+    gate_regularization: "l2_gate"
+    initial_lambda: "1e-6"
+    target_lambda: "10"
