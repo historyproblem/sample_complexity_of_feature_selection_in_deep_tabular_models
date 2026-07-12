@@ -30,7 +30,8 @@ from .models.feature_selection import (
     parse_AIG_activations,
     replace_layers_by_regex,
 )
-from .models.efficientnet_v2_aig import AIGBlockGate, AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
+from .models.aig import AIGBlockGate
+from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 
 __all__ = [
     "AIGBlockGate",

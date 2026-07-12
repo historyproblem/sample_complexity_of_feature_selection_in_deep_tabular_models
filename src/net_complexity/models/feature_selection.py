@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .aig import AIGBlockGate
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
-from .efficientnet_v2_aig import AIGBlockGate
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
 
@@ -705,39 +705,44 @@ class CIFARSTGBasicBlock(CIFARBasicBlock):
 
 
 class AIGBottleneckLayer(Bottleneck):
-    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1, hard: bool = False):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1,
+        hard: bool = False,
+        gate_hidden_channels: int = 16,
+        gate_regularization: str = "l2_activation",
+    ):
         super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
-        self.gumbel = GumbleSoftmax(hard=hard)
         self.temperature = temperature
         self.bypass = False
-        self.adapter = nn.Sequential(
-            nn.Conv2d(in_channels=in_planes,
-                      out_channels=16, kernel_size=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(16, 2, kernel_size=1)
+        self.gate = AIGBlockGate(
+            in_planes,
+            hidden_channels=gate_hidden_channels,
+            threshold=0.5,
+            temperature=temperature,
+            regularization=gate_regularization,
+            init_logits=(0.1, 2.0),
         )
-        # initial opening rate of the gate of about 85%
-        self.adapter[3].bias.data[0] = 0.1
-        self.adapter[3].bias.data[1] = 2
-
-    def to(self, device, *args, **kwargs):
-        super().to(device, *args, **kwargs)
-        if device != 'cpu':
-            self.gumbel.cuda()
-        return self
+        self.activations: torch.Tensor | None = None
+        self.keep_probabilities: torch.Tensor | None = None
+        self.probabilities: torch.Tensor | None = None
 
     def set_bypass(self, enabled: bool) -> None:
         self.bypass = bool(enabled)
+        self.gate.set_bypass(enabled)
+
+    def regularization_loss(self) -> torch.Tensor:
+        return self.gate.regularization_loss()
 
     def forward(self, x):
-        if self.bypass:
-            self.activations = x.new_ones((x.shape[0], 1, 1, 1))
-        else:
-            w = self.adapter(F.avg_pool2d(x, x.size(2)))
-            w = self.gumbel(w, temp=self.temperature, force_hard=True)
-            # todo: mb to register buffer?
-            self.activations = w[:, 1].unsqueeze(1)
+        gate = self.gate(x)
+        self.activations = self.gate.activations
+        self.keep_probabilities = self.gate.keep_probabilities
+        self.probabilities = self.gate.probabilities
 
         identity = x
         x = self.relu(self.batch_norm1(self.conv1(x)))
@@ -751,7 +756,7 @@ class AIGBottleneckLayer(Bottleneck):
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)
         # add identity
-        x = identity + x*self.activations
+        x = identity + x*gate
         x = self.relu(x)
 
         return x
@@ -796,6 +801,21 @@ def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: 
     return buff
 
 
+def _collect_aig_modules(model: nn.Module, buff=None, prefix: str = None):
+    if buff is None:
+        buff = {}
+    for name, module in model.named_children():
+        full_name = f'{prefix}.{name}' if prefix is not None else name
+        if isinstance(module, AIGBottleneckLayer):
+            buff[full_name] = module
+            continue
+        if isinstance(module, AIGBlockGate):
+            buff[full_name] = module
+            continue
+        _collect_aig_modules(module, buff, full_name)
+    return buff
+
+
 def _get_cached_modules_by_type(model: nn.Module, cache_key: str, module_types):
     cache_attr = "_net_complexity_module_cache"
     cache = getattr(model, cache_attr, None)
@@ -819,13 +839,19 @@ def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
 
 def _get_aig_modules(model: nn.Module, buff=None, prefix: str = None):
     if buff is not None or prefix is not None:
-        return _collect_modules_by_type(
-            model,
-            (AIGBottleneckLayer, AIGBlockGate),
-            buff=buff,
-            prefix=prefix,
-        )
-    return _get_cached_modules_by_type(model, "aig", (AIGBottleneckLayer, AIGBlockGate))
+        return _collect_aig_modules(model, buff=buff, prefix=prefix)
+
+    cache_attr = "_net_complexity_module_cache"
+    cache = getattr(model, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(model, cache_attr, cache)
+
+    modules = cache.get("aig")
+    if modules is None:
+        modules = _collect_aig_modules(model)
+        cache["aig"] = modules
+    return modules
 
 
 def get_AIG_modules(model: nn.Module):

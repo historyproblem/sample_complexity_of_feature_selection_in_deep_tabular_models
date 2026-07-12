@@ -1284,7 +1284,7 @@ def _build_adaptive_lambda(
         if recovery_cfg is not None
         else None
     )
-    if get_AIG_modules(model) and bool((recovery_config or {}).get("enabled", True)):
+    if get_AIG_modules(model) and bool((recovery_config or {}).get("enabled", False)):
         raise ValueError(
             "AIG adaptive lambda requires training_arguments.adaptive_lambda.recovery.enabled=false "
             "because open-bias recovery is only implemented for Gumbel selectors."
@@ -1303,7 +1303,7 @@ def _build_adaptive_lambda(
         lambda_max=None if lambda_max is None else float(lambda_max),
         log_step_init=float(getattr(cfg, "log_step_init", 0.6931471805599453)),
         log_step_min=float(getattr(cfg, "log_step_min", 0.04879016416943205)),
-        adaptive_log_step_enabled=bool(getattr(cfg, "adaptive_log_step_enabled", True)),
+        adaptive_log_step_enabled=bool(getattr(cfg, "adaptive_log_step_enabled", False)),
         prune_rate_low_per_epoch=float(getattr(cfg, "prune_rate_low_per_epoch", 0.02)),
         prune_rate_high_per_epoch=float(getattr(cfg, "prune_rate_high_per_epoch", 0.07)),
         log_step_boost_factor=float(getattr(cfg, "log_step_boost_factor", 2.0)),

@@ -7,12 +7,7 @@ training_arguments:
     lambda_max: null
     log_step_init: 0.4054651081081644
     update_every_epochs: 2
-    adaptive_log_step_enabled: false
-    recovery:
-      enabled: false
   batchnorm_recalibration:
-    enabled: false
-  collapse_guard:
     enabled: false
 
 scheduler:
@@ -47,8 +42,6 @@ tuning:
       mlflow.tags.lambda_max: "none"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 1.0
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_lambda_max_init1_step150_update2_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_lambda_max_init1_step150_update2
@@ -58,8 +51,6 @@ tuning:
       mlflow.tags.lambda_max: "none"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.1
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_lambda_max_init1em1_step150_update2_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_lambda_max_init1em1_step150_update2
@@ -69,8 +60,6 @@ tuning:
       mlflow.tags.lambda_max: "none"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.01
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_lambda_max_init1em2_step150_update2_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_lambda_max_init1em2_step150_update2
@@ -80,8 +69,6 @@ tuning:
       mlflow.tags.lambda_max: "none"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.001
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_lambda_max_init1em3_step150_update2_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_lambda_max_init1em3_step150_update2
@@ -91,5 +78,3 @@ tuning:
       mlflow.tags.lambda_max: "none"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"

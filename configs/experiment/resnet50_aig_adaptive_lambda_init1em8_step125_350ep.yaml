@@ -4,7 +4,7 @@ defaults:
   - /data: cifar10_best_practice
   - /model: resnet50
   - /method: aig
-  - /train: resnet50_best_practice
+  - /train: aig_adaptive_lambda
   - /optimizer: adamw
   - /scheduler: cosine_200
   - /metrics: aig
@@ -23,8 +23,6 @@ model:
 
 training_arguments:
   num_epochs: 350
-  lambda_warmup:
-    enabled: false
   adaptive_lambda:
     enabled: true
     warmup_epochs: 0
@@ -35,16 +33,8 @@ training_arguments:
     lambda_max: 1.0
     log_step_init: 0.22314355131420976
     log_step_min: 0.04879016416943205
-    adaptive_log_step_enabled: false
-    prune_rate_low_per_epoch: 0.02
-    prune_rate_high_per_epoch: 0.07
-    log_step_boost_factor: 2.0
-    log_step_max_boost_level: 2
-    adaptive_log_step_max_epoch: null
     soft_drop: 0.02
     hard_drop: 0.04
-    recovery:
-      enabled: false
   batchnorm_recalibration:
     enabled: false
 

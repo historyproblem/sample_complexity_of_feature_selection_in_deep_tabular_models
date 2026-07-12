@@ -5,12 +5,7 @@ training_arguments:
     enabled: true
     lambda_max: null
     update_every_epochs: 2
-    adaptive_log_step_enabled: false
-    recovery:
-      enabled: false
   batchnorm_recalibration:
-    enabled: false
-  collapse_guard:
     enabled: false
 
 tuning:
@@ -48,8 +43,6 @@ tuning:
       mlflow.tags.num_epochs: "50"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.0001
       training_arguments.num_epochs: 70
       training_arguments.adaptive_lambda.log_step_init: 0.49341109135586697
@@ -65,8 +58,6 @@ tuning:
       mlflow.tags.num_epochs: "70"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.0001
       training_arguments.num_epochs: 90
       training_arguments.adaptive_lambda.log_step_init: 0.38376418216567426
@@ -82,8 +73,6 @@ tuning:
       mlflow.tags.num_epochs: "90"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.0001
       training_arguments.num_epochs: 140
       training_arguments.adaptive_lambda.log_step_init: 0.24670554567793349
@@ -99,8 +88,6 @@ tuning:
       mlflow.tags.num_epochs: "140"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.0001
       training_arguments.num_epochs: 200
       training_arguments.adaptive_lambda.log_step_init: 0.1726938819745534
@@ -116,5 +103,3 @@ tuning:
       mlflow.tags.num_epochs: "200"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"

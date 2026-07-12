@@ -11,6 +11,8 @@ model:
   gate_hidden_channels: 16
   keep_prob_init: 0.9
   gate_threshold: 0.5
+  gate_temperature: 1.0
+  gate_regularization: l1_probability
   stem_stride: 1
   criterion:
     _target_: torch.nn.CrossEntropyLoss

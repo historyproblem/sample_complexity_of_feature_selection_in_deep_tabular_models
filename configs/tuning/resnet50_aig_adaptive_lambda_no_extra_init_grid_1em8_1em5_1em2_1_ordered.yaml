@@ -4,12 +4,7 @@ training_arguments:
   num_epochs: 200
   adaptive_lambda:
     enabled: true
-    adaptive_log_step_enabled: false
-    recovery:
-      enabled: false
   batchnorm_recalibration:
-    enabled: false
-  collapse_guard:
     enabled: false
 
 scheduler:
@@ -41,29 +36,21 @@ tuning:
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-8"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.00001
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1em5_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1em5
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-5"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.01
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1em2_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1em2
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1e-2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 1.0
       mlflow.run_name: resnet50_aig_adaptive_lambda_no_extra_lambda1_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: resnet50_aig_adaptive_lambda_no_extra_lambda1
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "1"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"

@@ -13,6 +13,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS_DIR = REPO_ROOT / "configs"
 
 
+def _assert_clean_adaptive_lambda_cfg(cfg) -> None:
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert "lambda_warmup" not in cfg.training_arguments
+    assert "adaptive_log_step_enabled" not in adaptive
+    assert "prune_rate_low_per_epoch" not in adaptive
+    assert "prune_rate_high_per_epoch" not in adaptive
+    assert "log_step_boost_factor" not in adaptive
+    assert "log_step_max_boost_level" not in adaptive
+    assert "adaptive_log_step_max_epoch" not in adaptive
+    assert "recovery" not in adaptive
+    assert "collapse_guard" not in cfg.training_arguments
+
+
 def test_aig_efficientnetv2_s_smoke_forward_32x32():
     model = AIGEfficientNetV2S(num_classes=10, lambda_coef=0.001)
     model.train()
@@ -105,7 +118,7 @@ def test_efficientnetv2_aig_experiment_config_points_to_cifar10_adaptive_lambda(
     assert cfg.defaults == [
         {"/data": "cifar10_best_practice"},
         {"/model": "efficientnetv2_s_aig"},
-        {"/train": "resnet50_best_practice"},
+        {"/train": "aig_adaptive_lambda"},
         {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "aig_train_valid"},
@@ -115,7 +128,8 @@ def test_efficientnetv2_aig_experiment_config_points_to_cifar10_adaptive_lambda(
     ]
     assert cfg.model.lambda_coef == 0.001
     assert cfg.training_arguments.adaptive_lambda.enabled is True
-    assert cfg.training_arguments.adaptive_lambda.recovery.enabled is False
+    _assert_clean_adaptive_lambda_cfg(cfg)
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert cfg.dataloaders.taskname == "CIFAR10"
 
 
@@ -123,8 +137,9 @@ def test_aig_flops_metric_reports_static_and_gate_adjusted_flops():
     model = AIGEfficientNetV2S(num_classes=10)
     model.eval()
     for gate in get_AIG_modules(model).values():
-        final_linear = gate.router[-1]
-        final_linear.bias.data.fill_(-10.0)
+        final_conv = gate.router[-1]
+        final_conv.bias.data[0] = 10.0
+        final_conv.bias.data[1] = -10.0
 
     inputs = torch.randn(2, 3, 32, 32)
     logits, _ = model(inputs)
@@ -159,7 +174,7 @@ def test_efficientnetv2_aig_scaled_epoch_tuning_config_uses_expected_lambda_step
 
     assert cfg.training_arguments.adaptive_lambda.lambda_max is None
     assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 2
-    assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_enabled is False
+    assert "adaptive_log_step_enabled" not in cfg.training_arguments.adaptive_lambda
     assert len(cfg.tuning.points) == len(expected)
 
     for point in cfg.tuning.points:
@@ -169,6 +184,8 @@ def test_efficientnetv2_aig_scaled_epoch_tuning_config_uses_expected_lambda_step
         assert point["training_arguments.adaptive_lambda.log_step_init"] == expected[num_epochs]
         assert point["mlflow.tags.target_lambda"] == "10"
         assert point["mlflow.tags.flops_logging"] == "enabled"
+        assert "mlflow.tags.adaptive_log_step" not in point
+        assert "mlflow.tags.recovery" not in point
 
 
 def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
@@ -179,7 +196,7 @@ def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
     assert cfg.defaults == [
         {"/data": "cifar10_best_practice"},
         {"/model": "efficientnetv2_s_aig"},
-        {"/train": "resnet50_best_practice"},
+        {"/train": "aig_adaptive_lambda"},
         {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "aig_train_valid_flops"},
@@ -188,7 +205,10 @@ def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
         "_self_",
     ]
     assert cfg.model.lambda_coef == 0.0001
+    assert cfg.model.gate_regularization == "l1_probability"
     assert cfg.training_arguments.adaptive_lambda.lambda_max is None
+    _assert_clean_adaptive_lambda_cfg(cfg)
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is False
 
 
 def test_efficientnetv2_m_aig_init1em4_experiment_and_tuning_config():
@@ -204,7 +224,7 @@ def test_efficientnetv2_m_aig_init1em4_experiment_and_tuning_config():
     assert exp_cfg.defaults == [
         {"/data": "cifar10_best_practice"},
         {"/model": "efficientnetv2_m_aig"},
-        {"/train": "resnet50_best_practice"},
+        {"/train": "aig_adaptive_lambda"},
         {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "aig_train_valid_flops"},
@@ -213,7 +233,10 @@ def test_efficientnetv2_m_aig_init1em4_experiment_and_tuning_config():
         "_self_",
     ]
     assert exp_cfg.model.lambda_coef == 0.0001
+    assert exp_cfg.model.gate_regularization == "l1_probability"
     assert exp_cfg.mlflow.tags.model_type == "EfficientNetV2-M_AIG"
+    _assert_clean_adaptive_lambda_cfg(exp_cfg)
+    assert exp_cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert tune_cfg.training_arguments.adaptive_lambda.lambda_max is None
     assert len(tune_cfg.tuning.points) == 5
     assert tune_cfg.tuning.points[0]["training_arguments.num_epochs"] == 50

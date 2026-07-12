@@ -4,12 +4,7 @@ training_arguments:
   num_epochs: 200
   adaptive_lambda:
     enabled: true
-    adaptive_log_step_enabled: false
-    recovery:
-      enabled: false
   batchnorm_recalibration:
-    enabled: false
-  collapse_guard:
     enabled: false
 
 scheduler:
@@ -45,8 +40,6 @@ tuning:
       mlflow.tags.lambda_multiplier: "1.5"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"
     - model.lambda_coef: 0.00000001
       training_arguments.adaptive_lambda.update_every_epochs: 2
       training_arguments.adaptive_lambda.log_step_init: 0.6931471805599453
@@ -57,5 +50,3 @@ tuning:
       mlflow.tags.lambda_multiplier: "2.0"
       mlflow.tags.update_every_epochs: "2"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.adaptive_log_step: "disabled"
-      mlflow.tags.recovery: "disabled"

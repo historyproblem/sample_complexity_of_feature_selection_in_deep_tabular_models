@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import copy
-import math
 from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
+from .aig import AIGBlockGate
 from .outputs import ClassifModelOutput
 
 
@@ -99,75 +98,6 @@ class MBConvConfig:
         return int(rounded)
 
 
-class AIGBlockGate(nn.Module):
-    """
-    Per-block AIG gate.
-
-    The latest hard gate is stored in `activations` for the existing AIG metrics.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int = 16,
-        keep_prob_init: float = 0.9,
-        threshold: float = 0.5,
-    ) -> None:
-        super().__init__()
-        if not 0.0 < keep_prob_init < 1.0:
-            raise ValueError("keep_prob_init must be in (0, 1).")
-        if not 0.0 <= threshold <= 1.0:
-            raise ValueError("threshold must be in [0, 1].")
-
-        hidden_channels = max(1, int(hidden_channels))
-        self.threshold = float(threshold)
-        self.router = nn.Sequential(
-            nn.Linear(in_channels, hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_channels, 1),
-        )
-        self.keep_prob_init = float(keep_prob_init)
-        self.bypass = False
-        self.keep_probabilities: torch.Tensor | None = None
-        self.activations: torch.Tensor | None = None
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        final_linear = self.router[-1]
-        assert isinstance(final_linear, nn.Linear)
-        nn.init.zeros_(final_linear.weight)
-        final_linear.bias.data.fill_(
-            math.log(self.keep_prob_init / (1.0 - self.keep_prob_init))
-        )
-
-    def set_bypass(self, enabled: bool) -> None:
-        self.bypass = bool(enabled)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pooled = F.adaptive_avg_pool2d(x, 1).flatten(1)
-        keep_prob = torch.sigmoid(self.router(pooled)).view(-1, 1, 1, 1)
-
-        if self.bypass:
-            gate = torch.ones_like(keep_prob)
-            keep_prob = torch.ones_like(keep_prob)
-        elif self.training:
-            hard_gate = (keep_prob >= self.threshold).to(dtype=keep_prob.dtype)
-            gate = hard_gate.detach() - keep_prob.detach() + keep_prob
-        else:
-            gate = (keep_prob >= self.threshold).to(dtype=keep_prob.dtype)
-
-        self.keep_probabilities = keep_prob
-        self.activations = gate
-        return gate
-
-    def regularization_loss(self) -> torch.Tensor:
-        if self.keep_probabilities is None:
-            return next(self.parameters()).new_zeros(())
-        if self.bypass:
-            return self.keep_probabilities.new_zeros(())
-        return self.keep_probabilities.mean()
-
-
 class EfficientNetV2AIGBlock(nn.Module):
     def __init__(
         self,
@@ -177,6 +107,8 @@ class EfficientNetV2AIGBlock(nn.Module):
         gate_hidden_channels: int = 16,
         keep_prob_init: float = 0.9,
         gate_threshold: float = 0.5,
+        gate_temperature: float = 1.0,
+        gate_regularization: str = "l1_probability",
         act_layer: type[nn.Module] = nn.SiLU,
         norm_layer: type[nn.Module] = nn.BatchNorm2d,
     ) -> None:
@@ -285,6 +217,8 @@ class EfficientNetV2AIGBlock(nn.Module):
                 hidden_channels=gate_hidden_channels,
                 keep_prob_init=keep_prob_init,
                 threshold=gate_threshold,
+                temperature=gate_temperature,
+                regularization=gate_regularization,
             )
             if self.use_skip_connection
             else None
@@ -350,6 +284,8 @@ class AIGEfficientNetV2(nn.Module):
         gate_hidden_channels: int = 16,
         keep_prob_init: float = 0.9,
         gate_threshold: float = 0.5,
+        gate_temperature: float = 1.0,
+        gate_regularization: str = "l1_probability",
         stem_stride: int = 1,
         criterion: nn.Module | None = None,
     ) -> None:
@@ -385,6 +321,8 @@ class AIGEfficientNetV2(nn.Module):
                 gate_hidden_channels=gate_hidden_channels,
                 keep_prob_init=keep_prob_init,
                 gate_threshold=gate_threshold,
+                gate_temperature=gate_temperature,
+                gate_regularization=gate_regularization,
             )
         )
         self.head = nn.Sequential(
@@ -422,6 +360,8 @@ class AIGEfficientNetV2(nn.Module):
         gate_hidden_channels: int,
         keep_prob_init: float,
         gate_threshold: float,
+        gate_temperature: float,
+        gate_regularization: str,
     ) -> list[nn.Module]:
         return [
             layer
@@ -431,6 +371,8 @@ class AIGEfficientNetV2(nn.Module):
                 gate_hidden_channels=gate_hidden_channels,
                 keep_prob_init=keep_prob_init,
                 gate_threshold=gate_threshold,
+                gate_temperature=gate_temperature,
+                gate_regularization=gate_regularization,
             )
         ]
 
@@ -441,6 +383,8 @@ class AIGEfficientNetV2(nn.Module):
         gate_hidden_channels: int,
         keep_prob_init: float,
         gate_threshold: float,
+        gate_temperature: float,
+        gate_regularization: str,
     ) -> list[nn.Module]:
         layers = []
         for _ in range(layer_info.num_layers):
@@ -451,6 +395,8 @@ class AIGEfficientNetV2(nn.Module):
                     gate_hidden_channels=gate_hidden_channels,
                     keep_prob_init=keep_prob_init,
                     gate_threshold=gate_threshold,
+                    gate_temperature=gate_temperature,
+                    gate_regularization=gate_regularization,
                 )
             )
             layer_info.in_channels = layer_info.out_channels

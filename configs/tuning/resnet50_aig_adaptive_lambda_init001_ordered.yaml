@@ -4,8 +4,6 @@ training_arguments:
   num_epochs: 200
   adaptive_lambda:
     enabled: true
-    recovery:
-      enabled: false
 
 scheduler:
   T_max: 200
@@ -22,13 +20,6 @@ tuning:
   n_jobs: 1
   seed_base: 42
   seed_stride: 1
-  restart_guard:
-    enabled: false
-    metric: null
-    mode: null
-    epoch: 20
-    threshold: 0.4
-    max_attempts_per_repeat: 3
   storage: null
   load_if_exists: true
   output_dir: "outputs/studies"
@@ -39,10 +30,8 @@ tuning:
   points:
     - model.lambda_coef: 0.01
       training_arguments.adaptive_lambda.enabled: true
-      training_arguments.adaptive_lambda.recovery.enabled: false
       mlflow.run_name: resnet50_aig_adaptive_lambda_init001_temp_${model.backbone.resnet_block.temperature}
       mlflow.tags.recipe: "resnet50_aig_adaptive_lambda_init001"
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.01"
       mlflow.tags.adaptive_lambda: "enabled"
-      mlflow.tags.recovery: "disabled"
