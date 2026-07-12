@@ -1878,6 +1878,13 @@ def log_training_metadata(
     mlflow_logger.log_params({
         key: value for key, value in params.items() if value is not None
     })
+    mlflow_logger.log_metrics(
+        {
+            "model.total_parameters": float(total_params),
+            "model.trainable_parameters": float(trainable_params),
+        },
+        step=0,
+    )
 
 
 def log_run_artifacts(config: DictConfig, run_history: RunHistory, mlflow_logger: MLflowLogger | None) -> None:
