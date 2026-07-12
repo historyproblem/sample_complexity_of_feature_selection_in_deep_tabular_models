@@ -1,0 +1,19 @@
+# @package _global_
+
+channel_pruning:
+  enabled: true
+  structural: true          # Build a new narrowed model (not soft mask)
+  mode: explicit
+
+  # Map each layer to the channel indices (0-based) to remove.
+  # Layers with no channels to remove can be omitted.
+  mask:
+    backbone.layer1.0.gumbel_layer: []
+    backbone.layer1.1.gumbel_layer: []
+    backbone.layer1.2.gumbel_layer: []
+    backbone.layer2.0.gumbel_layer: []
+    backbone.layer2.1.gumbel_layer: []
+    backbone.layer2.2.gumbel_layer: []
+    backbone.layer3.0.gumbel_layer: []
+    backbone.layer3.1.gumbel_layer: []
+    backbone.layer3.2.gumbel_layer: []

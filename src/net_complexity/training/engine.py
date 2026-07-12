@@ -1954,7 +1954,32 @@ def run_training(
     )
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
-    model = instantiate(config.model).to(device)
+
+    channel_pruning_cfg = getattr(config, "channel_pruning", None)
+    pruning_enabled = (
+        channel_pruning_cfg is not None
+        and bool(getattr(channel_pruning_cfg, "enabled", True))
+    )
+    if pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
+        from net_complexity.models.channel_pruning import (
+            build_structurally_pruned_model_from_config,
+        )
+
+        model = build_structurally_pruned_model_from_config(config, channel_pruning_cfg)
+    else:
+        model = instantiate(config.model)
+        if pruning_enabled:
+            from net_complexity.models.channel_pruning import apply_channel_mask_from_config
+
+            apply_channel_mask_from_config(model, channel_pruning_cfg)
+
+    layer_skipping_cfg = getattr(config, "layer_skipping", None)
+    if layer_skipping_cfg is not None and bool(getattr(layer_skipping_cfg, "enabled", True)):
+        from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
+
+        apply_layer_skipping_from_config(model, layer_skipping_cfg)
+
+    model = model.to(device)
     lambda_warmup = _build_lambda_warmup(config.training_arguments)
     if lambda_warmup is not None and _adaptive_lambda_enabled(config.training_arguments):
         raise ValueError("adaptive_lambda and lambda_warmup cannot be enabled at the same time.")

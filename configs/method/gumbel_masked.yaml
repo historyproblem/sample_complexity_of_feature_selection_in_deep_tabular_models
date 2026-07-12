@@ -1,0 +1,26 @@
+# @package _global_
+
+# Masked Gumbel keeps the current Gumbel defaults, but uses a layer whose
+# channel_mask can permanently disable selected channels.
+optimizer:
+  gate_weight_decay_scale: null
+
+model:
+  gumbel_init_mode: auto
+  bypass_on_zero_lambda: true
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_gumbel_loss
+    _partial_: true
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.CIFARMaskedGumbelBasicBlock
+      _partial_: true
+      beta: 1.0
+      force_ones_mask: false
+      deterministic_soft_mask: false
+      deterministic_hard_mask: false
+      train_gate_mode: null
+      eval_gate_mode: null
+      gate_threshold: 0.5

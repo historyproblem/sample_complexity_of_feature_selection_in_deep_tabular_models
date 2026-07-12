@@ -678,6 +678,121 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
         return out
 
 
+class MaskedGumbelLayer(GumbelLayer):
+    """GumbelLayer with permanently disabled channels.
+
+    Disabled channels have zero gates, are excluded from the regularization
+    mean, and are reported as zero in get_selection_probs().
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+        disabled_channels: list[int] | None = None,
+    ):
+        super().__init__(
+            input_dim=input_dim,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+        )
+        channel_mask = torch.ones(input_dim)
+        for channel in disabled_channels or []:
+            if 0 <= int(channel) < input_dim:
+                channel_mask[int(channel)] = 0.0
+        self.register_buffer("channel_mask", channel_mask)
+
+    def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
+        gates = super().compute_gates(x)
+        mask = self.channel_mask.view(1, -1, *([1] * (len(x.shape) - 2)))
+        return gates * mask
+
+    def regularization_loss(self) -> torch.Tensor:
+        if self._bypass:
+            return self.logits.new_zeros(())
+        probs = F.softmax(self.logits, dim=1)[:, 1]
+        channel_mask = self.channel_mask.to(dtype=probs.dtype)
+        total_enabled = channel_mask.sum()
+        if float(total_enabled.item()) == 0.0:
+            return self.logits.new_zeros(())
+        return (probs * channel_mask).sum() / total_enabled
+
+    def get_selection_probs(self) -> torch.Tensor:
+        probs = super().get_selection_probs()
+        return probs * self.channel_mask.to(dtype=probs.dtype)
+
+
+class CIFARMaskedGumbelBasicBlock(CIFARBasicBlock):
+    """CIFAR BasicBlock with a MaskedGumbelLayer for per-channel pruning."""
+
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        stride=1,
+        option: str = "A",
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+        disabled_channels: list[int] | None = None,
+    ):
+        super().__init__(in_planes, planes, stride=stride, option=option)
+        self.gumbel_layer = MaskedGumbelLayer(
+            input_dim=planes * self.expansion,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+            disabled_channels=disabled_channels,
+        )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.gumbel_layer(out)
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+
+class SkippedCIFARBasicBlock(CIFARBasicBlock):
+    """CIFARBasicBlock whose residual branch is permanently disabled."""
+
+    def forward(self, x):
+        return F.relu(self.shortcut(x))
+
+
+class SkippedBottleneck(Bottleneck):
+    """Bottleneck whose residual branch is permanently disabled."""
+
+    def forward(self, x):
+        if self.i_downsample is not None:
+            x = self.i_downsample(x)
+        return self.relu(x)
+
+
 class CIFARSTGBasicBlock(CIFARBasicBlock):
     def __init__(
         self,

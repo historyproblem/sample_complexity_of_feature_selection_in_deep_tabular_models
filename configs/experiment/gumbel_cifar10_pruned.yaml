@@ -1,0 +1,50 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: cifar_resnet20
+  - /method: gumbel_masked
+  - /train: best_practice
+  - /optimizer: sgd_resnet20
+  - /scheduler: multistep_91_136
+  - /metrics: gumbel
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+# channel_pruning:
+#   enabled: true
+#   mode: threshold
+#   source_run_dir: outputs/runs/20260430_212142_gumbel_cifar10_lambda_1.47947
+#   threshold: 0.1
+#   last_n_epochs: null
+
+channel_pruning:
+  enabled: true
+  mode: explicit
+  mask:
+    backbone.layer1.0.gumbel_layer: []
+    backbone.layer1.1.gumbel_layer: []
+    backbone.layer1.2.gumbel_layer: []
+    backbone.layer2.0.gumbel_layer: [14, 23, 11, 10]
+    backbone.layer2.1.gumbel_layer: [14]
+    backbone.layer2.2.gumbel_layer: []
+    backbone.layer3.0.gumbel_layer: [38, 30, 31,  26, 34, 27, 33, 25, 32, 36, 24]
+    backbone.layer3.1.gumbel_layer: [31, 28, 27, 38, 34, 30, 24]
+    backbone.layer3.2.gumbel_layer: [36, 31, 30, 24, 38, 32, 39, 27, 26]
+
+
+mlflow:
+  run_name: "gumbel_cifar10_pruned_default_lambda_1.479470"
+  tags:
+    model_type: "CIFARResNet20_Gumbel_Pruned"
+    method: "gumbel_masked"
+    recipe: "gumbel_cifar10_pruned"

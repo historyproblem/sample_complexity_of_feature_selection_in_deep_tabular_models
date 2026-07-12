@@ -150,6 +150,10 @@ _COLLECTORS: dict[_CollectorSpec, BaseChannelHistoryCollector] = {
         backbone_target="net_complexity.wrappers.CIFARResNet20",
         block_target="net_complexity.wrappers.CIFARGumbelBasicBlock",
     ): CifarResNet20GumbelCollector(),
+    _CollectorSpec(
+        backbone_target="net_complexity.wrappers.CIFARResNet20",
+        block_target="net_complexity.wrappers.CIFARMaskedGumbelBasicBlock",
+    ): CifarResNet20GumbelCollector(),
 }
 
 

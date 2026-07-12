@@ -121,6 +121,56 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
     assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
 
 
+def test_masked_gumbel_method_matches_current_gumbel_defaults():
+    cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
+
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.bypass_on_zero_lambda is True
+    assert (
+        cfg.model.backbone.resnet_block._target_
+        == "net_complexity.wrappers.CIFARMaskedGumbelBasicBlock"
+    )
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.model.backbone.resnet_block.force_ones_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
+    assert cfg.model.backbone.resnet_block.train_gate_mode is None
+    assert cfg.model.backbone.resnet_block.eval_gate_mode is None
+    assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
+
+
+def test_channel_pruning_and_layer_skipping_experiment_configs():
+    soft_cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "gumbel_cifar10_pruned.yaml")
+    structural_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "gumbel_cifar10_structural_pruned.yaml"
+    )
+    layer_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_layer_skipping_cifar10.yaml"
+    )
+
+    assert soft_cfg.defaults[2] == {"/method": "gumbel_masked"}
+    assert soft_cfg.channel_pruning.enabled is True
+    assert soft_cfg.channel_pruning.mode == "explicit"
+    assert structural_cfg.channel_pruning.structural is True
+    assert structural_cfg.mlflow.tags.method == "structural_pruning"
+    assert layer_cfg.layer_skipping.enabled is True
+    assert layer_cfg.mlflow.tags.method == "layer_skipping"
+
+
+def test_cyclic_aig_configs_use_current_adaptive_lambda_defaults():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "cyclic_aig_resnet50_cifar10.yaml")
+
+    assert cfg.defaults[3] == {"/train": "aig_adaptive_lambda"}
+    assert cfg.model.lambda_coef == 1e-6
+    assert cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
+    assert "lambda_warmup" not in cfg.training_arguments
+    assert "adaptive_log_step_enabled" not in cfg.training_arguments.adaptive_lambda
+    assert cfg.mlflow.tags.gate_regularization == "l2_gate"
+
+
 def test_train_profiles_enable_batchnorm_recalibration_by_default():
     default_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "default.yaml")
     best_practice_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "best_practice.yaml")

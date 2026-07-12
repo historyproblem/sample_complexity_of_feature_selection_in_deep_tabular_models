@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: cifar_resnet20
+  - /method: gumbel_masked
+  - /train: best_practice
+  - /optimizer: sgd_resnet20
+  - /scheduler: multistep_91_136
+  - /metrics: gumbel
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+seed: 42
+
+model:
+  lambda_coef: 0.0
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+layer_skipping:
+  enabled: true
+  # List blocks to skip. Examples:
+  #   []                       - no skipping, full ResNet20
+  #   [layer3.2]               - skip last block of stage 3
+  #   [layer3.0, layer3.1, layer3.2] - skip all of stage 3
+  disabled_layers: []
+
+mlflow:
+  run_name: "resnet20_layer_skipping_baseline_cifar10"
+  tags:
+    model_type: "CIFARResNet20_LayerSkipping"
+    method: "gumbel_masked"
+    recipe: "resnet20_layer_skipping_cifar10"
