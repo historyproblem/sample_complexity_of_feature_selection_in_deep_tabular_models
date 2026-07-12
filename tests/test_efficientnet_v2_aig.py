@@ -131,7 +131,7 @@ def test_efficientnetv2_aig_experiment_config_points_to_cifar10_adaptive_lambda(
     assert cfg.training_arguments.adaptive_lambda.enabled is True
     assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
     assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
-    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.4835428695287496
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
     _assert_clean_adaptive_lambda_cfg(cfg)
     assert cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert cfg.dataloaders.taskname == "CIFAR10"

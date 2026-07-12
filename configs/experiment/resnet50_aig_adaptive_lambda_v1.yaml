@@ -31,7 +31,7 @@ training_arguments:
     baseline_history_dir: outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
     lambda_min: 1e-8
     lambda_max: 10.0
-    log_step_init: 0.4835428695287496
+    log_step_init: auto
     log_step_min: 0.04879016416943205
     soft_drop: 0.02
     hard_drop: 0.04
