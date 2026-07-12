@@ -1785,3 +1785,58 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_epochs_grid():
     ]
     assert [point["mlflow.tags.target_lambda"] for point in points] == ["10"] * 5
     assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+
+
+def test_resnet50_aig_regularization_ablation_grid_covers_gate_and_probability_losses():
+    experiment_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_aig_regularization_ablation_200ep.yaml"
+    )
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tuning" / "resnet50_aig_regularization_ablation_200ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_regularization_ablation_200ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_regularization_ablation_200ep"},
+        {"tuning": "resnet50_aig_regularization_ablation_200ep_ordered"},
+        "_self_",
+    ]
+    assert experiment_cfg.model.lambda_coef == 1e-6
+    assert experiment_cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
+    adaptive = experiment_cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.lambda_max == 10.0
+    assert adaptive.log_step_init == 0.4835428695287496
+    _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
+
+    assert tuning_cfg.training_arguments.num_epochs == 200
+    assert tuning_cfg.scheduler.T_max == 200
+    assert tuning_cfg.tuning.n_trials == 4
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [
+        point["model.backbone.resnet_block.gate_regularization"]
+        for point in points
+    ] == [
+        "l1_gate",
+        "l2_gate",
+        "l1_probability",
+        "l2_probability",
+    ]
+    assert [point["model.lambda_coef"] for point in points] == [1e-6] * 4
+    assert [point["mlflow.tags.regularization_signal"] for point in points] == [
+        "gate",
+        "gate",
+        "probability",
+        "probability",
+    ]
+    assert [point["mlflow.tags.regularization_norm"] for point in points] == [
+        "l1",
+        "l2",
+        "l1",
+        "l2",
+    ]
