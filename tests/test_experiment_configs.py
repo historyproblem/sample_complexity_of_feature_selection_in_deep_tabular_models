@@ -1835,3 +1835,52 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_epochs_grid():
     ]
     assert [point["mlflow.tags.target_lambda"] for point in points] == ["10"] * 5
     assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_no_lambda_max_init1em4_scaled_step_150ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_no_lambda_max_"
+                "init1em4_scaled_step_150ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 150
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.log_step_init == 0.23025850929940458
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.scheduler.T_max == 150
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert len(points) == 1
+    point = points[0]
+    assert point["model.lambda_coef"] == 0.0001
+    assert (
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        == 0.23025850929940458
+    )
+    assert point["mlflow.tags.initial_lambda"] == "0.0001"
+    assert point["mlflow.tags.target_lambda"] == "10"
+    assert point["mlflow.tags.target_growth_steps"] == "50"
+    assert point["mlflow.tags.lambda_multiplier"] == "1.25892541179"
+    assert point["mlflow.tags.lambda_max"] == "none"
+    assert point["mlflow.tags.num_epochs"] == "150"
