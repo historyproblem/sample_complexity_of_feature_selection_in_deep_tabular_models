@@ -1884,3 +1884,71 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep():
     assert point["mlflow.tags.lambda_multiplier"] == "1.25892541179"
     assert point["mlflow.tags.lambda_max"] == "none"
     assert point["mlflow.tags.num_epochs"] == "150"
+
+
+def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_init1em4_scaled_step_120ep_repeats7_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_120ep_repeats7.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_"
+                "init1em4_scaled_step_120ep_repeats7_ordered"
+            )
+        },
+        "_self_",
+    ]
+
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 120
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.log_step_init == 0.28782313662425574
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.scheduler.T_max == 120
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 2
+    assert tuning_cfg.tuning.repeats_per_trial == 7
+    assert tuning_cfg.tuning.seed_base == 42
+    assert tuning_cfg.tuning.seed_stride == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [0.0001, 0.0001]
+    assert [
+        point["model.backbone.resnet_block.gate_regularization"]
+        for point in points
+    ] == ["l1_probability", "l1_activation"]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in points
+    ] == [0.28782313662425574, 0.28782313662425574]
+    assert [point["mlflow.tags.regularization_target"] for point in points] == [
+        "p",
+        "g",
+    ]
+    assert [point["mlflow.tags.gate_regularization"] for point in points] == [
+        "l1_probability",
+        "l1_activation",
+    ]
+    assert [point["mlflow.tags.target_growth_steps"] for point in points] == [
+        "40",
+        "40",
+    ]
+    assert [point["mlflow.tags.lambda_multiplier"] for point in points] == [
+        "1.33352143216",
+        "1.33352143216",
+    ]
+    assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
+    assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"7"}

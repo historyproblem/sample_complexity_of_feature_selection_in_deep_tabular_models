@@ -1,0 +1,69 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 120
+  adaptive_lambda:
+    enabled: true
+    lambda_max: null
+    update_every_epochs: 2
+    log_step_init: 0.28782313662425574
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 120
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_init1em4_scaled_step_120ep_repeats7_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 2
+  repeats_per_trial: 7
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      model.backbone.resnet_block.gate_regularization: l1_probability
+      training_arguments.adaptive_lambda.log_step_init: 0.28782313662425574
+      mlflow.run_name: resnet50_aig_adaptive_lambda_l1_p_no_lambda_max_init1em4_scaled_step_120ep_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_l1_p_no_lambda_max_init1em4_scaled_step_120ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.regularization_target: "p"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "40"
+      mlflow.tags.lambda_multiplier: "1.33352143216"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "120"
+      mlflow.tags.repeats_per_trial: "7"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+    - model.lambda_coef: 0.0001
+      model.backbone.resnet_block.gate_regularization: l1_activation
+      training_arguments.adaptive_lambda.log_step_init: 0.28782313662425574
+      mlflow.run_name: resnet50_aig_adaptive_lambda_l1_g_no_lambda_max_init1em4_scaled_step_120ep_temp_${model.backbone.resnet_block.temperature}
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_l1_g_no_lambda_max_init1em4_scaled_step_120ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.gate_regularization: "l1_activation"
+      mlflow.tags.regularization_target: "g"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "40"
+      mlflow.tags.lambda_multiplier: "1.33352143216"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "120"
+      mlflow.tags.repeats_per_trial: "7"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
