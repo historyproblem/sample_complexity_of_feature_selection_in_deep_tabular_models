@@ -11,3 +11,4 @@ model:
     resnet_block:
       _target_: net_complexity.wrappers.AIGBottleneckLayer
       _partial_: true
+      gate_regularization: l2_gate

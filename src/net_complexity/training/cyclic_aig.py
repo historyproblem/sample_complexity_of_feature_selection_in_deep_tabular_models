@@ -217,6 +217,12 @@ def _set_disabled_layers(cfg: DictConfig, disabled_layers: list[str]) -> None:
     OmegaConf.update(cfg, "layer_skipping.disabled_layers", list(disabled_layers), merge=False, force_add=True)
 
 
+def _set_num_epochs(cfg: DictConfig, num_epochs: int) -> None:
+    OmegaConf.update(cfg, "training_arguments.num_epochs", int(num_epochs), merge=False)
+    if OmegaConf.select(cfg, "scheduler.T_max") is not None:
+        OmegaConf.update(cfg, "scheduler.T_max", int(num_epochs), merge=False)
+
+
 def _build_cycle_config(
     base_config: DictConfig,
     cycle_idx: int,
@@ -281,6 +287,7 @@ def _build_final_config(
     )
     _set_run_name(cfg, f"{base_name}_final")
 
+    # Re-enable MLflow for the final (summary) run
     if hasattr(cfg, "mlflow"):
         OmegaConf.update(cfg, "mlflow.enabled", True, merge=False)
 

@@ -7,6 +7,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS_DIR = REPO_ROOT / "configs"
 
 
+def _assert_clean_aig_adaptive_lambda(training_arguments) -> None:
+    adaptive = training_arguments.adaptive_lambda
+    assert "lambda_warmup" not in training_arguments
+    assert "adaptive_log_step_enabled" not in adaptive
+    assert "prune_rate_low_per_epoch" not in adaptive
+    assert "prune_rate_high_per_epoch" not in adaptive
+    assert "log_step_boost_factor" not in adaptive
+    assert "log_step_max_boost_level" not in adaptive
+    assert "adaptive_log_step_max_epoch" not in adaptive
+    assert "recovery" not in adaptive
+    assert "collapse_guard" not in training_arguments
+
+
 def test_gumbel_cifar10_uses_article_training_stack_with_original_lambda():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "gumbel_cifar10.yaml")
 
@@ -108,6 +121,56 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
     assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
 
 
+def test_masked_gumbel_method_matches_current_gumbel_defaults():
+    cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
+
+    assert cfg.optimizer.gate_weight_decay_scale is None
+    assert cfg.model.gumbel_init_mode == "auto"
+    assert cfg.model.bypass_on_zero_lambda is True
+    assert (
+        cfg.model.backbone.resnet_block._target_
+        == "net_complexity.wrappers.CIFARMaskedGumbelBasicBlock"
+    )
+    assert cfg.model.backbone.resnet_block.beta == 1.0
+    assert cfg.model.backbone.resnet_block.force_ones_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_soft_mask is False
+    assert cfg.model.backbone.resnet_block.deterministic_hard_mask is False
+    assert cfg.model.backbone.resnet_block.train_gate_mode is None
+    assert cfg.model.backbone.resnet_block.eval_gate_mode is None
+    assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
+
+
+def test_channel_pruning_and_layer_skipping_experiment_configs():
+    soft_cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "gumbel_cifar10_pruned.yaml")
+    structural_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "gumbel_cifar10_structural_pruned.yaml"
+    )
+    layer_cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_layer_skipping_cifar10.yaml"
+    )
+
+    assert soft_cfg.defaults[2] == {"/method": "gumbel_masked"}
+    assert soft_cfg.channel_pruning.enabled is True
+    assert soft_cfg.channel_pruning.mode == "explicit"
+    assert structural_cfg.channel_pruning.structural is True
+    assert structural_cfg.mlflow.tags.method == "structural_pruning"
+    assert layer_cfg.layer_skipping.enabled is True
+    assert layer_cfg.mlflow.tags.method == "layer_skipping"
+
+
+def test_cyclic_aig_configs_use_current_adaptive_lambda_defaults():
+    cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "cyclic_aig_resnet50_cifar10.yaml")
+
+    assert cfg.defaults[3] == {"/train": "aig_adaptive_lambda"}
+    assert cfg.model.lambda_coef == 1e-6
+    assert cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
+    assert "lambda_warmup" not in cfg.training_arguments
+    assert "adaptive_log_step_enabled" not in cfg.training_arguments.adaptive_lambda
+    assert cfg.mlflow.tags.gate_regularization == "l2_gate"
+
+
 def test_train_profiles_enable_batchnorm_recalibration_by_default():
     default_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "default.yaml")
     best_practice_cfg = OmegaConf.load(CONFIGS_DIR / "train" / "best_practice.yaml")
@@ -156,6 +219,20 @@ def test_train_profiles_enable_batchnorm_recalibration_by_default():
         assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
         assert cfg.training_arguments.batchnorm_recalibration.train_gate_mode == "deterministic_hard"
         assert cfg.training_arguments.batchnorm_recalibration.eval_gate_mode == "deterministic_hard"
+
+
+def test_aig_adaptive_lambda_train_profile_keeps_only_bn_recalibration_extra():
+    cfg = OmegaConf.load(CONFIGS_DIR / "train" / "aig_adaptive_lambda.yaml")
+
+    assert cfg.training_arguments.adaptive_lambda.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.warmup_epochs == 0
+    assert cfg.training_arguments.adaptive_lambda.update_every_epochs == 2
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
+    _assert_clean_aig_adaptive_lambda(cfg.training_arguments)
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.num_batches == 200
+    assert cfg.training_arguments.batchnorm_recalibration.reset_running_stats is True
 
 
 def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
@@ -1513,7 +1590,7 @@ def test_tinyimagenet_resnet50_adaptive_lambda_init001_config_runs_single_batch1
     assert point["mlflow.tags.batch_size"] == "128"
 
 
-def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
+def test_resnet50_aig_adaptive_lambda_config_uses_clean_adaptive_profile():
     experiment_cfg = OmegaConf.load(
         CONFIGS_DIR / "experiment" / "resnet50_aig_adaptive_lambda_v1.yaml"
     )
@@ -1528,7 +1605,7 @@ def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
         {"/data": "cifar10_best_practice"},
         {"/model": "resnet50"},
         {"/method": "aig"},
-        {"/train": "resnet50_best_practice"},
+        {"/train": "aig_adaptive_lambda"},
         {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "aig"},
@@ -1536,17 +1613,22 @@ def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
         {"/tracking": "default"},
         "_self_",
     ]
-    assert experiment_cfg.model.lambda_coef == 0.01
+    assert experiment_cfg.model.lambda_coef == 1e-6
     assert experiment_cfg.model.bypass_on_zero_lambda is False
+    assert experiment_cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
     adaptive_cfg = experiment_cfg.training_arguments.adaptive_lambda
     assert adaptive_cfg.enabled is True
     assert adaptive_cfg.baseline_history_dir.startswith(
         "outputs/baselines/resnet50_aig_cifar10_no_pruning"
     )
-    assert adaptive_cfg.lambda_max == 1.0
-    assert adaptive_cfg.recovery.enabled is False
+    assert adaptive_cfg.lambda_max == 10.0
+    assert adaptive_cfg.log_step_init == "auto"
+    _assert_clean_aig_adaptive_lambda(experiment_cfg.training_arguments)
     assert experiment_cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert experiment_cfg.mlflow.tags.method == "aig"
+    assert experiment_cfg.mlflow.tags.gate_regularization == "l2_gate"
+    assert experiment_cfg.mlflow.tags.initial_lambda == "1e-6"
+    assert experiment_cfg.mlflow.tags.target_lambda == "10"
 
     assert tune_cfg.defaults == [
         {"experiment": "resnet50_aig_adaptive_lambda_v1"},
@@ -1555,7 +1637,7 @@ def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
     ]
     assert tuning_cfg.training_arguments.num_epochs == 200
     assert tuning_cfg.training_arguments.adaptive_lambda.enabled is True
-    assert tuning_cfg.training_arguments.adaptive_lambda.recovery.enabled is False
+    assert "recovery" not in tuning_cfg.training_arguments.adaptive_lambda
     assert tuning_cfg.scheduler.T_max == 200
     assert tuning_cfg.tuning.n_trials == 1
     assert tuning_cfg.tuning.points_in_order is True
@@ -1565,9 +1647,9 @@ def test_resnet50_aig_adaptive_lambda_config_disables_gumbel_recovery():
     point = points[0]
     assert point["model.lambda_coef"] == 0.01
     assert point["training_arguments.adaptive_lambda.enabled"] is True
-    assert point["training_arguments.adaptive_lambda.recovery.enabled"] is False
+    assert "training_arguments.adaptive_lambda.recovery.enabled" not in point
     assert point["mlflow.tags.optimizer"] == "AdamW"
-    assert point["mlflow.tags.recovery"] == "disabled"
+    assert "mlflow.tags.recovery" not in point
 
 
 def test_resnet50_aig_adaptive_lambda_no_extra_grid_runs_requested_initial_lambdas():
@@ -1591,10 +1673,10 @@ def test_resnet50_aig_adaptive_lambda_no_extra_grid_runs_requested_initial_lambd
         "_self_",
     ]
     assert tuning_cfg.training_arguments.adaptive_lambda.enabled is True
-    assert tuning_cfg.training_arguments.adaptive_lambda.adaptive_log_step_enabled is False
-    assert tuning_cfg.training_arguments.adaptive_lambda.recovery.enabled is False
+    assert "adaptive_log_step_enabled" not in tuning_cfg.training_arguments.adaptive_lambda
+    assert "recovery" not in tuning_cfg.training_arguments.adaptive_lambda
     assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
-    assert tuning_cfg.training_arguments.collapse_guard.enabled is False
+    assert "collapse_guard" not in tuning_cfg.training_arguments
     assert "restart_guard" not in tuning_cfg.tuning
     assert tuning_cfg.tuning.mode == "grid"
     assert tuning_cfg.tuning.n_trials == 4
@@ -1613,3 +1695,260 @@ def test_resnet50_aig_adaptive_lambda_no_extra_grid_runs_requested_initial_lambd
         "1e-2",
         "1",
     ]
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_recipe_uses_step150():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "experiment"
+        / "resnet50_aig_adaptive_lambda_init1em8_step150_no_lambda_max_200ep.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"/data": "cifar10_best_practice"},
+        {"/model": "resnet50"},
+        {"/method": "aig"},
+        {"/train": "aig_adaptive_lambda"},
+        {"/optimizer": "adamw"},
+        {"/scheduler": "cosine_200"},
+        {"/metrics": "aig"},
+        {"/run_history": "valid_accuracy_max"},
+        {"/tracking": "default"},
+        "_self_",
+    ]
+    assert cfg.model.lambda_coef == 1e-8
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.lambda_min == 1e-8
+    assert adaptive.lambda_max is None
+    assert adaptive.log_step_init == 0.4054651081081644
+    _assert_clean_aig_adaptive_lambda(cfg.training_arguments)
+    assert cfg.training_arguments.num_epochs == 200
+    assert cfg.scheduler.T_max == 200
+    assert cfg.mlflow.tags.initial_lambda == "1e-8"
+    assert cfg.mlflow.tags.lambda_multiplier == "1.5"
+    assert cfg.mlflow.tags.lambda_max == "none"
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_init_grid_runs_requested_initial_lambdas():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_no_lambda_max_init_grid_5_1_1em1_1em2_1em3_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_adaptive_lambda_no_lambda_max_init_grid.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_init1em8_step150_no_lambda_max_200ep"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_no_lambda_max_"
+                "init_grid_5_1_1em1_1em2_1em3_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.log_step_init == 0.4054651081081644
+    assert adaptive.update_every_epochs == 2
+    assert "adaptive_log_step_enabled" not in adaptive
+    assert "recovery" not in adaptive
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert "collapse_guard" not in tuning_cfg.training_arguments
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 5
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [
+        5.0,
+        1.0,
+        0.1,
+        0.01,
+        0.001,
+    ]
+    assert [point["mlflow.tags.initial_lambda"] for point in points] == [
+        "5",
+        "1",
+        "0.1",
+        "0.01",
+        "0.001",
+    ]
+    assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_epochs_grid():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_no_lambda_max_init1em4_scaled_step_epochs_50_70_90_140_200_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_epochs.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_init1em8_step150_no_lambda_max_200ep"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_no_lambda_max_"
+                "init1em4_scaled_step_epochs_50_70_90_140_200_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert "adaptive_log_step_enabled" not in adaptive
+    assert "recovery" not in adaptive
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert "collapse_guard" not in tuning_cfg.training_arguments
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 5
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [1e-4] * 5
+    assert [point["training_arguments.num_epochs"] for point in points] == [
+        50,
+        70,
+        90,
+        140,
+        200,
+    ]
+    assert [point["scheduler.T_max"] for point in points] == [50, 70, 90, 140, 200]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in points
+    ] == [
+        0.6907755278982136,
+        0.49341109135586697,
+        0.38376418216567426,
+        0.24670554567793349,
+        0.1726938819745534,
+    ]
+    assert [point["mlflow.tags.target_lambda"] for point in points] == ["10"] * 5
+    assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+
+
+def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_no_lambda_max_init1em4_scaled_step_150ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_no_lambda_max_"
+                "init1em4_scaled_step_150ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 150
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.log_step_init == 0.23025850929940458
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.scheduler.T_max == 150
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert len(points) == 1
+    point = points[0]
+    assert point["model.lambda_coef"] == 0.0001
+    assert (
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        == 0.23025850929940458
+    )
+    assert point["mlflow.tags.initial_lambda"] == "0.0001"
+    assert point["mlflow.tags.target_lambda"] == "10"
+    assert point["mlflow.tags.target_growth_steps"] == "50"
+    assert point["mlflow.tags.lambda_multiplier"] == "1.25892541179"
+    assert point["mlflow.tags.lambda_max"] == "none"
+    assert point["mlflow.tags.num_epochs"] == "150"
+
+
+def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_init1em4_scaled_step_120ep_repeats7_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_120ep_repeats7.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_l1_p_vs_g_no_lambda_max_"
+                "init1em4_scaled_step_120ep_repeats7_ordered"
+            )
+        },
+        "_self_",
+    ]
+
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 120
+    assert adaptive.enabled is True
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.log_step_init == 0.28782313662425574
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.scheduler.T_max == 120
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 2
+    assert tuning_cfg.tuning.repeats_per_trial == 7
+    assert tuning_cfg.tuning.seed_base == 42
+    assert tuning_cfg.tuning.seed_stride == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [0.0001, 0.0001]
+    assert [
+        point["model.backbone.resnet_block.gate_regularization"]
+        for point in points
+    ] == ["l1_probability", "l1_activation"]
+    assert [
+        point["training_arguments.adaptive_lambda.log_step_init"]
+        for point in points
+    ] == [0.28782313662425574, 0.28782313662425574]
+    assert [point["mlflow.tags.regularization_target"] for point in points] == [
+        "p",
+        "g",
+    ]
+    assert [point["mlflow.tags.gate_regularization"] for point in points] == [
+        "l1_probability",
+        "l1_activation",
+    ]
+    assert [point["mlflow.tags.target_growth_steps"] for point in points] == [
+        "40",
+        "40",
+    ]
+    assert [point["mlflow.tags.lambda_multiplier"] for point in points] == [
+        "1.33352143216",
+        "1.33352143216",
+    ]
+    assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
+    assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"7"}

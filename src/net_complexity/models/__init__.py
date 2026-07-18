@@ -1,10 +1,13 @@
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet, LambdaLayer
+from .aig import AIGBlockGate
+from .efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .feature_selection import (
     AIGBottleneckLayer,
     AIGRegularizationLoss,
     PrunedBottleneck,
     PrunedCIFARBasicBlock,
     CIFARGumbelBasicBlock,
+    CIFARMaskedGumbelBasicBlock,
     CIFARSTGBasicBlock,
     CIFARResNet20,
     CIFARResNet32,
@@ -16,9 +19,12 @@ from .feature_selection import (
     GumbelBottleneckLayer,
     GumbelLayer,
     GumbleSoftmax,
+    MaskedGumbelLayer,
     ResNet50,
     ResNet101,
     ResNet152,
+    SkippedBottleneck,
+    SkippedCIFARBasicBlock,
     STGBasicBlock,
     STGBottleneckLayer,
     STGChannelLayer,
@@ -34,18 +40,26 @@ from .feature_selection import (
     parse_AIG_activations,
     replace_layers_by_regex,
 )
+from .layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .outputs import ClassifModelOutput
+from .pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 from .resnet import Block, Bottleneck, ResNet
 
 __all__ = [
+    "AIGBlockGate",
     "AIGBottleneckLayer",
     "AIGRegularizationLoss",
     "PrunedBottleneck",
     "PrunedCIFARBasicBlock",
+    "AIGEfficientNetV2",
+    "AIGEfficientNetV2M",
+    "AIGEfficientNetV2S",
     "Block",
     "Bottleneck",
     "CIFARBasicBlock",
+    "CIFARPrunedGumbelBasicBlock",
     "CIFARGumbelBasicBlock",
+    "CIFARMaskedGumbelBasicBlock",
     "CIFARSTGBasicBlock",
     "CIFARResNet",
     "CIFARResNet20",
@@ -61,10 +75,14 @@ __all__ = [
     "GumbelLayer",
     "GumbleSoftmax",
     "LambdaLayer",
+    "MaskedGumbelLayer",
+    "PrunedCIFARResNet",
     "ResNet",
     "ResNet50",
     "ResNet101",
     "ResNet152",
+    "SkippedBottleneck",
+    "SkippedCIFARBasicBlock",
     "STGBasicBlock",
     "STGBottleneckLayer",
     "STGChannelLayer",
@@ -79,4 +97,6 @@ __all__ = [
     "get_stg_modules",
     "parse_AIG_activations",
     "replace_layers_by_regex",
+    "apply_layer_skipping",
+    "apply_layer_skipping_from_config",
 ]

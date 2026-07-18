@@ -23,6 +23,8 @@ from .models.feature_selection import (
     ResNet50,
     ResNet101,
     ResNet152,
+    SkippedBottleneck,
+    SkippedCIFARBasicBlock,
     STGBasicBlock,
     STGBottleneckLayer,
     STGChannelLayer,
@@ -38,6 +40,10 @@ from .models.feature_selection import (
     parse_AIG_activations,
     replace_layers_by_regex,
 )
+from .models.aig import AIGBlockGate
+from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
+from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
+from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
 __all__ = [
     "AIGRegularizationLoss",
@@ -47,7 +53,12 @@ __all__ = [
     "PrunedCIFARResNet",
     "apply_layer_skipping",
     "apply_layer_skipping_from_config",
+    "AIGBlockGate",
     "AIGBottleneckLayer",
+    "AIGEfficientNetV2",
+    "AIGEfficientNetV2M",
+    "AIGEfficientNetV2S",
+    "CIFARPrunedGumbelBasicBlock",
     "CIFARGumbelBasicBlock",
     "CIFARMaskedGumbelBasicBlock",
     "CIFARSTGBasicBlock",
@@ -63,9 +74,12 @@ __all__ = [
     "GumbelLayer",
     "GumbleSoftmax",
     "MaskedGumbelLayer",
+    "PrunedCIFARResNet",
     "ResNet50",
     "ResNet101",
     "ResNet152",
+    "SkippedBottleneck",
+    "SkippedCIFARBasicBlock",
     "STGBasicBlock",
     "STGBottleneckLayer",
     "STGChannelLayer",
@@ -80,4 +94,6 @@ __all__ = [
     "get_stg_modules",
     "parse_AIG_activations",
     "replace_layers_by_regex",
+    "apply_layer_skipping",
+    "apply_layer_skipping_from_config",
 ]

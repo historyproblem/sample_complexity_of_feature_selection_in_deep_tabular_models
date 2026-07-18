@@ -1,0 +1,110 @@
+# @package _global_
+
+training_arguments:
+  adaptive_lambda:
+    enabled: true
+    lambda_max: null
+    update_every_epochs: 2
+  batchnorm_recalibration:
+    enabled: false
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_epochs_50_70_90_140_200_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 5
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      training_arguments.num_epochs: 50
+      training_arguments.adaptive_lambda.log_step_init: 0.6907755278982136
+      scheduler.T_max: 50
+      mlflow.run_name: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_50ep
+      mlflow.tags.recipe: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_50ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "16.6666666667"
+      mlflow.tags.lambda_multiplier: "1.99526231497"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "50"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+      mlflow.tags.flops_logging: "enabled"
+    - model.lambda_coef: 0.0001
+      training_arguments.num_epochs: 70
+      training_arguments.adaptive_lambda.log_step_init: 0.49341109135586697
+      scheduler.T_max: 70
+      mlflow.run_name: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_70ep
+      mlflow.tags.recipe: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_70ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "23.3333333333"
+      mlflow.tags.lambda_multiplier: "1.63789370695"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "70"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+      mlflow.tags.flops_logging: "enabled"
+    - model.lambda_coef: 0.0001
+      training_arguments.num_epochs: 90
+      training_arguments.adaptive_lambda.log_step_init: 0.38376418216567426
+      scheduler.T_max: 90
+      mlflow.run_name: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_90ep
+      mlflow.tags.recipe: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_90ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "30"
+      mlflow.tags.lambda_multiplier: "1.46779926762"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "90"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+      mlflow.tags.flops_logging: "enabled"
+    - model.lambda_coef: 0.0001
+      training_arguments.num_epochs: 140
+      training_arguments.adaptive_lambda.log_step_init: 0.24670554567793349
+      scheduler.T_max: 140
+      mlflow.run_name: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_140ep
+      mlflow.tags.recipe: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_140ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "46.6666666667"
+      mlflow.tags.lambda_multiplier: "1.279802214"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "140"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+      mlflow.tags.flops_logging: "enabled"
+    - model.lambda_coef: 0.0001
+      training_arguments.num_epochs: 200
+      training_arguments.adaptive_lambda.log_step_init: 0.1726938819745534
+      scheduler.T_max: 200
+      mlflow.run_name: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_200ep
+      mlflow.tags.recipe: efficientnetv2_m_aig_adaptive_lambda_init1em4_scaled_step_200ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.target_lambda: "10"
+      mlflow.tags.target_growth_steps: "66.6666666667"
+      mlflow.tags.lambda_multiplier: "1.18850222744"
+      mlflow.tags.lambda_max: "none"
+      mlflow.tags.num_epochs: "200"
+      mlflow.tags.update_every_epochs: "2"
+      mlflow.tags.adaptive_lambda: "enabled"
+      mlflow.tags.flops_logging: "enabled"

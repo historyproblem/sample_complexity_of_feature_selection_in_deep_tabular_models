@@ -6,6 +6,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from net_complexity.metrics.aig import AIGActivationsMetric
+from net_complexity.models.aig import AIGBlockGate
 from net_complexity.models.feature_selection import (
     AIGBottleneckLayer,
     ClassificationFeatureSelectionWrapper,
@@ -37,6 +38,37 @@ def test_resnet50_accepts_partial_aig_blocks_and_exposes_gate_activations():
     assert isinstance(reg_loss, torch.Tensor)
     assert reg_loss.ndim == 0
     assert reg_loss.item() >= 0
+
+
+def test_aig_gate_uses_two_logits_per_block_and_supports_l1_probability_loss():
+    gate = AIGBlockGate(
+        in_channels=4,
+        hidden_channels=2,
+        keep_prob_init=0.8,
+        regularization="l1_probability",
+    )
+    gate.eval()
+
+    values = gate(torch.randn(3, 4, 5, 5))
+
+    assert values.shape == (3, 1, 1, 1)
+    assert gate.logits.shape == (3, 2, 1, 1)
+    assert gate.probabilities.shape == (3, 2, 1, 1)
+    torch.testing.assert_close(
+        gate.regularization_loss(),
+        gate.keep_probabilities.mean(),
+    )
+
+
+def test_aig_gate_l2_activation_loss_matches_legacy_target_zero_penalty():
+    gate = AIGBlockGate(in_channels=4, regularization="l2_activation")
+    gate.activations = torch.tensor([[[[1.0]]], [[[0.0]]]])
+    gate.keep_probabilities = torch.tensor([[[[0.9]]], [[[0.2]]]])
+
+    torch.testing.assert_close(
+        gate.regularization_loss(),
+        gate.activations.mean() ** 2,
+    )
 
 
 def test_resnet50_supports_cifar_style_stem_without_maxpool():
@@ -163,3 +195,24 @@ def test_aig_adaptive_lambda_rejects_gumbel_open_bias_recovery():
 
     with pytest.raises(ValueError, match="AIG adaptive lambda requires"):
         _build_adaptive_lambda(training_arguments, wrapper)
+
+
+def test_aig_adaptive_lambda_allows_clean_config_without_recovery_block():
+    backbone = nn.Sequential(AIGBottleneckLayer(in_planes=64, planes=64))
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.01,
+        bypass_on_zero_lambda=False,
+    )
+    training_arguments = OmegaConf.create(
+        {
+            "adaptive_lambda": {
+                "enabled": True,
+            },
+        }
+    )
+
+    controller = _build_adaptive_lambda(training_arguments, wrapper)
+
+    assert controller is not None
+    assert controller.recovery_config.enabled is False

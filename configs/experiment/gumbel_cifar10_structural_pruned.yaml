@@ -1,3 +1,5 @@
+# @package _global_
+
 defaults:
   - /data: cifar10_best_practice
   - /model: cifar_resnet20
@@ -5,7 +7,7 @@ defaults:
   - /train: best_practice
   - /optimizer: sgd_resnet20
   - /scheduler: multistep_91_136
-  - /metrics: classification 
+  - /metrics: classification
   - /run_history: valid_accuracy_max
   - /tracking: default
   - _self_
@@ -17,6 +19,7 @@ model:
 
 channel_pruning:
   enabled: true
+  structural: true
   mode: explicit
   mask:
     backbone.layer1.0.gumbel_layer: []

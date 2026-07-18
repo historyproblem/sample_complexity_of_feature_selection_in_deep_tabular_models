@@ -11,6 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch.nn as nn
+from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .feature_selection import MaskedGumbelLayer
@@ -141,9 +142,9 @@ def apply_channel_mask_from_config(model: nn.Module, cfg: DictConfig) -> None:
     """Apply channel masking from the channel_pruning config section.
 
     Supported modes:
-      threshold — read channel_history.csv.gz from source_run_dir and disable
+      threshold - read channel_history.csv.gz from source_run_dir and disable
                   channels with mean selection_prob < threshold.
-      explicit  — specify mask as a dict {layer_name: [channel_indices]} in YAML.
+      explicit  - specify mask as a dict {layer_name: [channel_indices]} in YAML.
     """
     mode = str(getattr(cfg, "mode", "threshold")).lower()
 
@@ -174,11 +175,11 @@ def apply_channel_mask_from_config(model: nn.Module, cfg: DictConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Structural pruning — builds a new physically pruned model
+# Structural pruning builds a new physically pruned model.
 # ---------------------------------------------------------------------------
 
-# channel_history layer name → PrunedCIFARResNet pruning_spec key
-# "backbone.layer2.0.gumbel_layer"  →  "layer2.0"
+# channel_history layer name -> PrunedCIFARResNet pruning_spec key
+# "backbone.layer2.0.gumbel_layer" -> "layer2.0"
 _LAYER_NAME_RE = re.compile(
     r"(?:backbone\.)?(?P<key>layer\d+\.\d+)\.gumbel_layer$"
 )
@@ -238,10 +239,8 @@ def build_structurally_pruned_model_from_config(
     whose residual branches are physically narrowed to the active channels.
 
     The returned model has the same interface as the standard training model:
-    forward(X, y) → ClassifModelOutput.
+    forward(X, y) -> ClassifModelOutput.
     """
-    import torch.nn as nn_
-
     from .feature_selection import ClassificationFeatureSelectionWrapper
     from .pruned_resnet import PrunedCIFARResNet
 
@@ -250,7 +249,7 @@ def build_structurally_pruned_model_from_config(
 
     if not pruning_spec:
         print(
-            "[channel_pruning] WARNING: no prunable layers found in mask — "
+            "[channel_pruning] WARNING: no prunable layers found in mask - "
             "PrunedCIFARResNet will be equivalent to the full model."
         )
 
@@ -278,6 +277,8 @@ def build_structurally_pruned_model_from_config(
     )
 
     lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)
+    criterion_cfg = OmegaConf.select(config, "model.criterion")
+    criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
     # Log a summary of the pruning
     total_disabled = sum(len(v) for v in pruning_spec.values())
@@ -290,6 +291,6 @@ def build_structurally_pruned_model_from_config(
     return ClassificationFeatureSelectionWrapper(
         backbone=backbone,
         lambda_coef=lambda_coef,
-        criterion=nn_.CrossEntropyLoss(),
+        criterion=criterion,
         regularization_loss=lambda m: 0,
     )

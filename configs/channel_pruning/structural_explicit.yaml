@@ -1,3 +1,5 @@
+# @package _global_
+
 channel_pruning:
   enabled: true
   structural: true          # Build a new narrowed model (not soft mask)

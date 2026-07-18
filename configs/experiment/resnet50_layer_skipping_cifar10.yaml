@@ -23,19 +23,19 @@ model:
 layer_skipping:
   enabled: true
   # List blocks to skip. Examples:
-  #   []                        — no skipping, full ResNet20
-  #   [layer3.2]                — skip last block of stage 3
-  #   [layer3.0, layer3.1, layer3.2]  — skip all of stage 3
+  #   []                       - no skipping, full ResNet50
+  #   [layer3.2]               - skip one block
+  #   [layer3.0, layer3.1, layer3.2] - skip several blocks
   disabled_layers: [layer4.0, layer4.1, layer4.2, layer3.3, layer3.2, layer3.5, layer3.4, layer2.3, layer2.2, layer2.1, layer2.0, layer1.0, layer1.1, layer1.2]
 
 run_history:
   log_gate_history: true
 
 mlflow:
-  enabled: True
+  enabled: true
   experiment_name: feature_selection_experiment
   run_name: "resnet50_on_cifar10_drop_random_layers"
   tags:
-    model_type: "ResNet50_pruned"
-    method: "aig"
+    model_type: "ResNet50_LayerSkipping"
+    method: "layer_skipping"
     recipe: "resnet50_on_cifar10_drop_random_layers"

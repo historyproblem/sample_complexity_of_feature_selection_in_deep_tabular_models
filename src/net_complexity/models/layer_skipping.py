@@ -23,8 +23,9 @@ Config format::
         - layer1.0
         - layer2.1
 
-Layer naming: ``layerN.B`` where N is the stage index (1–4) and B is the
-zero-based block index within that stage.
+Layer naming follows the CIFARResNet convention: ``layerN.B`` where N is
+the stage index (1-3) and B is the zero-based block index within that stage.
+For ResNet20 each stage has 3 blocks (B in {0, 1, 2}).
 """
 
 from __future__ import annotations
@@ -82,7 +83,6 @@ def _replace_block(backbone: nn.Module, key: str, mode: str) -> bool:
         return False
 
     old_block = layer[block_idx]
-
     if isinstance(old_block, CIFARBasicBlock):
         in_planes = old_block.conv1.in_channels
         planes = old_block.conv2.out_channels

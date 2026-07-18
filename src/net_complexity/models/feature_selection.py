@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .aig import AIGBlockGate
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
@@ -696,19 +697,34 @@ class MaskedGumbelLayer(GumbelLayer):
         self,
         input_dim: int,
         temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
     ):
-        super().__init__(input_dim, temperature)
+        super().__init__(
+            input_dim=input_dim,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+        )
         channel_mask = torch.ones(input_dim)
-        if disabled_channels:
-            for ch in disabled_channels:
-                if 0 <= ch < input_dim:
-                    channel_mask[ch] = 0.0
+        for channel in disabled_channels or []:
+            if 0 <= int(channel) < input_dim:
+                channel_mask[int(channel)] = 0.0
         self.register_buffer("channel_mask", channel_mask)
 
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         gates = super().compute_gates(x)
-        # channel_mask: [C] → reshape to [1, C, 1, 1, ...] for broadcast
         mask = self.channel_mask.view(1, -1, *([1] * (len(x.shape) - 2)))
         return gates * mask
 
@@ -739,12 +755,26 @@ class CIFARMaskedGumbelBasicBlock(CIFARBasicBlock):
         stride=1,
         option: str = "A",
         temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
     ):
         super().__init__(in_planes, planes, stride=stride, option=option)
         self.gumbel_layer = MaskedGumbelLayer(
             input_dim=planes * self.expansion,
             temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
             disabled_channels=disabled_channels,
         )
 
@@ -849,39 +879,44 @@ class CIFARSTGBasicBlock(CIFARBasicBlock):
 
 
 class AIGBottleneckLayer(Bottleneck):
-    def __init__(self, in_planes, planes, i_downsample=None, stride=1, temperature: float = 1, hard: bool = False):
+    def __init__(
+        self,
+        in_planes,
+        planes,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1,
+        hard: bool = False,
+        gate_hidden_channels: int = 16,
+        gate_regularization: str = "l2_activation",
+    ):
         super().__init__(in_planes, planes, i_downsample=i_downsample, stride=stride)
-        self.gumbel = GumbleSoftmax(hard=hard)
         self.temperature = temperature
         self.bypass = False
-        self.adapter = nn.Sequential(
-            nn.Conv2d(in_channels=in_planes,
-                      out_channels=16, kernel_size=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(16, 2, kernel_size=1)
+        self.gate = AIGBlockGate(
+            in_planes,
+            hidden_channels=gate_hidden_channels,
+            threshold=0.5,
+            temperature=temperature,
+            regularization=gate_regularization,
+            init_logits=(0.1, 2.0),
         )
-        # initial opening rate of the gate of about 85%
-        self.adapter[3].bias.data[0] = 0.1
-        self.adapter[3].bias.data[1] = 2
-
-    def to(self, device, *args, **kwargs):
-        super().to(device, *args, **kwargs)
-        if device != 'cpu':
-            self.gumbel.cuda()
-        return self
+        self.activations: torch.Tensor | None = None
+        self.keep_probabilities: torch.Tensor | None = None
+        self.probabilities: torch.Tensor | None = None
 
     def set_bypass(self, enabled: bool) -> None:
         self.bypass = bool(enabled)
+        self.gate.set_bypass(enabled)
+
+    def regularization_loss(self) -> torch.Tensor:
+        return self.gate.regularization_loss()
 
     def forward(self, x):
-        if self.bypass:
-            self.activations = x.new_ones((x.shape[0], 1, 1, 1))
-        else:
-            w = self.adapter(F.avg_pool2d(x, x.size(2)))
-            w = self.gumbel(w, temp=self.temperature, force_hard=True)
-            # todo: mb to register buffer?
-            self.activations = w[:, 1].unsqueeze(1)
+        gate = self.gate(x)
+        self.activations = self.gate.activations
+        self.keep_probabilities = self.gate.keep_probabilities
+        self.probabilities = self.gate.probabilities
 
         identity = x
         x = self.relu(self.batch_norm1(self.conv1(x)))
@@ -895,7 +930,7 @@ class AIGBottleneckLayer(Bottleneck):
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)
         # add identity
-        x = identity + x*self.activations
+        x = identity + x*gate
         x = self.relu(x)
 
         return x
@@ -913,19 +948,20 @@ def parse_AIG_activations(model: nn.Module, buff=None, prefix: str = None):
 
 def get_AIG_regularization_loss(model: nn.Module):
     aig_modules = _get_aig_modules(model)
-    activations = [
-        module.activations
-        for module in aig_modules.values()
-        if getattr(module, "activations", None) is not None
-    ]
-    if len(activations) == 0:
+    reg_terms = []
+    for module in aig_modules.values():
+        if hasattr(module, "regularization_loss"):
+            reg_terms.append(module.regularization_loss())
+            continue
+
+        activations = getattr(module, "activations", None)
+        if activations is not None:
+            reg_terms.append(activations.mean() ** 2)
+
+    if len(reg_terms) == 0:
         return 0.0
 
-    reg_loss = 0.0
-    for act in activations:
-        reg_loss += act.mean()**2
-    reg_loss /= len(activations)
-    return reg_loss
+    return sum(reg_terms) / len(reg_terms)
 
 
 class AIGRegularizationLoss:
@@ -986,6 +1022,21 @@ def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: 
     return buff
 
 
+def _collect_aig_modules(model: nn.Module, buff=None, prefix: str = None):
+    if buff is None:
+        buff = {}
+    for name, module in model.named_children():
+        full_name = f'{prefix}.{name}' if prefix is not None else name
+        if isinstance(module, AIGBottleneckLayer):
+            buff[full_name] = module
+            continue
+        if isinstance(module, AIGBlockGate):
+            buff[full_name] = module
+            continue
+        _collect_aig_modules(module, buff, full_name)
+    return buff
+
+
 def _get_cached_modules_by_type(model: nn.Module, cache_key: str, module_types):
     cache_attr = "_net_complexity_module_cache"
     cache = getattr(model, cache_attr, None)
@@ -1009,8 +1060,19 @@ def _get_gumbel_modules(model: nn.Module, buff=None, prefix: str = None):
 
 def _get_aig_modules(model: nn.Module, buff=None, prefix: str = None):
     if buff is not None or prefix is not None:
-        return _collect_modules_by_type(model, AIGBottleneckLayer, buff=buff, prefix=prefix)
-    return _get_cached_modules_by_type(model, "aig", AIGBottleneckLayer)
+        return _collect_aig_modules(model, buff=buff, prefix=prefix)
+
+    cache_attr = "_net_complexity_module_cache"
+    cache = getattr(model, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(model, cache_attr, cache)
+
+    modules = cache.get("aig")
+    if modules is None:
+        modules = _collect_aig_modules(model)
+        cache["aig"] = modules
+    return modules
 
 
 def get_AIG_modules(model: nn.Module):

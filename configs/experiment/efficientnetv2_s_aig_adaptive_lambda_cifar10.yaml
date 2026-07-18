@@ -2,33 +2,40 @@
 
 defaults:
   - /data: cifar10_best_practice
-  - /model: resnet50
-  - /method: aig
+  - /model: efficientnetv2_s_aig
   - /train: aig_adaptive_lambda
   - /optimizer: adamw
   - /scheduler: cosine_200
-  - /metrics: aig
+  - /metrics: aig_train_valid
   - /run_history: valid_accuracy_max
   - /tracking: default
   - _self_
 
 device: "cuda:0"
 
+dataloaders:
+  batch_size: 128
+  taskname: CIFAR10
+
 model:
   lambda_coef: 0.000001
   bypass_on_zero_lambda: false
-  backbone:
-    resnet_block:
-      temperature: 1.0
-      gate_regularization: l2_gate
+  dropout: 0.1
+  stochastic_depth: 0.0
+  keep_prob_init: 0.9
+  gate_threshold: 0.5
+  gate_temperature: 1.0
+  gate_regularization: l2_gate
+  stem_stride: 1
 
 training_arguments:
+  num_epochs: 200
   adaptive_lambda:
     enabled: true
     warmup_epochs: 0
     update_every_epochs: 2
     acc_window: 3
-    baseline_history_dir: outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
+    baseline_history_dir: null
     lambda_min: 1e-8
     lambda_max: 10.0
     log_step_init: auto
@@ -38,13 +45,17 @@ training_arguments:
   batchnorm_recalibration:
     enabled: false
 
+run_history:
+  root_dir: outputs/runs
+  run_name: efficientnetv2_s_aig_adaptive_lambda_cifar10
+
 mlflow:
   enabled: false
-  run_name: "resnet50_aig_adaptive_lambda_v1_temp_${model.backbone.resnet_block.temperature}"
+  run_name: efficientnetv2_s_aig_adaptive_lambda_cifar10
   tags:
-    model_type: "ResNet50_AIG"
+    model_type: "EfficientNetV2-S_AIG"
     method: "aig"
-    recipe: "resnet50_aig_adaptive_lambda_v1"
+    recipe: "efficientnetv2_s_aig_adaptive_lambda_cifar10"
     gate_regularization: "l2_gate"
     initial_lambda: "1e-6"
     target_lambda: "10"

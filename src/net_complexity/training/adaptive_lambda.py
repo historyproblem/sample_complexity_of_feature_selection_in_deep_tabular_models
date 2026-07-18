@@ -242,7 +242,7 @@ class AdaptiveLambdaController:
         update_every_epochs: int = 3,
         acc_window: int = 3,
         lambda_min: float = 1e-8,
-        lambda_max: float = 80.0,
+        lambda_max: float | None = 80.0,
         log_step_init: float = math.log(2.0),
         log_step_min: float = math.log(1.05),
         adaptive_log_step_enabled: bool = True,
@@ -263,7 +263,7 @@ class AdaptiveLambdaController:
             raise ValueError("adaptive_lambda.acc_window must be >= 1.")
         if lambda_min <= 0.0:
             raise ValueError("adaptive_lambda.lambda_min must be > 0.")
-        if lambda_max < lambda_min:
+        if lambda_max is not None and lambda_max < lambda_min:
             raise ValueError("adaptive_lambda.lambda_max must be >= lambda_min.")
         if log_step_init <= 0.0:
             raise ValueError("adaptive_lambda.log_step_init must be > 0.")
@@ -289,7 +289,7 @@ class AdaptiveLambdaController:
         self.update_every_epochs = int(update_every_epochs)
         self.acc_window = int(acc_window)
         self.lambda_min = float(lambda_min)
-        self.lambda_max = float(lambda_max)
+        self.lambda_max = None if lambda_max is None else float(lambda_max)
         self.log_step_min = float(log_step_min)
         self.step = max(float(log_step_init), self.log_step_min)
         self.adaptive_log_step_enabled = bool(adaptive_log_step_enabled)
@@ -561,10 +561,21 @@ class AdaptiveLambdaController:
         return int(resolved_epoch), float(self.reference_accuracy_by_epoch[resolved_epoch])
 
     def _clamp_lambda(self, value: float) -> float:
-        return float(min(max(value, self.lambda_min), self.lambda_max))
+        clamped = max(float(value), self.lambda_min)
+        if self.lambda_max is not None:
+            clamped = min(clamped, self.lambda_max)
+        return float(clamped)
 
     def _clamp_log_lambda(self, value: float) -> float:
-        return math.log(self._clamp_lambda(math.exp(float(value))))
+        log_value = float(value)
+        log_min = math.log(self.lambda_min)
+        if log_value < log_min:
+            return log_min
+        if self.lambda_max is not None:
+            log_max = math.log(self.lambda_max)
+            if log_value > log_max:
+                return log_max
+        return log_value
 
     def _should_update(self, epoch: int) -> bool:
         if epoch <= self.warmup_epochs:

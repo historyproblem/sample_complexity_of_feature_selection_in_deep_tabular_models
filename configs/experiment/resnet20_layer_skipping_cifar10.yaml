@@ -1,3 +1,5 @@
+# @package _global_
+
 defaults:
   - /data: cifar10_best_practice
   - /model: cifar_resnet20
