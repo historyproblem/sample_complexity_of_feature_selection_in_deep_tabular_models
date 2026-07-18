@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -1405,6 +1406,37 @@ def evaluate(model: nn.Module,
         metric.update(X, output, y, model)
 
 
+def _resolve_gradient_group_key(parameter_name: str) -> str:
+    """Map a parameter name to a layer/block key, e.g. 'backbone.layer2.1.conv1.weight' -> 'layer2_1'."""
+    parts = parameter_name.split(".")
+    if parts and parts[0] == "backbone":
+        parts = parts[1:]
+    if len(parts) >= 2 and parts[0].startswith("layer") and parts[1].isdigit():
+        return f"{parts[0]}_{parts[1]}"
+    return parts[0] if parts else parameter_name
+
+
+def _compute_block_gradient_norms(model: nn.Module) -> dict[str, float]:
+    """L2 norm of the currently populated .grad tensors, grouped by residual block."""
+    squared_norms_by_group: dict[str, float] = {}
+    total_squared_norm = 0.0
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or parameter.grad is None:
+            continue
+        squared_norm = float(parameter.grad.detach().pow(2).sum().item())
+        group_key = _resolve_gradient_group_key(name)
+        squared_norms_by_group[group_key] = squared_norms_by_group.get(group_key, 0.0) + squared_norm
+        total_squared_norm += squared_norm
+
+    grad_norms = {
+        f"grad_norm_{group_key}": math.sqrt(squared_norm)
+        for group_key, squared_norm in squared_norms_by_group.items()
+    }
+    grad_norms["grad_norm_total"] = math.sqrt(total_squared_norm)
+    return grad_norms
+
+
 def train_epoch(model,
                 optimizer: torch.optim.Optimizer,
                 dataloaders: Dataloaders,
@@ -1414,9 +1446,12 @@ def train_epoch(model,
                 epoch: int = 0,
                 run_history: RunHistory | None = None,
                 scheduler_state: SchedulerState | None = None,
-                progress_context: ProgressContext | None = None):
-    """Train for one epoch."""
+                progress_context: ProgressContext | None = None) -> dict[str, float]:
+    """Train for one epoch. Returns the epoch-average per-block gradient L2 norms."""
     model.train()
+
+    grad_norm_sums: dict[str, float] = {}
+    num_batches = 0
 
     for X, y in dataloaders.train_dataloader:
         X, y = X.to(device), y.to(device)
@@ -1425,11 +1460,20 @@ def train_epoch(model,
         metrics.train_metrics.update(X, output, y, model)
 
         output.loss.backward()
+
+        for key, value in _compute_block_gradient_norms(model).items():
+            grad_norm_sums[key] = grad_norm_sums.get(key, 0.0) + value
+        num_batches += 1
+
         optimizer.step()
         if scheduler_state is not None and scheduler_state.interval == "batch":
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
             scheduler_state.step(batch_metrics)
         optimizer.zero_grad()
+
+    if num_batches == 0:
+        return {}
+    return {key: value / num_batches for key, value in grad_norm_sums.items()}
 
 
 def train(model: nn.Module,
@@ -1496,7 +1540,7 @@ def train(model: nn.Module,
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
-        train_epoch(
+        epoch_grad_norms = train_epoch(
             model,
             optimizer,
             dataloaders,
@@ -1527,6 +1571,7 @@ def train(model: nn.Module,
         train_metrics = dict(metrics.train_metrics.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+        train_metrics.update({f"train_{key}": value for key, value in epoch_grad_norms.items()})
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
         observed_epoch_metrics = {
