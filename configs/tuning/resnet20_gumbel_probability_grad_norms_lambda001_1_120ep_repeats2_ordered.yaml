@@ -1,0 +1,40 @@
+# @package _global_
+
+# Two probability-regularization strengths, each repeated with seeds 42 and 43.
+# Runs sequentially and keeps the full study within a 14-hour scheduling budget.
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet20_gumbel_probability_grad_norms_lambda001_1_120ep_repeats2_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 2
+  repeats_per_trial: 2
+  timeout: 50400
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 20
+    threshold: 0.4
+    max_attempts_per_repeat: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.01
+      mlflow.run_name: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"
+      mlflow.tags.recipe: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"
+      mlflow.tags.regularization: "mean_p_open"
+    - model.lambda_coef: 1.0
+      mlflow.run_name: "resnet20_gumbel_probability_grad_norms_lambda1_120ep"
+      mlflow.tags.recipe: "resnet20_gumbel_probability_grad_norms_lambda1_120ep"
+      mlflow.tags.regularization: "mean_p_open"
+
