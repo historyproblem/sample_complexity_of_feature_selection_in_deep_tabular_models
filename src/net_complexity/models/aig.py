@@ -30,6 +30,12 @@ class AIGBlockGate(nn.Module):
         "l2_probability": "l2_probability",
         "l2_prob": "l2_probability",
         "l2_probs": "l2_probability",
+        "jensen_shannon": "jensen_shannon_probability",
+        "jensen_shannon_probability": "jensen_shannon_probability",
+        "js": "jensen_shannon_probability",
+        "js_probability": "jensen_shannon_probability",
+        "hellinger": "hellinger_probability",
+        "hellinger_probability": "hellinger_probability",
     }
 
     def __init__(
@@ -136,6 +142,25 @@ class AIGBlockGate(nn.Module):
             return self.keep_probabilities.mean()
         if self.regularization == "l2_probability":
             return self.keep_probabilities.mean() ** 2
+        if self.regularization == "jensen_shannon_probability":
+            target = torch.zeros_like(self.probabilities)
+            target[:, 0] = 1.0
+            midpoint = 0.5 * (self.probabilities + target)
+            tiny = torch.finfo(self.probabilities.dtype).tiny
+            kl_prediction = self.probabilities * (
+                self.probabilities.clamp_min(tiny).log()
+                - midpoint.clamp_min(tiny).log()
+            )
+            kl_target = -midpoint[:, 0:1].clamp_min(tiny).log()
+            return (0.5 * kl_prediction.sum(dim=1) + 0.5 * kl_target.squeeze(1)).mean()
+        if self.regularization == "hellinger_probability":
+            target = torch.zeros_like(self.probabilities)
+            target[:, 0] = 1.0
+            squared_distance = 0.5 * (
+                self.probabilities.clamp_min(0.0).sqrt() - target
+            ).square().sum(dim=1)
+            tiny = torch.finfo(self.probabilities.dtype).tiny
+            return squared_distance.clamp_min(tiny).sqrt().mean()
         if self.activations is None:
             return next(self.parameters()).new_zeros(())
         if self.regularization == "l1_activation":

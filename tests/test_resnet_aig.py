@@ -71,6 +71,28 @@ def test_aig_gate_l2_activation_loss_matches_legacy_target_zero_penalty():
     )
 
 
+@pytest.mark.parametrize(
+    ("regularization", "expected"),
+    [
+        ("jensen_shannon_probability", 0.21576157),
+        ("hellinger_probability", 0.54119610),
+    ],
+)
+def test_aig_probability_divergences_penalize_distance_from_closed_gate(
+    regularization,
+    expected,
+):
+    gate = AIGBlockGate(in_channels=4, regularization=regularization)
+    gate.probabilities = torch.tensor([[[[0.5]], [[0.5]]]], requires_grad=True)
+    gate.keep_probabilities = gate.probabilities[:, 1:2]
+
+    loss = gate.regularization_loss()
+    loss.backward()
+
+    assert loss.item() == pytest.approx(expected)
+    assert torch.isfinite(gate.probabilities.grad).all()
+
+
 def test_resnet50_supports_cifar_style_stem_without_maxpool():
     model = ResNet50(
         num_classes=4,

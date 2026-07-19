@@ -1,0 +1,53 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 90
+  adaptive_lambda:
+    enabled: true
+    lambda_max: null
+    update_every_epochs: 2
+    log_step_init: 0.3837641821656743
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 90
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_probability_divergences_90ep_repeats2_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 3
+  repeats_per_trial: 2
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      model.backbone.resnet_block.gate_regularization: l1_probability
+      mlflow.run_name: resnet50_aig_l1_probability_90ep
+      mlflow.tags.recipe: resnet50_aig_probability_divergences_90ep
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.regularization_target: "probability"
+    - model.lambda_coef: 0.0001
+      model.backbone.resnet_block.gate_regularization: jensen_shannon_probability
+      mlflow.run_name: resnet50_aig_jensen_shannon_probability_90ep
+      mlflow.tags.recipe: resnet50_aig_probability_divergences_90ep
+      mlflow.tags.gate_regularization: "jensen_shannon_probability"
+      mlflow.tags.regularization_target: "probability_distribution"
+    - model.lambda_coef: 0.0001
+      model.backbone.resnet_block.gate_regularization: hellinger_probability
+      mlflow.run_name: resnet50_aig_hellinger_probability_90ep
+      mlflow.tags.recipe: resnet50_aig_probability_divergences_90ep
+      mlflow.tags.gate_regularization: "hellinger_probability"
+      mlflow.tags.regularization_target: "probability_distribution"

@@ -1952,3 +1952,34 @@ def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
     assert {point["mlflow.tags.lambda_max"] for point in points} == {"none"}
     assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
     assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"7"}
+
+
+def test_resnet50_aig_probability_divergences_90ep_repeats2():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_probability_divergences_90ep_repeats2_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_probability_divergences_90ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {"tuning": "resnet50_aig_probability_divergences_90ep_repeats2_ordered"},
+        "_self_",
+    ]
+    assert tuning_cfg.training_arguments.num_epochs == 90
+    assert tuning_cfg.scheduler.T_max == 90
+    assert tuning_cfg.tuning.n_trials == 3
+    assert tuning_cfg.tuning.repeats_per_trial == 2
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [
+        point["model.backbone.resnet_block.gate_regularization"]
+        for point in points
+    ] == [
+        "l1_probability",
+        "jensen_shannon_probability",
+        "hellinger_probability",
+    ]
