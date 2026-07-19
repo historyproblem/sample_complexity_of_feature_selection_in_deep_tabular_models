@@ -148,6 +148,24 @@ def test_resnet20_gumbel_probability_gradient_norm_diagnostics_are_bounded_and_c
         assert cfg.mlflow.tags.regularization == "mean_p_open"
 
 
+def test_probability_gradient_norm_grid_runs_two_seeds_per_lambda_with_14h_timeout():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet20_gumbel_probability_grad_norms_lambda001_1_120ep_repeats2_ordered.yaml"
+    )
+
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_trials == 2
+    assert cfg.tuning.repeats_per_trial == 2
+    assert cfg.tuning.seed_base == 42
+    assert cfg.tuning.seed_stride == 1
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.timeout == 14 * 60 * 60
+    assert cfg.tuning.restart_guard.max_attempts_per_repeat == 1
+    assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [0.01, 1.0]
+
+
 def test_masked_gumbel_method_matches_current_gumbel_defaults():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
 
