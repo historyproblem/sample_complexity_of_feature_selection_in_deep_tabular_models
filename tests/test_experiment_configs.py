@@ -1999,27 +1999,28 @@ def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
     assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"7"}
 
 
-def test_resnet50_aig_probability_divergences_90ep_repeats2():
+def test_resnet50_aig_probability_divergences_120ep_repeats2():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
         / "tuning"
-        / "resnet50_aig_probability_divergences_90ep_repeats2_ordered.yaml"
+        / "resnet50_aig_probability_divergences_120ep_repeats2_ordered.yaml"
     )
     tune_cfg = OmegaConf.load(
-        CONFIGS_DIR / "tune_resnet50_aig_probability_divergences_90ep.yaml"
+        CONFIGS_DIR / "tune_resnet50_aig_probability_divergences_120ep.yaml"
     )
 
     assert tune_cfg.defaults == [
         {"experiment": "resnet50_aig_adaptive_lambda_v1"},
-        {"tuning": "resnet50_aig_probability_divergences_90ep_repeats2_ordered"},
+        {"tuning": "resnet50_aig_probability_divergences_120ep_repeats2_ordered"},
         "_self_",
     ]
-    assert tuning_cfg.training_arguments.num_epochs == 90
+    assert tuning_cfg.training_arguments.num_epochs == 120
     gradient_logging = tuning_cfg.training_arguments.gradient_norm_logging
     assert gradient_logging.enabled is True
     assert gradient_logging.log_per_layer is True
     assert gradient_logging.every_n_batches == 5
-    assert tuning_cfg.scheduler.T_max == 90
+    assert tuning_cfg.training_arguments.adaptive_lambda.log_step_init == 0.28782313662425574
+    assert tuning_cfg.scheduler.T_max == 120
     assert tuning_cfg.tuning.n_trials == 3
     assert tuning_cfg.tuning.repeats_per_trial == 2
 
