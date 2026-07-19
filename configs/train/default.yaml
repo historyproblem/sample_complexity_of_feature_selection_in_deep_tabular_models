@@ -2,6 +2,9 @@
 
 training_arguments:
   num_epochs: 120
+  gradient_norm_logging:
+    enabled: false
+    log_per_layer: true
   lambda_warmup:
     enabled: false
     start_epoch: 30
