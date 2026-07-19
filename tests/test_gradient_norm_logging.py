@@ -48,3 +48,9 @@ def test_gradient_norm_logger_aggregates_epoch_mean_and_max():
     metrics = logger.compute()
     assert metrics["grad_norm_ce_total_max"] > metrics["grad_norm_ce_total_mean"]
     assert not any("_layer_" in key for key in metrics)
+
+
+def test_gradient_norm_logger_validates_batch_sampling_frequency():
+    model = TinyTwoLossModel()
+    with pytest.raises(ValueError, match="every_n_batches"):
+        GradientNormLogger(model, every_n_batches=0)

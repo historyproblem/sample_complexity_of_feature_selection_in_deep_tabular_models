@@ -29,13 +29,14 @@ optimizer:
   gate_weight_decay_scale: null
 
 scheduler:
-  T_max: 40
+  T_max: 120
 
 training_arguments:
-  num_epochs: 40
+  num_epochs: 120
   gradient_norm_logging:
     enabled: true
     log_per_layer: true
+    every_n_batches: 5
   lambda_warmup:
     enabled: false
   adaptive_lambda:
@@ -49,11 +50,10 @@ run_history:
 
 mlflow:
   enabled: true
-  run_name: "resnet20_gumbel_probability_grad_norms_lambda001_40ep"
+  run_name: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"
   tags:
     model_type: "CIFARResNet20_Gumbel"
     method: "gumbel_probability_l1"
     regularization: "mean_p_open"
     gradient_components: "ce,lambda_regularization,total"
-    recipe: "resnet20_gumbel_probability_grad_norms_lambda001_40ep"
-
+    recipe: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"

@@ -121,23 +121,24 @@ def test_gumbel_method_defaults_zero_lambda_bypass_to_true():
     assert cfg.model.backbone.resnet_block.gate_threshold == 0.5
 
 
-def test_resnet20_gumbel_probability_gradient_norm_diagnostics_are_short_and_comparable():
+def test_resnet20_gumbel_probability_gradient_norm_diagnostics_are_bounded_and_comparable():
     experiment_dir = CONFIGS_DIR / "experiment"
     configs = [
         OmegaConf.load(
-            experiment_dir / "resnet20_gumbel_probability_grad_norms_lambda001_40ep.yaml"
+            experiment_dir / "resnet20_gumbel_probability_grad_norms_lambda001_120ep.yaml"
         ),
         OmegaConf.load(
-            experiment_dir / "resnet20_gumbel_probability_grad_norms_lambda1_40ep.yaml"
+            experiment_dir / "resnet20_gumbel_probability_grad_norms_lambda1_120ep.yaml"
         ),
     ]
 
     assert [cfg.model.lambda_coef for cfg in configs] == [0.01, 1.0]
     for cfg in configs:
-        assert cfg.training_arguments.num_epochs == 40
-        assert cfg.scheduler.T_max == 40
+        assert cfg.training_arguments.num_epochs == 120
+        assert cfg.scheduler.T_max == 120
         assert cfg.training_arguments.gradient_norm_logging.enabled is True
         assert cfg.training_arguments.gradient_norm_logging.log_per_layer is True
+        assert cfg.training_arguments.gradient_norm_logging.every_n_batches == 5
         assert cfg.training_arguments.lambda_warmup.enabled is False
         assert cfg.training_arguments.adaptive_lambda.enabled is False
         assert cfg.optimizer.gate_weight_decay_scale is None

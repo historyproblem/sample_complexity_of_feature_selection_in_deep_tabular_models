@@ -1473,18 +1473,22 @@ def train_epoch(model,
     """Train for one epoch."""
     model.train()
 
-    for X, y in dataloaders.train_dataloader:
+    for batch_index, (X, y) in enumerate(dataloaders.train_dataloader):
         X, y = X.to(device), y.to(device)
         output = model(X, y)
 
         metrics.train_metrics.update(X, output, y, model)
 
-        if gradient_norm_logger is not None:
+        collect_gradient_norms = (
+            gradient_norm_logger is not None
+            and batch_index % gradient_norm_logger.every_n_batches == 0
+        )
+        if collect_gradient_norms:
             gradient_norm_logger.collect_autograd("ce", output.ce_loss)
             regularization_term = output.loss - output.ce_loss
             gradient_norm_logger.collect_autograd("regularization", regularization_term)
         output.loss.backward()
-        if gradient_norm_logger is not None:
+        if collect_gradient_norms:
             gradient_norm_logger.collect_total()
         optimizer.step()
         if scheduler_state is not None and scheduler_state.interval == "batch":
@@ -1562,6 +1566,7 @@ def train(model: nn.Module,
             GradientNormLogger(
                 model,
                 log_per_layer=bool(getattr(gradient_norm_cfg, "log_per_layer", True)),
+                every_n_batches=int(getattr(gradient_norm_cfg, "every_n_batches", 1)),
             )
             if gradient_norm_cfg is not None
             and bool(getattr(gradient_norm_cfg, "enabled", False))

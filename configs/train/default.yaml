@@ -5,6 +5,7 @@ training_arguments:
   gradient_norm_logging:
     enabled: false
     log_per_layer: true
+    every_n_batches: 1
   lambda_warmup:
     enabled: false
     start_epoch: 30

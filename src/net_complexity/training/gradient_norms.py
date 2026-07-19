@@ -18,8 +18,17 @@ class GradientNormLogger:
 
     COMPONENTS = ("ce", "regularization", "total")
 
-    def __init__(self, model: nn.Module, *, log_per_layer: bool = True):
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        log_per_layer: bool = True,
+        every_n_batches: int = 1,
+    ):
+        if every_n_batches < 1:
+            raise ValueError("every_n_batches must be >= 1.")
         self.log_per_layer = bool(log_per_layer)
+        self.every_n_batches = int(every_n_batches)
         self.parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
         self.parameter_layers = self._parameter_layer_names(model)
         self.gumbel_parameter_ids = {
