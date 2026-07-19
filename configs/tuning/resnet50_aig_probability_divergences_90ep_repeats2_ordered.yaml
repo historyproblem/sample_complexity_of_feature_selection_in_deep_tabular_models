@@ -2,6 +2,10 @@
 
 training_arguments:
   num_epochs: 90
+  gradient_norm_logging:
+    enabled: true
+    log_per_layer: true
+    every_n_batches: 5
   adaptive_lambda:
     enabled: true
     lambda_max: null
