@@ -7,6 +7,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+ENTROPY_REGULARIZATION_MODES = {
+    "disabled": 0.0,
+    "plus_negative_entropy": 1.0,
+    "minus_negative_entropy": -1.0,
+}
+
+
+def entropy_regularization_sign(mode: str) -> float:
+    normalized = str(mode).strip().lower()
+    if normalized not in ENTROPY_REGULARIZATION_MODES:
+        allowed = ", ".join(sorted(ENTROPY_REGULARIZATION_MODES))
+        raise ValueError(
+            f"entropy_regularization must be one of: {allowed}. Got: {mode!r}"
+        )
+    return ENTROPY_REGULARIZATION_MODES[normalized]
+
+
 class AIGBlockGate(nn.Module):
     """
     Per-block AIG gate with explicit off/on logits.
@@ -143,3 +160,17 @@ class AIGBlockGate(nn.Module):
         if self.regularization == "l2_activation":
             return self.activations.mean() ** 2
         raise AssertionError(f"Unhandled AIG regularization mode: {self.regularization}")
+
+    def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return mean p(open) and mean negative entropy of the soft posterior."""
+        if self.logits is None or self.bypass:
+            zero = next(self.parameters()).new_zeros(())
+            return zero, zero
+
+        # Move the two-state dimension last to match a Bernoulli posterior [..., 2].
+        gate_logits = self.logits.movedim(1, -1)
+        log_probs = F.log_softmax(gate_logits, dim=-1)
+        probs = log_probs.exp()
+        mean_p_open = probs[..., 1].mean()
+        negative_entropy = (probs * log_probs).sum(dim=-1).mean()
+        return mean_p_open, negative_entropy

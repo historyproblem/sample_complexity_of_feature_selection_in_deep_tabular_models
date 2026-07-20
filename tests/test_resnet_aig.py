@@ -60,6 +60,76 @@ def test_aig_gate_uses_two_logits_per_block_and_supports_l1_probability_loss():
     )
 
 
+@pytest.mark.parametrize("magnitude", [1.0e2, 1.0e4])
+def test_aig_posterior_regularization_is_finite_for_extreme_logits(magnitude):
+    gate = AIGBlockGate(
+        in_channels=4,
+        hidden_channels=2,
+        regularization="l1_probability",
+    )
+    gate.logits = torch.tensor(
+        [[[[magnitude]], [[-magnitude]]], [[[-magnitude]], [[magnitude]]]],
+        requires_grad=True,
+    )
+
+    mean_p_open, negative_entropy = gate.posterior_regularization_terms()
+    reg_loss = 0.25 * mean_p_open + negative_entropy
+    reg_loss.backward()
+
+    assert torch.isfinite(mean_p_open)
+    assert torch.isfinite(negative_entropy)
+    assert torch.isfinite(reg_loss)
+    assert torch.isfinite(gate.logits.grad).all()
+
+
+@pytest.mark.parametrize(
+    ("entropy_regularization", "entropy_sign"),
+    [
+        ("disabled", 0.0),
+        ("plus_negative_entropy", 1.0),
+        ("minus_negative_entropy", -1.0),
+    ],
+)
+def test_aig_wrapper_logs_soft_posterior_regularization_components(
+    entropy_regularization,
+    entropy_sign,
+):
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    backbone = TinyAIGClassifier()
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=False,
+        entropy_regularization=entropy_regularization,
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+
+    expected = 0.25 * output.mean_p_open + entropy_sign * output.negative_entropy
+    torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
+    torch.testing.assert_close(output.reg_loss, expected)
+    torch.testing.assert_close(output.loss, output.ce_loss + expected)
+
+
+def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
+    with pytest.raises(ValueError, match="entropy_regularization must be one of"):
+        ClassificationFeatureSelectionWrapper(
+            backbone=nn.Linear(4, 3),
+            entropy_regularization="unknown",
+        )
+
+
 def test_aig_gate_l2_activation_loss_matches_legacy_target_zero_penalty():
     gate = AIGBlockGate(in_channels=4, regularization="l2_activation")
     gate.activations = torch.tensor([[[[1.0]]], [[[0.0]]]])

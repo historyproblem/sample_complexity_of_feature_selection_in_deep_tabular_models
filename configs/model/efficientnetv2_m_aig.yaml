@@ -13,6 +13,8 @@ model:
   gate_threshold: 0.5
   gate_temperature: 1.0
   gate_regularization: l2_gate
+  # disabled | plus_negative_entropy | minus_negative_entropy
+  entropy_regularization: disabled
   stem_stride: 1
   criterion:
     _target_: torch.nn.CrossEntropyLoss
