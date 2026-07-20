@@ -12,6 +12,7 @@ from net_complexity.models.feature_selection import (
     ClassificationFeatureSelectionWrapper,
     ResNet50,
     get_AIG_modules,
+    get_AIG_posterior_regularization_terms,
     get_AIG_regularization_loss,
     parse_AIG_activations,
 )
@@ -128,6 +129,22 @@ def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
             backbone=nn.Linear(4, 3),
             entropy_regularization="unknown",
         )
+
+
+def test_aig_posterior_terms_unwrap_aig_bottleneck_layers():
+    block = AIGBottleneckLayer(
+        in_planes=64,
+        planes=64,
+        gate_regularization="l1_probability",
+    )
+    block.gate(torch.randn(2, 64, 4, 4))
+
+    terms = get_AIG_posterior_regularization_terms(nn.Sequential(block))
+
+    assert terms is not None
+    mean_p_open, negative_entropy = terms
+    torch.testing.assert_close(mean_p_open, block.gate.keep_probabilities.mean())
+    assert torch.isfinite(negative_entropy)
 
 
 def test_aig_gate_l2_activation_loss_matches_legacy_target_zero_penalty():

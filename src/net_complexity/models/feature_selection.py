@@ -931,13 +931,18 @@ def get_AIG_posterior_regularization_terms(
     model: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Aggregate soft-posterior terms for probability-regularized AIG gates."""
-    aig_modules = list(_get_aig_modules(model).values())
-    if not aig_modules or not all(
-        module.regularization == "l1_probability" for module in aig_modules
+    gates_by_id: dict[int, AIGBlockGate] = {}
+    for module in _get_aig_modules(model).values():
+        gate = module if isinstance(module, AIGBlockGate) else module.gate
+        gates_by_id[id(gate)] = gate
+    gates = list(gates_by_id.values())
+
+    if not gates or not all(
+        gate.regularization == "l1_probability" for gate in gates
     ):
         return None
 
-    terms = [module.posterior_regularization_terms() for module in aig_modules]
+    terms = [gate.posterior_regularization_terms() for gate in gates]
     mean_p_open = torch.stack([term[0] for term in terms]).mean()
     negative_entropy = torch.stack([term[1] for term in terms]).mean()
     return mean_p_open, negative_entropy
