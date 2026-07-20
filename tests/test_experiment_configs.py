@@ -166,6 +166,54 @@ def test_probability_gradient_norm_grid_runs_two_seeds_per_lambda_with_14h_timeo
     assert [point["model.lambda_coef"] for point in cfg.tuning.points] == [0.01, 1.0]
 
 
+def test_aig_entropy_grid_covers_two_lambdas_and_all_entropy_modes_once():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_entropy_modes_lambda1em4_1_120ep_ordered.yaml"
+    )
+
+    assert cfg.training_arguments.num_epochs == 120
+    assert cfg.scheduler.T_max == 120
+    assert cfg.training_arguments.gradient_norm_logging.enabled is True
+    assert cfg.training_arguments.gradient_norm_logging.every_n_batches == 5
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.tuning.n_trials == 6
+    assert cfg.tuning.repeats_per_trial == 1
+    assert cfg.tuning.points_in_order is True
+    assert {
+        (
+            point["model.lambda_coef"],
+            point["model.entropy_regularization"],
+        )
+        for point in cfg.tuning.points
+    } == {
+        (lambda_value, entropy_mode)
+        for lambda_value in (0.0001, 1.0)
+        for entropy_mode in (
+            "disabled",
+            "plus_negative_entropy",
+            "minus_negative_entropy",
+        )
+    }
+    assert all(
+        point["model.backbone.resnet_block.gate_regularization"] == "l1_probability"
+        for point in cfg.tuning.points
+    )
+
+
+def test_tune_resnet50_aig_entropy_grid_uses_requested_defaults():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_resnet50_aig_entropy_modes_lambda1em4_1_120ep.yaml"
+    )
+
+    assert cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {"tuning": "resnet50_aig_entropy_modes_lambda1em4_1_120ep_ordered"},
+        "_self_",
+    ]
+
+
 def test_masked_gumbel_method_matches_current_gumbel_defaults():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
 

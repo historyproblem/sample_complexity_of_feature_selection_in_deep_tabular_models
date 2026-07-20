@@ -1,0 +1,9 @@
+defaults:
+  - experiment: resnet50_aig_adaptive_lambda_v1
+  - tuning: resnet50_aig_entropy_modes_lambda1em4_1_120ep_ordered
+  - _self_
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra
