@@ -3,6 +3,10 @@ defaults:
   - tuning: none
   - _self_
 
+reporting:
+  # Optional alias -> dotted resolved-config path mapping used in plot legends.
+  run_label_fields: {}
+
 hydra:
   run:
     dir: ${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_${mlflow.run_name}

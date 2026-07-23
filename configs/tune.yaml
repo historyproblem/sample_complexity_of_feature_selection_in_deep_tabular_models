@@ -3,6 +3,13 @@ defaults:
   - tuning: gumbel_resnet50_lambda_grid_150ep_narrow
   - _self_
 
+reporting:
+  # Example override in an experiment config:
+  # run_label_fields:
+  #   lambda_init: model.lambda_coef
+  #   step: training_arguments.adaptive_lambda.update_every_epochs
+  run_label_fields: {}
+
 hydra:
   run:
     dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
