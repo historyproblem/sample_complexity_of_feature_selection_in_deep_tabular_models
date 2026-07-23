@@ -46,6 +46,19 @@ def test_plot_metric_is_the_canonical_plotter(history_df):
     assert ax.get_ylabel() == "valid_accuracy"
 
 
+def test_interactive_metric_uses_clickable_external_legend(history_df):
+    figure = plot_metric(
+        history_df,
+        "valid_accuracy",
+        interactive=True,
+        show=False,
+    )
+
+    assert len(figure.data) == 2
+    assert figure.layout.legend.x > 1
+    assert figure.layout.legend.groupclick == "togglegroup"
+
+
 def test_legacy_plot_metric_by_epoch_delegates_to_canonical_plotter(history_df):
     ax = plot_metric_by_epoch(
         history_df,
@@ -81,6 +94,15 @@ def test_plot_channel_counts_has_count_and_percentage_axes(history_df):
     assert len(ax.lines) == 4
     assert ax.get_ylabel() == "channels"
     assert ax.child_axes[0].get_ylabel() == "channels, % of total"
+
+
+def test_interactive_channel_plot_groups_open_and_closed_by_run(history_df):
+    figure = plot_channel_counts(history_df, interactive=True, show=False)
+
+    visible_legend_traces = [trace for trace in figure.data if trace.showlegend]
+    assert len(visible_legend_traces) == 2
+    assert figure.layout.legend.x > 1
+    assert figure.layout.legend.groupclick == "togglegroup"
 
 
 def test_plot_channel_counts_postprocesses_zero_probabilities():
