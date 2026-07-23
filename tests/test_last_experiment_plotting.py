@@ -91,16 +91,17 @@ def test_gradient_norm_catalog_parses_metric_columns(history_df):
 def test_plot_channel_counts_has_count_and_percentage_axes(history_df):
     ax = plot_channel_counts(history_df, show=False)
 
-    assert len(ax.lines) == 4
+    assert len(ax.lines) == 2
     assert ax.get_ylabel() == "channels"
     assert ax.child_axes[0].get_ylabel() == "channels, % of total"
 
 
-def test_interactive_channel_plot_groups_open_and_closed_by_run(history_df):
+def test_interactive_channel_plot_has_one_open_trace_per_run(history_df):
     figure = plot_channel_counts(history_df, interactive=True, show=False)
 
     visible_legend_traces = [trace for trace in figure.data if trace.showlegend]
     assert len(visible_legend_traces) == 2
+    assert len(figure.data) == 3  # two runs plus one invisible percentage-axis trace
     assert figure.layout.legend.x > 1
     assert figure.layout.legend.groupclick == "togglegroup"
 
@@ -120,7 +121,7 @@ def test_plot_channel_counts_postprocesses_zero_probabilities():
 
     assert history["open_channels"].tolist() == [1, 1]
     assert history["zero_channels"].tolist() == [1, 1]
-    assert len(ax.lines) == 2
+    assert len(ax.lines) == 1
 
 
 def test_plot_channel_counts_postprocesses_aig_gate_probabilities():
