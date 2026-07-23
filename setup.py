@@ -29,6 +29,7 @@ setup(
         "matplotlib",
         "ipykernel",
         "plotly",
+        "nbformat",
         "optuna",
     ],
 )

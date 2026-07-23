@@ -10,4 +10,5 @@ pandas
 matplotlib
 ipykernel
 plotly
+nbformat
 optuna
