@@ -59,7 +59,6 @@ def test_interactive_metric_uses_clickable_external_legend(history_df):
     assert figure.layout.legend.groupclick == "togglegroup"
     assert figure.layout.xaxis.nticks == 40
     assert figure.layout.yaxis.nticks == 40
-    assert len(figure.layout.shapes) == 1
 
 
 def test_legacy_plot_metric_by_epoch_delegates_to_canonical_plotter(history_df):

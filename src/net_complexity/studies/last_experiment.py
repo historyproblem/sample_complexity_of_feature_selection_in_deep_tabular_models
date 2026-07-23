@@ -1028,15 +1028,6 @@ def _plot_metric_interactive(
             "griddash": "dot",
         },
     )
-    if "acc" in metric.lower() or "accuracy" in metric.lower():
-        finite_values = pd.to_numeric(plot_df[metric], errors="coerce").dropna()
-        threshold = 90.0 if not finite_values.empty and finite_values.max() > 1.5 else 0.9
-        figure.add_hline(
-            y=threshold,
-            line={"color": "rgba(180, 40, 40, 0.75)", "dash": "dash", "width": 1.5},
-            annotation_text="90% accuracy",
-            annotation_position="top left",
-        )
     if show:
         figure.show()
     return figure
