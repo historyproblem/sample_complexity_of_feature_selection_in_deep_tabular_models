@@ -900,6 +900,35 @@ def make_summary(
 # PLOTTING
 # =========================
 
+def _nice_tick_step(span: float, target_intervals: int = 10) -> float:
+    if not np.isfinite(span) or span <= 0:
+        return 1.0
+    raw_step = span / target_intervals
+    magnitude = 10.0 ** np.floor(np.log10(raw_step))
+    normalized = raw_step / magnitude
+    nice = next(value for value in (1.0, 2.0, 2.5, 5.0, 10.0) if normalized <= value)
+    return float(nice * magnitude)
+
+
+def _dense_grid_options(values: pd.Series, scale: str) -> dict:
+    options = {
+        "showgrid": True,
+        "gridcolor": "rgba(80, 80, 80, 0.22)",
+        "minor": {
+            "showgrid": True,
+            "gridcolor": "rgba(80, 80, 80, 0.10)",
+            "griddash": "dot",
+        },
+    }
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if scale == "linear" and not numeric.empty:
+        major_step = _nice_tick_step(float(numeric.max() - numeric.min()))
+        options["dtick"] = major_step
+        options["minor"]["dtick"] = major_step / 4.0
+    else:
+        options["nticks"] = 12
+    return options
+
 def _plot_metric_interactive(
     history_df: pd.DataFrame,
     metric: str,
@@ -1008,26 +1037,8 @@ def _plot_metric_interactive(
         margin={"r": 320},
         template="plotly_white",
     )
-    figure.update_xaxes(
-        showgrid=True,
-        gridcolor="rgba(80, 80, 80, 0.22)",
-        nticks=40,
-        minor={
-            "showgrid": True,
-            "gridcolor": "rgba(80, 80, 80, 0.10)",
-            "griddash": "dot",
-        },
-    )
-    figure.update_yaxes(
-        showgrid=True,
-        gridcolor="rgba(80, 80, 80, 0.22)",
-        nticks=40,
-        minor={
-            "showgrid": True,
-            "gridcolor": "rgba(80, 80, 80, 0.10)",
-            "griddash": "dot",
-        },
-    )
+    figure.update_xaxes(**_dense_grid_options(plot_df[x_col], xscale))
+    figure.update_yaxes(**_dense_grid_options(plot_df[metric], yscale))
     if show:
         figure.show()
     return figure
@@ -1351,25 +1362,9 @@ def plot_channel_counts(
             margin={"r": 380},
             template="plotly_white",
         )
-        figure.update_xaxes(
-            showgrid=True,
-            gridcolor="rgba(80, 80, 80, 0.22)",
-            nticks=40,
-            minor={
-                "showgrid": True,
-                "gridcolor": "rgba(80, 80, 80, 0.10)",
-                "griddash": "dot",
-            },
-        )
+        figure.update_xaxes(**_dense_grid_options(plot_df["epoch"], "linear"))
         figure.layout.yaxis.update(
-            showgrid=True,
-            gridcolor="rgba(80, 80, 80, 0.22)",
-            nticks=40,
-            minor={
-                "showgrid": True,
-                "gridcolor": "rgba(80, 80, 80, 0.10)",
-                "griddash": "dot",
-            },
+            **_dense_grid_options(plot_df[active_col], "linear")
         )
         if show:
             figure.show()
