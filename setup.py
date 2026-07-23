@@ -28,6 +28,7 @@ setup(
         "pandas",
         "matplotlib",
         "ipykernel",
+        "plotly",
         "optuna",
     ],
 )

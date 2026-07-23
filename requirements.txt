@@ -9,4 +9,5 @@ numpy
 pandas
 matplotlib
 ipykernel
+plotly
 optuna
