@@ -26,6 +26,8 @@ setup(
         "protobuf>=3.20.3,<6",
         "numpy",
         "pandas",
+        "matplotlib",
+        "ipykernel",
         "optuna",
     ],
 )
