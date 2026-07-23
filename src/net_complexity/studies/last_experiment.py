@@ -180,6 +180,10 @@ def _format_label_value(value) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, float):
+        if value != 0.0 and abs(value) <= 1e-3:
+            mantissa, exponent = f"{value:.6e}".split("e")
+            mantissa = mantissa.rstrip("0").rstrip(".")
+            return f"{mantissa}e{int(exponent)}"
         formatted = f"{value:g}"
         return re.sub(r"e([+-])0+(\d+)$", r"e\1\2", formatted)
     return str(value).replace(" ", "_")
@@ -722,8 +726,14 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     for run_dir in run_dirs:
         try:
-            history = load_history(run_dir)
+            history, config_row = load_single_run(
+                run_dir=run_dir,
+                experiment_name=Path(study_dir).name,
+                experiment_dir=Path(study_dir),
+                run_name=run_dir.name,
+            )
             summary = summarize_one_run(run_dir)
+            summary.update(config_row)
         except Exception as e:
             print(f"[skip] {run_dir}: {e}")
             continue
@@ -740,6 +750,7 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     summary_df = pd.DataFrame(summaries)
 
     if not summary_df.empty:
+        summary_df, history_df = _apply_automatic_run_labels(summary_df, history_df)
         if "best_valid_accuracy" in summary_df.columns:
             summary_df = summary_df.sort_values(
                 "best_valid_accuracy",
@@ -748,6 +759,51 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         else:
             summary_df = summary_df.sort_values("run_name")
 
+    return summary_df, history_df
+
+
+_AUTO_RUN_LABEL_FIELDS = (
+    ("lambda_init", "model.lambda_coef"),
+    ("entropy", "model.entropy_regularization"),
+    ("regularization", "model.backbone.resnet_block.gate_regularization"),
+    ("step", "training_arguments.adaptive_lambda.log_step_init"),
+    ("update", "training_arguments.adaptive_lambda.update_every_epochs"),
+)
+
+
+def _apply_automatic_run_labels(
+    summary_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build concise labels from config fields that vary inside the study."""
+    explicit_fields = [
+        col for col in summary_df.columns if col.startswith("reporting.run_label_fields.")
+    ]
+    if explicit_fields or summary_df.empty or history_df.empty:
+        return summary_df, history_df
+
+    varying_fields = [
+        (alias, path)
+        for alias, path in _AUTO_RUN_LABEL_FIELDS
+        if path in summary_df.columns and summary_df[path].dropna().nunique() > 1
+    ]
+    if not varying_fields:
+        return summary_df, history_df
+
+    summary_df = summary_df.copy()
+    summary_df["run_label"] = summary_df.apply(
+        lambda row: "_".join(
+            f"{alias}_{_format_label_value(row[path])}"
+            for alias, path in varying_fields
+        ),
+        axis=1,
+    )
+    label_by_run = summary_df.set_index("run_name")["run_label"]
+
+    history_df = history_df.copy()
+    mapped_labels = history_df["run_name"].map(label_by_run)
+    history_df["run_label"] = mapped_labels.fillna(history_df["run_label"])
+    history_df["lambda_str"] = history_df["run_label"]
     return summary_df, history_df
 
 
@@ -1013,10 +1069,21 @@ def plot_channel_counts(
 
     unit = "channels"
     if active_col is None:
+        aig_counts = (
+            "valid_active_blocks" in history_df.columns
+            and "valid_inactive_blocks" in history_df.columns
+        )
         candidates = (
-            ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
-            ("open_channels", "zero_channels", "channels"),
-            ("valid_active_blocks", "valid_inactive_blocks", "blocks"),
+            (
+                ("valid_active_blocks", "valid_inactive_blocks", "blocks"),
+                ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
+                ("open_channels", "zero_channels", "channels"),
+            )
+            if aig_counts
+            else (
+                ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
+                ("open_channels", "zero_channels", "channels"),
+            )
         )
         selected = next(
             (
