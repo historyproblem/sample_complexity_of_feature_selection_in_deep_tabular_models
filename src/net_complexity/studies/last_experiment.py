@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -175,10 +176,43 @@ def _format_float(x: float | int | None) -> str:
     return f"{float(x):g}"
 
 
+def _format_label_value(value) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float):
+        formatted = f"{value:g}"
+        return re.sub(r"e([+-])0+(\d+)$", r"e\1\2", formatted)
+    return str(value).replace(" ", "_")
+
+
+def extract_run_label_values(config: dict) -> dict[str, object]:
+    """Extract aliased run-label values declared in reporting.run_label_fields."""
+    fields = _get_nested(config, ["reporting", "run_label_fields"], {})
+    if fields is None:
+        return {}
+    if not isinstance(fields, dict):
+        raise ValueError("reporting.run_label_fields must be a mapping of alias to config path")
+
+    values = {}
+    for alias, path in fields.items():
+        if not isinstance(path, str) or not path:
+            raise ValueError(
+                f"reporting.run_label_fields.{alias} must be a non-empty dotted path"
+            )
+        value = _get_nested(config, path.split("."), None)
+        if value is None:
+            raise ValueError(f"Run-label config path not found: {path}")
+        if isinstance(value, (dict, list, tuple)):
+            raise ValueError(f"Run-label config path must point to a scalar: {path}")
+        values[str(alias)] = value
+    return values
+
+
 def make_run_label(
     history: pd.DataFrame,
     run_name: str,
     config_lambda_coef: float | None,
+    label_values: dict[str, object] | None = None,
 ) -> str:
     """
     Статический label для легенды.
@@ -187,6 +221,12 @@ def make_run_label(
     - lambda_coef в history может меняться по эпохам;
     - поэтому нельзя использовать per-row lambda_coef как lambda_str для groupby.
     """
+    if label_values:
+        return "_".join(
+            f"{alias}_{_format_label_value(value)}"
+            for alias, value in label_values.items()
+        )
+
     if config_lambda_coef is not None:
         return f"λ={config_lambda_coef:g}"
 
@@ -401,6 +441,7 @@ def load_single_run(
 
     flat_cfg = flatten_dict(cfg)
     config_lambda_coef = get_config_lambda_coef(cfg)
+    label_values = extract_run_label_values(cfg)
 
     history = normalize_history_columns(
         history,
@@ -420,6 +461,7 @@ def load_single_run(
         history=history,
         run_name=run_name,
         config_lambda_coef=config_lambda_coef,
+        label_values=label_values,
     )
 
     # Статическая строка для старых функций, которые ждут lambda_str.
@@ -435,6 +477,7 @@ def load_single_run(
         "config_lambda_coef": config_lambda_coef,
         "config_lambda_str": "unknown" if config_lambda_coef is None else f"{config_lambda_coef:g}",
         "run_label": run_label,
+        **{f"label_{alias}": value for alias, value in label_values.items()},
     }
 
     history = add_meta_columns(history, base_info)
@@ -706,6 +749,16 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return summary_df, history_df
 
 
+def load_study(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load either one run directory or a study containing several runs."""
+    study_dir = Path(study_dir)
+    if (study_dir / "history.csv").exists():
+        history_df = load_history(study_dir)
+        summary_df = pd.DataFrame([summarize_one_run(study_dir)])
+        return summary_df, history_df
+    return collect_runs(study_dir)
+
+
 # =========================
 # SUMMARY
 # =========================
@@ -794,22 +847,22 @@ def plot_metric(
     *,
     x_col: str = "epoch",
     run_col: str = "run_name",
-    label_col: str = "lambda_str",
+    label_col: str | None = None,
     yscale: str = "linear",
+    xscale: str = "linear",
     title: str | None = None,
+    ylabel: str | None = None,
     figsize: tuple = (10, 5),
     alpha: float = 0.75,
     linewidth: float = 1.6,
     show_legend: bool = True,
     show_mean: bool = False,
+    average_by: str | None = None,
+    run_name: str | None = None,
+    ax=None,
+    show: bool = True,
 ):
-    """
-    Универсальный график metric / epoch.
-
-    yscale:
-    - "linear"
-    - "log"
-    """
+    """Plot one history metric with optional run filtering and averaging."""
 
     if history_df.empty:
         raise ValueError("history_df is empty")
@@ -823,36 +876,67 @@ def plot_metric(
     if x_col not in history_df.columns:
         raise ValueError(f"No x_col '{x_col}' in history_df")
 
-    plt.figure(figsize=figsize)
-    ax = plt.gca()
+    if xscale not in {"linear", "log"}:
+        raise ValueError("xscale must be 'linear' or 'log'")
+    if yscale not in {"linear", "log"}:
+        raise ValueError("yscale must be 'linear' or 'log'")
 
     plot_df = history_df.copy()
-    plot_df = plot_df.sort_values([run_col, x_col])
+    if run_col not in plot_df.columns:
+        plot_df[run_col] = "single_run"
 
-    for run_name, g in plot_df.groupby(run_col):
-        g = g.dropna(subset=[x_col, metric])
+    if run_name is not None:
+        plot_df = plot_df[plot_df[run_col] == run_name].copy()
+        if plot_df.empty:
+            raise ValueError(f"No run '{run_name}' in column '{run_col}'")
 
-        if g.empty:
-            continue
-
-        if label_col in g.columns:
-            label_value = str(g[label_col].iloc[0])
-            if label_value.startswith("λ=") or label_value.startswith("adaptive"):
-                label = f"{run_name}, {label_value}"
-            else:
-                label = f"{run_name}, λ={label_value}"
-        else:
-            label = str(run_name)
-
-        ax.plot(
-            g[x_col],
-            g[metric],
-            alpha=alpha,
-            linewidth=linewidth,
-            label=label,
+    if label_col is None:
+        label_col = next(
+            (col for col in ("run_label", "lambda_str", run_col) if col in plot_df.columns),
+            run_col,
         )
+    if label_col not in plot_df.columns:
+        raise ValueError(f"label_col='{label_col}' not found in history_df")
 
-    if show_mean and label_col in plot_df.columns:
+    plot_df = plot_df.dropna(subset=[x_col, metric])
+    if xscale == "log":
+        plot_df = plot_df[plot_df[x_col] > 0]
+    if yscale == "log":
+        plot_df = plot_df[plot_df[metric] > 0]
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    if average_by is not None:
+        if average_by not in plot_df.columns:
+            raise ValueError(f"average_by='{average_by}' not found in history_df")
+
+        grouped = (
+            plot_df.groupby([average_by, x_col], as_index=False)[metric]
+            .mean()
+            .sort_values([average_by, x_col])
+        )
+        for group_value, group in grouped.groupby(average_by, sort=False):
+            ax.plot(
+                group[x_col],
+                group[metric],
+                linewidth=linewidth,
+                label=str(group_value),
+            )
+    else:
+        plot_df = plot_df.sort_values([run_col, x_col])
+
+        for run_value, group in plot_df.groupby(run_col, sort=False):
+            label = str(group[label_col].iloc[0])
+            ax.plot(
+                group[x_col],
+                group[metric],
+                alpha=alpha,
+                linewidth=linewidth,
+                label=label if label else str(run_value),
+            )
+
+    if show_mean and average_by is None:
         for label_value, g in plot_df.groupby(label_col):
             mean_df = (
                 g.groupby(x_col, as_index=False)[metric]
@@ -869,19 +953,24 @@ def plot_metric(
             )
 
     ax.set_xlabel(x_col)
-    ax.set_ylabel(metric)
+    ax.set_ylabel(ylabel or metric)
     ax.set_title(title or f"{metric} / {x_col}")
+    ax.set_xscale(xscale)
     ax.set_yscale(yscale)
 
     ax.minorticks_on()
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.15)
 
-    if show_legend:
-        ax.legend(fontsize=8)
+    if show_legend and ax.lines:
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ax.legend(unique.values(), unique.keys(), fontsize=8)
 
-    plt.tight_layout()
-    plt.show()
+    ax.figure.tight_layout()
+    if show:
+        plt.show()
+    return ax
 
 
 def plot_acc_epoch(
@@ -897,13 +986,129 @@ def plot_acc_epoch(
     if acc_col is None:
         raise ValueError("Cannot find accuracy column")
 
-    plot_metric(
+    return plot_metric(
         history_df,
         acc_col,
         yscale=yscale,
         title=f"{acc_col} / epoch",
         show_mean=show_mean,
     )
+
+
+def plot_channel_counts(
+    history_df: pd.DataFrame,
+    *,
+    active_col: str = "valid_real_active_channels",
+    closed_col: str = "valid_real_zero_channels",
+    total_channels: float | None = None,
+    run_name: str | None = None,
+    figsize: tuple = (10, 5),
+    show: bool = True,
+):
+    """Plot factual open/closed channel counts with count and percentage axes."""
+    required = {"epoch", active_col, closed_col}
+    missing = sorted(required - set(history_df.columns))
+    if missing:
+        raise ValueError(
+            f"Channel-count columns not found: {missing}. "
+            "Factual counts require valid_real_active_channels and "
+            "valid_real_zero_channels in history.csv."
+        )
+
+    plot_df = history_df.copy()
+    if "run_name" not in plot_df.columns:
+        plot_df["run_name"] = "single_run"
+    if "run_label" not in plot_df.columns:
+        plot_df["run_label"] = plot_df["run_name"]
+    if run_name is not None:
+        plot_df = plot_df[plot_df["run_name"] == run_name].copy()
+        if plot_df.empty:
+            raise ValueError(f"No run '{run_name}' in history_df")
+
+    plot_df = plot_df.dropna(subset=["epoch", active_col, closed_col])
+    inferred_totals = plot_df[active_col] + plot_df[closed_col]
+    if total_channels is None:
+        if inferred_totals.empty:
+            raise ValueError("No channel-count values to plot")
+        total_channels = float(inferred_totals.median())
+        if not np.allclose(inferred_totals, total_channels, rtol=1e-5, atol=1e-5):
+            raise ValueError(
+                "The inferred total number of channels is not constant. "
+                "Pass total_channels explicitly or select one compatible run."
+            )
+    if total_channels <= 0:
+        raise ValueError("total_channels must be positive")
+
+    _, ax = plt.subplots(figsize=figsize)
+    for current_run, group in plot_df.groupby("run_name", sort=False):
+        group = group.sort_values("epoch")
+        label = str(group["run_label"].iloc[0] or current_run)
+        ax.plot(
+            group["epoch"],
+            group[active_col],
+            label=f"open, {label}",
+            linewidth=1.8,
+        )
+        ax.plot(
+            group["epoch"],
+            group[closed_col],
+            label=f"closed, {label}",
+            linewidth=1.8,
+            linestyle="--",
+        )
+
+    percent_axis = ax.secondary_yaxis(
+        "right",
+        functions=(
+            lambda count: 100.0 * count / total_channels,
+            lambda percent: percent * total_channels / 100.0,
+        ),
+    )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("channels")
+    percent_axis.set_ylabel("channels, % of total")
+    ax.set_title("Factual open / closed channels")
+    ax.grid(True, which="major", alpha=0.35)
+    ax.grid(True, which="minor", alpha=0.15)
+    ax.legend(fontsize=8)
+    ax.figure.tight_layout()
+    if show:
+        plt.show()
+    return ax
+
+
+def plot_lambda_epoch(
+    history_df: pd.DataFrame,
+    *,
+    lambda_col: str = "lambda_coef",
+    **kwargs,
+):
+    """Plot lambda by epoch on a logarithmic y-axis."""
+    return plot_metric(
+        history_df,
+        lambda_col,
+        yscale="log",
+        title=f"{lambda_col} / epoch",
+        **kwargs,
+    )
+
+
+def plot_core_statistics(
+    history_df: pd.DataFrame,
+    *,
+    run_name: str | None = None,
+) -> dict[str, object]:
+    """Plot the standard accuracy, factual channel-count, and lambda charts."""
+    view_df = history_df
+    if run_name is not None:
+        view_df = history_df[history_df["run_name"] == run_name].copy()
+        if view_df.empty:
+            raise ValueError(f"No run '{run_name}' in history_df")
+    return {
+        "accuracy": plot_acc_epoch(view_df),
+        "channels": plot_channel_counts(view_df),
+        "lambda": plot_lambda_epoch(view_df),
+    }
 
 
 def plot_metric_by_epoch(
@@ -919,127 +1124,103 @@ def plot_metric_by_epoch(
     yscale: str = "linear",
     figsize: tuple[int, int] = (12, 7),
 ):
-    if metric not in df_history.columns:
-        raise ValueError(f"Column '{metric}' not found in df_history")
-
-    if "epoch" not in df_history.columns:
-        raise ValueError("Column 'epoch' not found in df_history")
-
-    if xscale not in {"linear", "log"}:
-        raise ValueError("xscale must be 'linear' or 'log'")
-
-    if yscale not in {"linear", "log"}:
-        raise ValueError("yscale must be 'linear' or 'log'")
-
-    df = df_history.copy()
-
-    if "run_name" not in df.columns:
-        df["run_name"] = "single_run"
-
-    if label_col is None:
-        if "run_label" in df.columns:
-            label_col = "run_label"
-        elif "lambda_str" in df.columns:
-            label_col = "lambda_str"
-        else:
-            label_col = "run_name"
-
-    if label_col not in df.columns:
-        raise ValueError(f"label_col='{label_col}' not found in df_history")
-
-    run_names = sorted(df["run_name"].dropna().unique())
-
     if run_name is not None and run_number is not None:
         raise ValueError("Pass either run_name or run_number, not both")
 
     if run_number is not None:
+        if "run_name" not in df_history.columns:
+            run_names = ["single_run"]
+        else:
+            run_names = sorted(df_history["run_name"].dropna().unique())
         if run_number < 1 or run_number > len(run_names):
             raise ValueError(f"run_number must be from 1 to {len(run_names)}")
         run_name = run_names[run_number - 1]
 
-    if run_name is not None:
-        df = df[df["run_name"] == run_name].copy()
-
-    df = df.dropna(subset=["epoch", metric])
-
-    if xscale == "log":
-        df = df[df["epoch"] > 0]
-
-    if yscale == "log":
-        df = df[df[metric] > 0]
-
-    fig, ax = plt.subplots(figsize=figsize)
-
+    average_by = None
     if average_by_lambda:
-        group_col = "config_lambda_coef" if "config_lambda_coef" in df.columns else label_col
-
-        plot_df = (
-            df
-            .dropna(subset=[group_col, metric])
-            .groupby([group_col, "epoch"], as_index=False)
-            .agg(
-                metric_mean=(metric, "mean"),
-                metric_std=(metric, "std"),
-                num_runs=(metric, "count"),
-            )
-            .sort_values([group_col, "epoch"])
+        average_by = next(
+            (
+                col
+                for col in ("config_lambda_coef", label_col, "lambda_str", "run_label")
+                if col is not None and col in df_history.columns
+            ),
+            None,
         )
+        if average_by is None:
+            raise ValueError("Cannot find a lambda column for averaging")
 
-        for group_value, g in plot_df.groupby(group_col, sort=False):
-            g = g.sort_values("epoch")
-
-            ax.plot(
-                g["epoch"],
-                g["metric_mean"],
-                linewidth=2.2,
-                label=str(group_value),
-            )
-
-    else:
-        # Группируем по run_name, а не по lambda_coef.
-        # Иначе adaptive lambda разрезает одну траекторию на много кусков.
-        for run_name_i, g in df.groupby("run_name", sort=False, dropna=False):
-            g = g.sort_values("epoch")
-
-            label = str(g[label_col].iloc[0])
-
-            ax.plot(
-                g["epoch"],
-                g[metric],
-                alpha=0.75,
-                linewidth=1.6,
-                label=label,
-            )
-
-    handles, labels = ax.get_legend_handles_labels()
-    unique = dict(zip(labels, handles))
-
-    ax.legend(
-        unique.values(),
-        unique.keys(),
-        title=label_col,
-        bbox_to_anchor=(1.02, 1),
-        loc="upper left",
+    return plot_metric(
+        df_history,
+        metric,
+        title=title,
+        ylabel=ylabel,
+        label_col=label_col,
+        xscale=xscale,
+        yscale=yscale,
+        figsize=figsize,
+        average_by=average_by,
+        run_name=run_name,
     )
 
-    ax.set_xscale(xscale)
-    ax.set_yscale(yscale)
 
-    ax.set_xlabel("epoch")
-    ax.set_ylabel(ylabel or metric)
+def plot_metrics(
+    history_df: pd.DataFrame,
+    metrics: list[str] | tuple[str, ...],
+    **kwargs,
+) -> dict[str, object]:
+    """Plot several metrics using the same options and return their axes."""
+    return {metric: plot_metric(history_df, metric, **kwargs) for metric in metrics}
 
-    plot_title = title or f"{metric} / epoch"
-    if run_name is not None:
-        plot_title += f"\nrun: {run_name}"
 
-    ax.set_title(plot_title)
+def plot_gradient_norms(
+    history_df: pd.DataFrame,
+    *,
+    components: tuple[str, ...] = ("ce", "regularization", "total"),
+    parameter_group: str = "total",
+    statistic: str = "mean",
+    **kwargs,
+) -> dict[str, object]:
+    """Plot the standard component-wise gradient-norm metrics."""
+    metrics = [
+        f"grad_norm_{component}_{parameter_group}_{statistic}"
+        for component in components
+    ]
+    missing = [metric for metric in metrics if metric not in history_df.columns]
+    if missing:
+        available = sorted(
+            col for col in history_df.columns if col.startswith("grad_norm_")
+        )
+        raise ValueError(
+            f"Gradient norm columns not found: {missing}. Available: {available}"
+        )
+    return plot_metrics(history_df, metrics, **kwargs)
 
-    ax.minorticks_on()
-    ax.grid(True, which="major", alpha=0.35)
-    ax.grid(True, which="minor", alpha=0.15)
 
-    plt.tight_layout()
-    plt.show()
+_GRADIENT_NORM_RE = re.compile(
+    r"^grad_norm_(ce|regularization|total)_(.+)_(mean|max)$"
+)
+
+
+def gradient_norm_catalog(history_df: pd.DataFrame) -> pd.DataFrame:
+    """Describe available gradient-norm columns in a notebook-friendly table."""
+    rows = []
+    for metric in history_df.columns:
+        match = _GRADIENT_NORM_RE.match(metric)
+        if match is None:
+            continue
+        component, parameter_group, statistic = match.groups()
+        rows.append(
+            {
+                "metric": metric,
+                "component": component,
+                "parameter_group": parameter_group,
+                "statistic": statistic,
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["metric", "component", "parameter_group", "statistic"],
+    ).sort_values(["parameter_group", "component", "statistic"], ignore_index=True)
 
 
 def print_available_metrics(df_history: pd.DataFrame) -> None:
@@ -1053,6 +1234,7 @@ def print_available_metrics(df_history: pd.DataFrame) -> None:
         "compute",
         "real_prob",
         "estim_prob",
+        "grad_norm",
     ]
 
     cols = [
