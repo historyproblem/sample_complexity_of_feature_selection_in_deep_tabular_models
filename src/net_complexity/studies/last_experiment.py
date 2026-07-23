@@ -1197,7 +1197,7 @@ def plot_channel_counts(
     show: bool = True,
     interactive: bool = False,
 ):
-    """Plot thresholded open/closed channel or block counts with dual axes."""
+    """Plot thresholded open channel or block counts with count and percentage axes."""
     if (active_col is None) != (closed_col is None):
         raise ValueError("Pass active_col and closed_col together")
 
@@ -1295,24 +1295,9 @@ def plot_channel_counts(
                     ),
                 )
             )
-            figure.add_trace(
-                go.Scatter(
-                    x=group["epoch"],
-                    y=group[closed_col],
-                    mode="lines",
-                    line={"color": color, "width": 2, "dash": "dash"},
-                    name=f"{label}, closed",
-                    legendgroup=label,
-                    showlegend=False,
-                    hovertemplate=(
-                        f"{label}<br>state=closed<br>epoch=%{{x}}<br>{unit}=%{{y:.4g}}"
-                        "<extra></extra>"
-                    ),
-                )
-            )
             seen_labels.add(label)
 
-        max_count = float(plot_df[[active_col, closed_col]].max().max())
+        max_count = float(plot_df[active_col].max())
         percent_max = 100.0 * max_count * 1.05 / total_channels
         figure.add_trace(
             go.Scatter(
@@ -1325,7 +1310,7 @@ def plot_channel_counts(
             )
         )
         figure.update_layout(
-            title=f"Factual open / closed {unit} (solid=open, dash=closed)",
+            title=f"Factual open {unit}",
             xaxis_title="epoch",
             yaxis={"title": unit, "rangemode": "tozero"},
             yaxis2={
@@ -1357,15 +1342,8 @@ def plot_channel_counts(
         ax.plot(
             group["epoch"],
             group[active_col],
-            label=f"open, {label}",
+            label=label,
             linewidth=1.8,
-        )
-        ax.plot(
-            group["epoch"],
-            group[closed_col],
-            label=f"closed, {label}",
-            linewidth=1.8,
-            linestyle="--",
         )
 
     percent_axis = ax.secondary_yaxis(
@@ -1378,7 +1356,7 @@ def plot_channel_counts(
     ax.set_xlabel("epoch")
     ax.set_ylabel(unit)
     percent_axis.set_ylabel(f"{unit}, % of total")
-    ax.set_title(f"Factual open / closed {unit}")
+    ax.set_title(f"Factual open {unit}")
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.15)
     ax.legend(fontsize=8)
