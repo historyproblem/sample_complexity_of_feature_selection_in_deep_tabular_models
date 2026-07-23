@@ -1008,6 +1008,35 @@ def _plot_metric_interactive(
         margin={"r": 320},
         template="plotly_white",
     )
+    figure.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(80, 80, 80, 0.22)",
+        nticks=40,
+        minor={
+            "showgrid": True,
+            "gridcolor": "rgba(80, 80, 80, 0.10)",
+            "griddash": "dot",
+        },
+    )
+    figure.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(80, 80, 80, 0.22)",
+        nticks=40,
+        minor={
+            "showgrid": True,
+            "gridcolor": "rgba(80, 80, 80, 0.10)",
+            "griddash": "dot",
+        },
+    )
+    if "acc" in metric.lower() or "accuracy" in metric.lower():
+        finite_values = pd.to_numeric(plot_df[metric], errors="coerce").dropna()
+        threshold = 90.0 if not finite_values.empty and finite_values.max() > 1.5 else 0.9
+        figure.add_hline(
+            y=threshold,
+            line={"color": "rgba(180, 40, 40, 0.75)", "dash": "dash", "width": 1.5},
+            annotation_text="90% accuracy",
+            annotation_position="top left",
+        )
     if show:
         figure.show()
     return figure
@@ -1330,6 +1359,26 @@ def plot_channel_counts(
             },
             margin={"r": 380},
             template="plotly_white",
+        )
+        figure.update_xaxes(
+            showgrid=True,
+            gridcolor="rgba(80, 80, 80, 0.22)",
+            nticks=40,
+            minor={
+                "showgrid": True,
+                "gridcolor": "rgba(80, 80, 80, 0.10)",
+                "griddash": "dot",
+            },
+        )
+        figure.layout.yaxis.update(
+            showgrid=True,
+            gridcolor="rgba(80, 80, 80, 0.22)",
+            nticks=40,
+            minor={
+                "showgrid": True,
+                "gridcolor": "rgba(80, 80, 80, 0.10)",
+                "griddash": "dot",
+            },
         )
         if show:
             figure.show()
