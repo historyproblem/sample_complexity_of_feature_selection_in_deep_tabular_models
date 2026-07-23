@@ -180,6 +180,10 @@ def _format_label_value(value) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, float):
+        if value != 0.0 and abs(value) <= 1e-3:
+            mantissa, exponent = f"{value:.6e}".split("e")
+            mantissa = mantissa.rstrip("0").rstrip(".")
+            return f"{mantissa}e{int(exponent)}"
         formatted = f"{value:g}"
         return re.sub(r"e([+-])0+(\d+)$", r"e\1\2", formatted)
     return str(value).replace(" ", "_")
@@ -294,6 +298,8 @@ def _add_aig_gate_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     gates = df[gate_cols].apply(pd.to_numeric, errors="coerce")
 
+    df["valid_active_blocks"] = (gates >= 0.5).sum(axis=1)
+    df["valid_inactive_blocks"] = (gates < 0.5).sum(axis=1)
     df["valid_active_blocks_expected"] = gates.sum(axis=1)
     df["valid_inactive_blocks_expected"] = len(gate_cols) - gates.sum(axis=1)
     df["valid_mean_gate_prob"] = gates.mean(axis=1)
@@ -720,8 +726,14 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     for run_dir in run_dirs:
         try:
-            history = load_history(run_dir)
+            history, config_row = load_single_run(
+                run_dir=run_dir,
+                experiment_name=Path(study_dir).name,
+                experiment_dir=Path(study_dir),
+                run_name=run_dir.name,
+            )
             summary = summarize_one_run(run_dir)
+            summary.update(config_row)
         except Exception as e:
             print(f"[skip] {run_dir}: {e}")
             continue
@@ -738,6 +750,7 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     summary_df = pd.DataFrame(summaries)
 
     if not summary_df.empty:
+        summary_df, history_df = _apply_automatic_run_labels(summary_df, history_df)
         if "best_valid_accuracy" in summary_df.columns:
             summary_df = summary_df.sort_values(
                 "best_valid_accuracy",
@@ -746,6 +759,51 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         else:
             summary_df = summary_df.sort_values("run_name")
 
+    return summary_df, history_df
+
+
+_AUTO_RUN_LABEL_FIELDS = (
+    ("lambda_init", "model.lambda_coef"),
+    ("entropy", "model.entropy_regularization"),
+    ("regularization", "model.backbone.resnet_block.gate_regularization"),
+    ("step", "training_arguments.adaptive_lambda.log_step_init"),
+    ("update", "training_arguments.adaptive_lambda.update_every_epochs"),
+)
+
+
+def _apply_automatic_run_labels(
+    summary_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build concise labels from config fields that vary inside the study."""
+    explicit_fields = [
+        col for col in summary_df.columns if col.startswith("reporting.run_label_fields.")
+    ]
+    if explicit_fields or summary_df.empty or history_df.empty:
+        return summary_df, history_df
+
+    varying_fields = [
+        (alias, path)
+        for alias, path in _AUTO_RUN_LABEL_FIELDS
+        if path in summary_df.columns and summary_df[path].dropna().nunique() > 1
+    ]
+    if not varying_fields:
+        return summary_df, history_df
+
+    summary_df = summary_df.copy()
+    summary_df["run_label"] = summary_df.apply(
+        lambda row: "_".join(
+            f"{alias}_{_format_label_value(row[path])}"
+            for alias, path in varying_fields
+        ),
+        axis=1,
+    )
+    label_by_run = summary_df.set_index("run_name")["run_label"]
+
+    history_df = history_df.copy()
+    mapped_labels = history_df["run_name"].map(label_by_run)
+    history_df["run_label"] = mapped_labels.fillna(history_df["run_label"])
+    history_df["lambda_str"] = history_df["run_label"]
     return summary_df, history_df
 
 
@@ -998,21 +1056,56 @@ def plot_acc_epoch(
 def plot_channel_counts(
     history_df: pd.DataFrame,
     *,
-    active_col: str = "valid_real_active_channels",
-    closed_col: str = "valid_real_zero_channels",
+    active_col: str | None = None,
+    closed_col: str | None = None,
     total_channels: float | None = None,
     run_name: str | None = None,
     figsize: tuple = (10, 5),
     show: bool = True,
 ):
-    """Plot factual open/closed channel counts with count and percentage axes."""
+    """Plot thresholded open/closed channel or block counts with dual axes."""
+    if (active_col is None) != (closed_col is None):
+        raise ValueError("Pass active_col and closed_col together")
+
+    unit = "channels"
+    if active_col is None:
+        aig_counts = (
+            "valid_active_blocks" in history_df.columns
+            and "valid_inactive_blocks" in history_df.columns
+        )
+        candidates = (
+            (
+                ("valid_active_blocks", "valid_inactive_blocks", "blocks"),
+                ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
+                ("open_channels", "zero_channels", "channels"),
+            )
+            if aig_counts
+            else (
+                ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
+                ("open_channels", "zero_channels", "channels"),
+            )
+        )
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate[0] in history_df.columns and candidate[1] in history_df.columns
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                "Cannot derive factual open/closed counts. Expected real count "
+                "columns, per-channel valid_*zero_prob* columns, or AIG "
+                "valid_g_prob_* columns in history.csv."
+            )
+        active_col, closed_col, unit = selected
+
     required = {"epoch", active_col, closed_col}
     missing = sorted(required - set(history_df.columns))
     if missing:
         raise ValueError(
-            f"Channel-count columns not found: {missing}. "
-            "Factual counts require valid_real_active_channels and "
-            "valid_real_zero_channels in history.csv."
+            f"Count columns not found: {missing}."
         )
 
     plot_df = history_df.copy()
@@ -1065,9 +1158,9 @@ def plot_channel_counts(
         ),
     )
     ax.set_xlabel("epoch")
-    ax.set_ylabel("channels")
-    percent_axis.set_ylabel("channels, % of total")
-    ax.set_title("Factual open / closed channels")
+    ax.set_ylabel(unit)
+    percent_axis.set_ylabel(f"{unit}, % of total")
+    ax.set_title(f"Factual open / closed {unit}")
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.15)
     ax.legend(fontsize=8)

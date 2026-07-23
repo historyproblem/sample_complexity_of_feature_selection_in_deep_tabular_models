@@ -5,6 +5,7 @@ import pytest
 matplotlib.use("Agg")
 
 from net_complexity.studies.last_experiment import (
+    _apply_automatic_run_labels,
     extract_run_label_values,
     gradient_norm_catalog,
     make_run_label,
@@ -12,6 +13,7 @@ from net_complexity.studies.last_experiment import (
     plot_gradient_norms,
     plot_metric,
     plot_metric_by_epoch,
+    normalize_history_columns,
 )
 
 
@@ -81,6 +83,59 @@ def test_plot_channel_counts_has_count_and_percentage_axes(history_df):
     assert ax.child_axes[0].get_ylabel() == "channels, % of total"
 
 
+def test_plot_channel_counts_postprocesses_zero_probabilities():
+    history = normalize_history_columns(
+        pd.DataFrame(
+            {
+                "epoch": [1, 2],
+                "valid_layer_1_zero_prob": [0.2, 0.8],
+                "valid_layer_2_zero_prob": [0.9, 0.1],
+            }
+        )
+    )
+
+    ax = plot_channel_counts(history, show=False)
+
+    assert history["open_channels"].tolist() == [1, 1]
+    assert history["zero_channels"].tolist() == [1, 1]
+    assert len(ax.lines) == 2
+
+
+def test_plot_channel_counts_postprocesses_aig_gate_probabilities():
+    history = normalize_history_columns(
+        pd.DataFrame(
+            {
+                "epoch": [1, 2],
+                "valid_g_prob_block_1": [0.2, 0.8],
+                "valid_g_prob_block_2": [0.9, 0.1],
+            }
+        )
+    )
+
+    ax = plot_channel_counts(history, show=False)
+
+    assert history["valid_active_blocks"].tolist() == [1, 1]
+    assert history["valid_inactive_blocks"].tolist() == [1, 1]
+    assert ax.get_ylabel() == "blocks"
+
+
+def test_aig_block_counts_take_priority_over_channel_aliases():
+    history = normalize_history_columns(
+        pd.DataFrame(
+            {
+                "epoch": [1],
+                "valid_g_prob_block_1": [0.8],
+                "valid_real_active_channels": [10],
+                "valid_real_zero_channels": [20],
+            }
+        )
+    )
+
+    ax = plot_channel_counts(history, show=False)
+
+    assert ax.get_ylabel() == "blocks"
+
+
 def test_config_driven_run_label_uses_aliases_and_compact_scientific_notation(history_df):
     config = {
         "model": {"lambda_coef": 1e-6},
@@ -97,3 +152,25 @@ def test_config_driven_run_label_uses_aliases_and_compact_scientific_notation(hi
     label = make_run_label(history_df, "long-run-name", 1e-6, values)
 
     assert label == "lambda_init_1e-6_step_2"
+
+
+def test_automatic_labels_use_only_config_fields_that_vary(history_df):
+    summary = pd.DataFrame(
+        {
+            "run_name": ["run_1", "run_2"],
+            "model.lambda_coef": [1e-4, 1.0],
+            "model.entropy_regularization": ["disabled", "plus_negative_entropy"],
+            "model.backbone.resnet_block.gate_regularization": [
+                "l1_probability",
+                "l1_probability",
+            ],
+        }
+    )
+
+    labeled_summary, labeled_history = _apply_automatic_run_labels(summary, history_df)
+
+    assert labeled_summary["run_label"].tolist() == [
+        "lambda_init_1e-4_entropy_disabled",
+        "lambda_init_1_entropy_plus_negative_entropy",
+    ]
+    assert set(labeled_history["run_label"]) == set(labeled_summary["run_label"])
