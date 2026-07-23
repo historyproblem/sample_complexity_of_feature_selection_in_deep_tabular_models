@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 
 try:
@@ -899,6 +900,118 @@ def make_summary(
 # PLOTTING
 # =========================
 
+def _plot_metric_interactive(
+    history_df: pd.DataFrame,
+    metric: str,
+    *,
+    x_col: str,
+    run_col: str,
+    label_col: str | None,
+    xscale: str,
+    yscale: str,
+    title: str | None,
+    ylabel: str | None,
+    show_mean: bool,
+    average_by: str | None,
+    run_name: str | None,
+    show: bool,
+):
+    plot_df = history_df.copy()
+    if run_col not in plot_df.columns:
+        plot_df[run_col] = "single_run"
+    if run_name is not None:
+        plot_df = plot_df[plot_df[run_col] == run_name].copy()
+        if plot_df.empty:
+            raise ValueError(f"No run '{run_name}' in column '{run_col}'")
+    if label_col is None:
+        label_col = next(
+            (col for col in ("run_label", "lambda_str", run_col) if col in plot_df.columns),
+            run_col,
+        )
+    if label_col not in plot_df.columns:
+        raise ValueError(f"label_col='{label_col}' not found in history_df")
+
+    plot_df = plot_df.dropna(subset=[x_col, metric])
+    if xscale == "log":
+        plot_df = plot_df[plot_df[x_col] > 0]
+    if yscale == "log":
+        plot_df = plot_df[plot_df[metric] > 0]
+
+    figure = go.Figure()
+    if average_by is not None:
+        if average_by not in plot_df.columns:
+            raise ValueError(f"average_by='{average_by}' not found in history_df")
+        grouped = (
+            plot_df.groupby([average_by, x_col], as_index=False)[metric]
+            .mean()
+            .sort_values([average_by, x_col])
+        )
+        for group_value, group in grouped.groupby(average_by, sort=False):
+            label = str(group_value)
+            figure.add_trace(
+                go.Scatter(
+                    x=group[x_col],
+                    y=group[metric],
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                )
+            )
+    else:
+        seen_labels = set()
+        for _, group in plot_df.groupby(run_col, sort=False):
+            group = group.sort_values(x_col)
+            label = str(group[label_col].iloc[0])
+            figure.add_trace(
+                go.Scatter(
+                    x=group[x_col],
+                    y=group[metric],
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                    showlegend=label not in seen_labels,
+                    hovertemplate=(
+                        f"{label}<br>{x_col}=%{{x}}<br>{metric}=%{{y:.6g}}<extra></extra>"
+                    ),
+                )
+            )
+            seen_labels.add(label)
+
+        if show_mean:
+            for label, group in plot_df.groupby(label_col, sort=False):
+                mean_df = group.groupby(x_col, as_index=False)[metric].mean()
+                figure.add_trace(
+                    go.Scatter(
+                        x=mean_df[x_col],
+                        y=mean_df[metric],
+                        mode="lines",
+                        line={"width": 4, "dash": "dash"},
+                        name=f"mean {label}",
+                        legendgroup=str(label),
+                    )
+                )
+
+    figure.update_layout(
+        title=title or f"{metric} / {x_col}",
+        xaxis_title=x_col,
+        yaxis_title=ylabel or metric,
+        xaxis_type=xscale,
+        yaxis_type=yscale,
+        hovermode="x unified",
+        legend={
+            "x": 1.02,
+            "y": 1.0,
+            "xanchor": "left",
+            "yanchor": "top",
+            "groupclick": "togglegroup",
+        },
+        margin={"r": 320},
+        template="plotly_white",
+    )
+    if show:
+        figure.show()
+    return figure
+
 def plot_metric(
     history_df: pd.DataFrame,
     metric: str,
@@ -919,6 +1032,7 @@ def plot_metric(
     run_name: str | None = None,
     ax=None,
     show: bool = True,
+    interactive: bool = False,
 ):
     """Plot one history metric with optional run filtering and averaging."""
 
@@ -938,6 +1052,23 @@ def plot_metric(
         raise ValueError("xscale must be 'linear' or 'log'")
     if yscale not in {"linear", "log"}:
         raise ValueError("yscale must be 'linear' or 'log'")
+
+    if interactive:
+        return _plot_metric_interactive(
+            history_df,
+            metric,
+            x_col=x_col,
+            run_col=run_col,
+            label_col=label_col,
+            xscale=xscale,
+            yscale=yscale,
+            title=title,
+            ylabel=ylabel,
+            show_mean=show_mean,
+            average_by=average_by,
+            run_name=run_name,
+            show=show,
+        )
 
     plot_df = history_df.copy()
     if run_col not in plot_df.columns:
@@ -1037,6 +1168,7 @@ def plot_acc_epoch(
     acc_col: str | None = None,
     yscale: str = "linear",
     show_mean: bool = False,
+    interactive: bool = False,
 ):
     if acc_col is None:
         acc_col = _find_acc_col(history_df)
@@ -1050,6 +1182,7 @@ def plot_acc_epoch(
         yscale=yscale,
         title=f"{acc_col} / epoch",
         show_mean=show_mean,
+        interactive=interactive,
     )
 
 
@@ -1062,6 +1195,7 @@ def plot_channel_counts(
     run_name: str | None = None,
     figsize: tuple = (10, 5),
     show: bool = True,
+    interactive: bool = False,
 ):
     """Plot thresholded open/closed channel or block counts with dual axes."""
     if (active_col is None) != (closed_col is None):
@@ -1132,6 +1266,90 @@ def plot_channel_counts(
     if total_channels <= 0:
         raise ValueError("total_channels must be positive")
 
+    if interactive:
+        figure = go.Figure()
+        colors = (
+            "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
+            "#19D3F3", "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
+        )
+        seen_labels = set()
+        color_by_label = {}
+        for _, group in plot_df.groupby("run_name", sort=False):
+            group = group.sort_values("epoch")
+            label = str(group["run_label"].iloc[0])
+            if label not in color_by_label:
+                color_by_label[label] = colors[len(color_by_label) % len(colors)]
+            color = color_by_label[label]
+            figure.add_trace(
+                go.Scatter(
+                    x=group["epoch"],
+                    y=group[active_col],
+                    mode="lines",
+                    line={"color": color, "width": 2},
+                    name=label,
+                    legendgroup=label,
+                    showlegend=label not in seen_labels,
+                    hovertemplate=(
+                        f"{label}<br>state=open<br>epoch=%{{x}}<br>{unit}=%{{y:.4g}}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            figure.add_trace(
+                go.Scatter(
+                    x=group["epoch"],
+                    y=group[closed_col],
+                    mode="lines",
+                    line={"color": color, "width": 2, "dash": "dash"},
+                    name=f"{label}, closed",
+                    legendgroup=label,
+                    showlegend=False,
+                    hovertemplate=(
+                        f"{label}<br>state=closed<br>epoch=%{{x}}<br>{unit}=%{{y:.4g}}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+            seen_labels.add(label)
+
+        max_count = float(plot_df[[active_col, closed_col]].max().max())
+        percent_max = 100.0 * max_count * 1.05 / total_channels
+        figure.add_trace(
+            go.Scatter(
+                x=[plot_df["epoch"].min(), plot_df["epoch"].max()],
+                y=[0.0, percent_max],
+                yaxis="y2",
+                opacity=0.0,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        figure.update_layout(
+            title=f"Factual open / closed {unit} (solid=open, dash=closed)",
+            xaxis_title="epoch",
+            yaxis={"title": unit, "rangemode": "tozero"},
+            yaxis2={
+                "title": f"{unit}, % of total",
+                "overlaying": "y",
+                "side": "right",
+                "range": [0.0, percent_max],
+            },
+            hovermode="x unified",
+            legend={
+                "x": 1.08,
+                "y": 1.0,
+                "xanchor": "left",
+                "yanchor": "top",
+                "groupclick": "togglegroup",
+                "title": {"text": "Click runs to show/hide"},
+            },
+            margin={"r": 380},
+            template="plotly_white",
+        )
+        if show:
+            figure.show()
+        return figure
+
     _, ax = plt.subplots(figsize=figsize)
     for current_run, group in plot_df.groupby("run_name", sort=False):
         group = group.sort_values("epoch")
@@ -1190,6 +1408,7 @@ def plot_core_statistics(
     history_df: pd.DataFrame,
     *,
     run_name: str | None = None,
+    interactive: bool = True,
 ) -> dict[str, object]:
     """Plot the standard accuracy, factual channel-count, and lambda charts."""
     view_df = history_df
@@ -1198,9 +1417,9 @@ def plot_core_statistics(
         if view_df.empty:
             raise ValueError(f"No run '{run_name}' in history_df")
     return {
-        "accuracy": plot_acc_epoch(view_df),
-        "channels": plot_channel_counts(view_df),
-        "lambda": plot_lambda_epoch(view_df),
+        "accuracy": plot_acc_epoch(view_df, interactive=interactive),
+        "channels": plot_channel_counts(view_df, interactive=interactive),
+        "lambda": plot_lambda_epoch(view_df, interactive=interactive),
     }
 
 
