@@ -294,6 +294,8 @@ def _add_aig_gate_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     gates = df[gate_cols].apply(pd.to_numeric, errors="coerce")
 
+    df["valid_active_blocks"] = (gates >= 0.5).sum(axis=1)
+    df["valid_inactive_blocks"] = (gates < 0.5).sum(axis=1)
     df["valid_active_blocks_expected"] = gates.sum(axis=1)
     df["valid_inactive_blocks_expected"] = len(gate_cols) - gates.sum(axis=1)
     df["valid_mean_gate_prob"] = gates.mean(axis=1)
@@ -998,21 +1000,45 @@ def plot_acc_epoch(
 def plot_channel_counts(
     history_df: pd.DataFrame,
     *,
-    active_col: str = "valid_real_active_channels",
-    closed_col: str = "valid_real_zero_channels",
+    active_col: str | None = None,
+    closed_col: str | None = None,
     total_channels: float | None = None,
     run_name: str | None = None,
     figsize: tuple = (10, 5),
     show: bool = True,
 ):
-    """Plot factual open/closed channel counts with count and percentage axes."""
+    """Plot thresholded open/closed channel or block counts with dual axes."""
+    if (active_col is None) != (closed_col is None):
+        raise ValueError("Pass active_col and closed_col together")
+
+    unit = "channels"
+    if active_col is None:
+        candidates = (
+            ("valid_real_active_channels", "valid_real_zero_channels", "channels"),
+            ("open_channels", "zero_channels", "channels"),
+            ("valid_active_blocks", "valid_inactive_blocks", "blocks"),
+        )
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate[0] in history_df.columns and candidate[1] in history_df.columns
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                "Cannot derive factual open/closed counts. Expected real count "
+                "columns, per-channel valid_*zero_prob* columns, or AIG "
+                "valid_g_prob_* columns in history.csv."
+            )
+        active_col, closed_col, unit = selected
+
     required = {"epoch", active_col, closed_col}
     missing = sorted(required - set(history_df.columns))
     if missing:
         raise ValueError(
-            f"Channel-count columns not found: {missing}. "
-            "Factual counts require valid_real_active_channels and "
-            "valid_real_zero_channels in history.csv."
+            f"Count columns not found: {missing}."
         )
 
     plot_df = history_df.copy()
@@ -1065,9 +1091,9 @@ def plot_channel_counts(
         ),
     )
     ax.set_xlabel("epoch")
-    ax.set_ylabel("channels")
-    percent_axis.set_ylabel("channels, % of total")
-    ax.set_title("Factual open / closed channels")
+    ax.set_ylabel(unit)
+    percent_axis.set_ylabel(f"{unit}, % of total")
+    ax.set_title(f"Factual open / closed {unit}")
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.15)
     ax.legend(fontsize=8)
