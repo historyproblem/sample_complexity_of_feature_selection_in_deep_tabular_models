@@ -18,6 +18,7 @@ from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
 from net_complexity.models.feature_selection import get_AIG_modules, get_gumbel_modules, get_stg_modules
 from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, AdaptiveLambdaController
+from net_complexity.training.gradient_norms import GradientNormLogger
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
 from net_complexity.training.run_history import RunHistory
@@ -1492,25 +1493,36 @@ def train_epoch(model,
                 epoch: int = 0,
                 run_history: RunHistory | None = None,
                 scheduler_state: SchedulerState | None = None,
-                progress_context: ProgressContext | None = None) -> dict[str, float]:
+                progress_context: ProgressContext | None = None,
+                gradient_norm_logger: GradientNormLogger | None = None) -> dict[str, float]:
     """Train for one epoch. Returns the epoch-average per-block gradient L2 norms."""
     model.train()
 
     grad_norm_sums: dict[str, float] = {}
     num_batches = 0
 
-    for X, y in dataloaders.train_dataloader:
+    for batch_index, (X, y) in enumerate(dataloaders.train_dataloader):
         X, y = X.to(device), y.to(device)
         output = model(X, y)
 
         metrics.train_metrics.update(X, output, y, model)
 
+        collect_gradient_norms = (
+            gradient_norm_logger is not None
+            and batch_index % gradient_norm_logger.every_n_batches == 0
+        )
+        if collect_gradient_norms:
+            gradient_norm_logger.collect_autograd("ce", output.ce_loss)
+            regularization_term = output.loss - output.ce_loss
+            gradient_norm_logger.collect_autograd("regularization", regularization_term)
         output.loss.backward()
 
         for key, value in _compute_block_gradient_norms(model).items():
             grad_norm_sums[key] = grad_norm_sums.get(key, 0.0) + value
         num_batches += 1
 
+        if collect_gradient_norms:
+            gradient_norm_logger.collect_total()
         optimizer.step()
         if scheduler_state is not None and scheduler_state.interval == "batch":
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
@@ -1544,6 +1556,7 @@ def train(model: nn.Module,
     gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
     batchnorm_recalibration = _build_batchnorm_recalibration(training_arguments)
     collapse_guard = _build_collapse_guard(training_arguments)
+    gradient_norm_cfg = getattr(training_arguments, "gradient_norm_logging", None)
     adaptive_lambda = _build_adaptive_lambda(
         training_arguments,
         model,
@@ -1586,6 +1599,17 @@ def train(model: nn.Module,
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
+
+        gradient_norm_logger = (
+            GradientNormLogger(
+                model,
+                log_per_layer=bool(getattr(gradient_norm_cfg, "log_per_layer", True)),
+                every_n_batches=int(getattr(gradient_norm_cfg, "every_n_batches", 1)),
+            )
+            if gradient_norm_cfg is not None
+            and bool(getattr(gradient_norm_cfg, "enabled", False))
+            else None
+        )
         epoch_grad_norms = train_epoch(
             model,
             optimizer,
@@ -1597,6 +1621,7 @@ def train(model: nn.Module,
             run_history=run_history,
             scheduler_state=scheduler_state,
             progress_context=progress_context,
+            gradient_norm_logger=gradient_norm_logger,
         )
         train_time = perf_counter() - train_started_at
 
@@ -1615,6 +1640,8 @@ def train(model: nn.Module,
         valid_time = perf_counter() - valid_started_at
 
         train_metrics = dict(metrics.train_metrics.compute())
+        if gradient_norm_logger is not None:
+            train_metrics.update(gradient_norm_logger.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
         train_metrics.update({f"train_{key}": value for key, value in epoch_grad_norms.items()})

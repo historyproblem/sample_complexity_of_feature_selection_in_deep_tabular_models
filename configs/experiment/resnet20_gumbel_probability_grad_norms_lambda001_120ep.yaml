@@ -1,0 +1,59 @@
+# @package _global_
+
+# Short diagnostic run for component-wise gradient norms with the differentiable
+# Gumbel regularizer mean(p_open), not a hard count of sampled open gates.
+defaults:
+  - /data: cifar10_best_practice
+  - /model: cifar_resnet20
+  - /method: gumbel
+  - /train: best_practice
+  - /optimizer: sgd_resnet20
+  - /scheduler: cosine_200
+  - /metrics: gumbel
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.01
+  gumbel_init_mode: paper
+  bypass_on_zero_lambda: false
+  backbone:
+    resnet_block:
+      beta: 1.0
+      temperature: 1.0
+
+optimizer:
+  gate_weight_decay_scale: null
+
+scheduler:
+  T_max: 120
+
+training_arguments:
+  num_epochs: 120
+  gradient_norm_logging:
+    enabled: true
+    log_per_layer: true
+    every_n_batches: 5
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+run_history:
+  log_channel_history: true
+  log_gate_history: true
+
+mlflow:
+  enabled: true
+  run_name: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"
+  tags:
+    model_type: "CIFARResNet20_Gumbel"
+    method: "gumbel_probability_l1"
+    regularization: "mean_p_open"
+    gradient_components: "ce,lambda_regularization,total"
+    recipe: "resnet20_gumbel_probability_grad_norms_lambda001_120ep"
