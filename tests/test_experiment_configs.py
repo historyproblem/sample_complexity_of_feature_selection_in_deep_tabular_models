@@ -214,6 +214,60 @@ def test_tune_resnet50_aig_entropy_grid_uses_requested_defaults():
     ]
 
 
+def test_resnet50_aig_plus_neg_entropy_coef_grid_uses_three_repeats():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_plus_neg_entropy_coef_lambda1em4_120ep_repeats3_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_plus_neg_entropy_coef_lambda1em4_120ep_repeats3.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_plus_neg_entropy_coef_lambda1em4_120ep_"
+                "repeats3_ordered"
+            )
+        },
+        "_self_",
+    ]
+    assert tuning_cfg.training_arguments.num_epochs == 120
+    assert tuning_cfg.training_arguments.gradient_norm_logging.enabled is True
+    assert tuning_cfg.training_arguments.gradient_norm_logging.every_n_batches == 5
+    assert tuning_cfg.training_arguments.adaptive_lambda.enabled is True
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.scheduler.T_max == 120
+    assert tuning_cfg.reporting.run_label_fields.beta == "model.entropy_regularization_coef"
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 4
+    assert tuning_cfg.tuning.repeats_per_trial == 3
+    assert tuning_cfg.tuning.seed_base == 42
+    assert tuning_cfg.tuning.seed_stride == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [0.0001] * 4
+    assert [
+        point["model.backbone.resnet_block.gate_regularization"]
+        for point in points
+    ] == ["l1_probability"] * 4
+    assert [point["model.entropy_regularization"] for point in points] == [
+        "plus_negative_entropy",
+    ] * 4
+    assert [point["model.entropy_regularization_coef"] for point in points] == [
+        0.0,
+        0.1,
+        0.3,
+        1.0,
+    ]
+    assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"3"}
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
+
+
 def test_masked_gumbel_method_matches_current_gumbel_defaults():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
 
@@ -361,6 +415,8 @@ def test_aig_method_preserves_dynamic_gates_for_existing_zero_lambda_recipes():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "aig.yaml")
 
     assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.entropy_regularization == "disabled"
+    assert cfg.model.entropy_regularization_coef == 1.0
 
 
 def test_best_practice_resnet20_gumbel_baseline_sets_beta_to_one():

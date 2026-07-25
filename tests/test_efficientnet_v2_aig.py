@@ -93,6 +93,25 @@ def test_aig_efficientnetv2_s_training_engine_forward_contract():
     )
 
 
+def test_aig_efficientnetv2_zero_entropy_coef_keeps_aig_active():
+    model = AIGEfficientNetV2S(
+        num_classes=10,
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=True,
+        gate_regularization="l1_probability",
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.0,
+    )
+    model.eval()
+
+    output = model(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]))
+
+    assert all(not module.bypass for module in get_AIG_modules(model).values())
+    torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
+    torch.testing.assert_close(output.reg_loss, 0.25 * output.mean_p_open)
+    torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+
 def test_aig_efficientnetv2_s_bypass_on_zero_lambda():
     model = AIGEfficientNetV2S(
         num_classes=10,

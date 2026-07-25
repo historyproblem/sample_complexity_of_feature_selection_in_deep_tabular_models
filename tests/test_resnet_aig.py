@@ -123,6 +123,38 @@ def test_aig_wrapper_logs_soft_posterior_regularization_components(
     torch.testing.assert_close(output.loss, output.ce_loss + expected)
 
 
+def test_zero_entropy_coef_keeps_plus_negative_entropy_aig_active():
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    backbone = TinyAIGClassifier()
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=True,
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.0,
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    assert not backbone.gate.bypass
+
+    output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+
+    assert not backbone.gate.bypass
+    torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
+    torch.testing.assert_close(output.reg_loss, 0.25 * output.mean_p_open)
+    torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+
 def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
     with pytest.raises(ValueError, match="entropy_regularization must be one of"):
         ClassificationFeatureSelectionWrapper(

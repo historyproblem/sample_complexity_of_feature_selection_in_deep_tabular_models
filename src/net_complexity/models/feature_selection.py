@@ -19,6 +19,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  gumbel_init_mode: str = "auto",
                  bypass_on_zero_lambda: bool = True,
                  entropy_regularization: str = "disabled",
+                 entropy_regularization_coef: float = 1.0,
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -31,6 +32,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.entropy_regularization_sign = entropy_regularization_sign(
             self.entropy_regularization
         )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
         self.set_aig_bypass(self._should_bypass_gumbel())
@@ -50,7 +52,11 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                 mean_p_open, negative_entropy = posterior_terms
                 reg_loss = (
                     self.lambda_coef * mean_p_open
-                    + self.entropy_regularization_sign * negative_entropy
+                    + (
+                        self.entropy_regularization_sign
+                        * self.entropy_regularization_coef
+                        * negative_entropy
+                    )
                 )
                 raw_reg_loss = mean_p_open
                 loss = ce_loss + reg_loss

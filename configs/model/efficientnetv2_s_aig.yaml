@@ -15,6 +15,7 @@ model:
   gate_regularization: l2_gate
   # disabled | plus_negative_entropy | minus_negative_entropy
   entropy_regularization: disabled
+  entropy_regularization_coef: 1.0
   stem_stride: 1
   criterion:
     _target_: torch.nn.CrossEntropyLoss

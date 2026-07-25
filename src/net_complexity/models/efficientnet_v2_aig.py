@@ -287,6 +287,7 @@ class AIGEfficientNetV2(nn.Module):
         gate_temperature: float = 1.0,
         gate_regularization: str = "l2_gate",
         entropy_regularization: str = "disabled",
+        entropy_regularization_coef: float = 1.0,
         stem_stride: int = 1,
         criterion: nn.Module | None = None,
     ) -> None:
@@ -298,6 +299,7 @@ class AIGEfficientNetV2(nn.Module):
         self.entropy_regularization_sign = entropy_regularization_sign(
             self.entropy_regularization
         )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
         self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
 
         layer_infos = [
@@ -511,7 +513,11 @@ class AIGEfficientNetV2(nn.Module):
         if mean_p_open is not None and negative_entropy is not None:
             gate_loss = (
                 float(self.lambda_coef) * mean_p_open
-                + self.entropy_regularization_sign * negative_entropy
+                + (
+                    self.entropy_regularization_sign
+                    * self.entropy_regularization_coef
+                    * negative_entropy
+                )
             )
         else:
             gate_loss = float(self.lambda_coef) * aux["gate_loss"]
