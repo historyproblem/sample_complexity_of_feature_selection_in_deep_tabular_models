@@ -211,6 +211,56 @@ def test_efficientnetv2_aig_scaled_epoch_tuning_config_uses_expected_lambda_step
         assert "mlflow.tags.recovery" not in point
 
 
+def test_efficientnetv2_s_aig_plus_neg_entropy_beta_grid_uses_requested_points():
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep.yaml"
+    )
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep_ordered.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "efficientnetv2_s_aig_adaptive_lambda_init1em4_cifar10"},
+        {
+            "tuning": (
+                "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_"
+                "120ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    assert cfg.training_arguments.num_epochs == 120
+    assert cfg.training_arguments.gradient_norm_logging.enabled is True
+    assert cfg.training_arguments.gradient_norm_logging.every_n_batches == 5
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert cfg.scheduler.T_max == 120
+    assert cfg.reporting.run_label_fields.beta == "model.entropy_regularization_coef"
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.repeats_per_trial == 1
+    assert cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [0.0001] * 4
+    assert [point["model.gate_regularization"] for point in points] == [
+        "l1_probability",
+    ] * 4
+    assert [point["model.entropy_regularization"] for point in points] == [
+        "plus_negative_entropy",
+    ] * 4
+    assert [point["model.entropy_regularization_coef"] for point in points] == [
+        0.0,
+        0.1,
+        0.3,
+        1.0,
+    ]
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
+
+
 def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():
     cfg = OmegaConf.load(
         CONFIGS_DIR / "experiment" / "efficientnetv2_s_aig_adaptive_lambda_init1em4_cifar10.yaml"
