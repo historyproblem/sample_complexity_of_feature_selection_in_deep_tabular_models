@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: stochastic_depth
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: stochastic_depth
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+training_arguments:
+  batchnorm_recalibration:
+    enabled: false
+
+mlflow:
+  run_name: "stochastic_depth_resnet50_cifar10_pL_${model.backbone.final_survival_probability}"
+  tags:
+    model_type: "ResNet50_StochasticDepth"
+    method: "stochastic_depth"
+    recipe: "stochastic_depth_resnet50_cifar10"

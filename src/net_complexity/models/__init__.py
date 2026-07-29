@@ -41,6 +41,13 @@ from .layer_skipping import apply_layer_skipping, apply_layer_skipping_from_conf
 from .outputs import ClassifModelOutput
 from .pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 from .resnet import Block, Bottleneck, ResNet
+from .stochastic_depth import (
+    HuangStochasticDepthBlockFactory,
+    HuangStochasticDepthBottleneck,
+    StochasticDepthResNet50,
+    get_stochastic_depth_blocks,
+    linear_survival_probabilities,
+)
 
 __all__ = [
     "AIGBlockGate",
@@ -68,6 +75,8 @@ __all__ = [
     "GumbelBottleneckLayer",
     "GumbelLayer",
     "GumbleSoftmax",
+    "HuangStochasticDepthBlockFactory",
+    "HuangStochasticDepthBottleneck",
     "LambdaLayer",
     "MaskedGumbelLayer",
     "PrunedCIFARResNet",
@@ -83,12 +92,15 @@ __all__ = [
     "STGResNet50",
     "STGResNet101",
     "STGResNet152",
+    "StochasticDepthResNet50",
     "get_AIG_modules",
     "get_AIG_regularization_loss",
     "get_gumbel_loss",
     "get_gumbel_modules",
+    "get_stochastic_depth_blocks",
     "get_stg_loss",
     "get_stg_modules",
+    "linear_survival_probabilities",
     "parse_AIG_activations",
     "replace_layers_by_regex",
     "apply_layer_skipping",

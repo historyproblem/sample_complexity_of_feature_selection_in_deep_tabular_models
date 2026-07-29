@@ -8,6 +8,10 @@ from .complexity import (
     WeightStatisticsMetric,
 )
 from .gumbel import GumbelProbMetric
+from .stochastic_depth import (
+    StochasticDepthActiveBlocksMetric,
+    StochasticDepthFLOPsMetric,
+)
 from .stg import STGProbMetric
 from .storage import (
     ExperimentMetricsStore,
@@ -28,6 +32,8 @@ __all__ = [
     "MultiLossMetric",
     "Multimetric",
     "NormalizedMarginMetric",
+    "StochasticDepthActiveBlocksMetric",
+    "StochasticDepthFLOPsMetric",
     "STGProbMetric",
     "WeightStatisticsMetric",
     "list_metric_files",

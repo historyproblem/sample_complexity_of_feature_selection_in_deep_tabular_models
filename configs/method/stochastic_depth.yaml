@@ -1,0 +1,10 @@
+# @package _global_
+
+model:
+  lambda_coef: 0.0
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  backbone:
+    _target_: net_complexity.wrappers.StochasticDepthResNet50
+    final_survival_probability: 0.5
+    survival_schedule: linear
