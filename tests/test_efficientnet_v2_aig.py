@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -154,6 +155,15 @@ def test_aig_flops_metric_reports_static_and_gate_adjusted_flops():
     computed = metric.compute()
 
     assert computed["aig_num_gated_blocks"] == 35
+    assert computed["aig_executed_gmac_per_image"] > 0
+    assert computed["aig_ideal_routed_gmac_per_image"] > 0
+    assert (
+        computed["aig_ideal_routed_gmac_per_image"]
+        < computed["aig_executed_gmac_per_image"]
+    )
+    assert computed["aig_executed_gflop_per_image"] == pytest.approx(
+        2.0 * computed["aig_executed_gmac_per_image"]
+    )
     assert computed["aig_static_flops_per_sample"] > 0
     assert computed["aig_active_flops_per_sample"] > 0
     assert computed["aig_skipped_flops_per_sample"] > 0

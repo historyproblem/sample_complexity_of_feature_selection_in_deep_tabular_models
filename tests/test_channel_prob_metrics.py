@@ -251,6 +251,10 @@ def test_run_history_splits_scalar_history_and_channel_history(tmp_path):
     assert summary["best_valid"]["value"] == 0.9
     assert summary["artifacts"]["history"] == "history.csv"
     assert summary["artifacts"]["channel_history"] == "channel_history.csv.gz"
+    assert summary["timing"]["num_epochs_executed"] == 1
+    assert summary["timing"]["full_train_time_sec"] == 2.1
+    assert summary["timing"]["train_forward_backward_time_sec"] == 1.5
+    assert summary["timing"]["validation_time_sec"] == 0.5
 
 
 def test_run_history_assigns_unique_epoch_labels_to_replayed_epochs(tmp_path):

@@ -10,7 +10,9 @@ metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
   test_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.aig.AIGFLOPsMetric

@@ -685,6 +685,8 @@ def summarize_one_run(run_dir: Path) -> dict:
         "valid_aig_flops_skip_ratio",
         "valid_aig_flops_active_ratio",
         "valid_aig_gated_branch_flops_per_sample",
+        "valid_executed_gmac_per_image",
+        "valid_ideal_routed_gmac_per_image",
         "lambda_coef",
     ]:
         if col in df.columns:
@@ -882,6 +884,8 @@ def make_summary(
             "valid_aig_flops_skip_ratio",
             "valid_aig_flops_active_ratio",
             "valid_aig_gated_branch_flops_per_sample",
+            "valid_executed_gmac_per_image",
+            "valid_ideal_routed_gmac_per_image",
         ]:
             if col in g.columns:
                 row[f"best_{col}"] = best_row[col]

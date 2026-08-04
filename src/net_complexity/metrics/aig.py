@@ -78,6 +78,12 @@ class AIGFLOPsMetric(BaseMetric):
         self.model = self._unwrap_model(model)
         if self.input_sample is None and isinstance(input, torch.Tensor):
             self.input_sample = input[: self.sample_size].detach().cpu()
+        for name, module in get_AIG_modules(self.model).items():
+            activations = getattr(module, "activations", None)
+            if isinstance(activations, torch.Tensor):
+                detached = activations.detach().float()
+                self._gate_sums[name] += float(detached.sum().item())
+                self._gate_counts[name] += int(detached.numel())
 
     def compute(self):
         if self.model is None or self.input_sample is None:
@@ -89,34 +95,59 @@ class AIGFLOPsMetric(BaseMetric):
         )
         aig_modules = get_AIG_modules(self.model)
 
-        gated_branch_flops = 0.0
-        active_branch_flops = 0.0
+        gated_branch_macs = 0.0
+        active_branch_macs = 0.0
         gate_means = []
 
         for name, module in aig_modules.items():
-            branch_flops = float(self._branch_flops(name, per_layer))
-            if branch_flops <= 0.0:
+            branch_macs = float(self._branch_macs(name, per_layer))
+            if branch_macs <= 0.0:
                 continue
 
-            gate_mean = self._gate_mean(module)
-            gated_branch_flops += branch_flops
-            active_branch_flops += branch_flops * gate_mean
+            gate_mean = self._dataset_gate_mean(name, module)
+            gated_branch_macs += branch_macs
+            active_branch_macs += branch_macs * gate_mean
             gate_means.append(gate_mean)
 
-        skipped_branch_flops = max(gated_branch_flops - active_branch_flops, 0.0)
-        active_flops = max(float(model_metrics.flops) - skipped_branch_flops, 0.0)
+        skipped_branch_macs = max(gated_branch_macs - active_branch_macs, 0.0)
         batch_size = max(int(model_metrics.batch_size), 1)
+        executed_macs_per_image = float(model_metrics.macs) / batch_size
+        ideal_routed_macs_per_image = max(
+            float(model_metrics.macs) - skipped_branch_macs,
+            0.0,
+        ) / batch_size
+        executed_gmac_per_image = executed_macs_per_image / 1e9
+        ideal_routed_gmac_per_image = ideal_routed_macs_per_image / 1e9
+        skipped_gmac_per_image = (skipped_branch_macs / batch_size) / 1e9
+
+        # Canonical reporting uses multiply-adds (GMAC/image). The optional
+        # GFLOP columns follow the explicit convention FLOP = 2 * MAC.
+        canonical = {
+            "executed_gmac_per_image": executed_gmac_per_image,
+            "ideal_routed_gmac_per_image": ideal_routed_gmac_per_image,
+            "executed_gflop_per_image": 2.0 * executed_gmac_per_image,
+            "ideal_routed_gflop_per_image": 2.0 * ideal_routed_gmac_per_image,
+            "aig_executed_gmac_per_image": executed_gmac_per_image,
+            "aig_ideal_routed_gmac_per_image": ideal_routed_gmac_per_image,
+            "aig_ideal_skipped_gmac_per_image": skipped_gmac_per_image,
+            "aig_executed_gflop_per_image": 2.0 * executed_gmac_per_image,
+            "aig_ideal_routed_gflop_per_image": 2.0 * ideal_routed_gmac_per_image,
+        }
+
         static_flops = float(model_metrics.flops)
+        skipped_branch_flops = 2.0 * skipped_branch_macs
+        active_flops = max(static_flops - skipped_branch_flops, 0.0)
 
         return {
+            **canonical,
             "aig_static_flops": static_flops,
             "aig_static_flops_per_sample": static_flops / batch_size,
             "aig_active_flops": active_flops,
             "aig_active_flops_per_sample": active_flops / batch_size,
             "aig_skipped_flops": skipped_branch_flops,
             "aig_skipped_flops_per_sample": skipped_branch_flops / batch_size,
-            "aig_gated_branch_flops": gated_branch_flops,
-            "aig_gated_branch_flops_per_sample": gated_branch_flops / batch_size,
+            "aig_gated_branch_flops": 2.0 * gated_branch_macs,
+            "aig_gated_branch_flops_per_sample": 2.0 * gated_branch_macs / batch_size,
             "aig_flops_skip_ratio": (
                 skipped_branch_flops / static_flops
                 if static_flops > 0.0
@@ -138,6 +169,8 @@ class AIGFLOPsMetric(BaseMetric):
     def reset(self):
         self.model = None
         self.input_sample = None
+        self._gate_sums = defaultdict(float)
+        self._gate_counts = defaultdict(int)
 
     @staticmethod
     def _unwrap_model(model):
@@ -158,13 +191,19 @@ class AIGFLOPsMetric(BaseMetric):
 
         return 1.0
 
+    def _dataset_gate_mean(self, name: str, module) -> float:
+        count = self._gate_counts[name]
+        if count > 0:
+            return self._gate_sums[name] / count
+        return self._gate_mean(module)
+
     @staticmethod
-    def _branch_flops(name: str, per_layer) -> int:
+    def _branch_macs(name: str, per_layer) -> int:
         if name.endswith(".gate"):
             block_prefix = name[: -len(".gate")]
             branch_prefix = f"{block_prefix}.branch."
             return sum(
-                layer_metrics.flops
+                layer_metrics.macs
                 for layer_name, layer_metrics in per_layer.items()
                 if layer_name.startswith(branch_prefix)
             )
@@ -177,7 +216,7 @@ class AIGFLOPsMetric(BaseMetric):
             f"{name}.conv3",
         )
         return sum(
-            layer_metrics.flops
+            layer_metrics.macs
             for layer_name, layer_metrics in per_layer.items()
             if layer_name.startswith(legacy_prefixes)
         )

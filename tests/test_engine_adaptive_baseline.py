@@ -99,7 +99,7 @@ def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(t
         run_dir = run_root / "generated_baseline_run"
         run_dir.mkdir(parents=True, exist_ok=False)
         (run_dir / "history.csv").write_text(
-            "epoch,valid_accuracy\n1,0.81\n2,0.84\n",
+            "epoch,valid_accuracy,epoch_time_sec\n1,0.81,2.5\n2,0.84,3.5\n",
             encoding="utf-8",
         )
         calls.append(run_dir)
@@ -127,6 +127,9 @@ def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(t
     assert baseline_reference.metric_name == "valid_accuracy"
     assert baseline_reference.history_path == baseline_root / "generated_baseline_run" / "history.csv"
     assert baseline_reference.accuracy_by_epoch == {1: 0.81, 2: 0.84}
+    assert baseline_reference.full_train_time_sec == 6.0
+    assert baseline_reference.num_epochs_executed == 2
+    assert baseline_reference.generated_for_current_run is True
 
 
 def test_ensure_adaptive_baseline_reference_reuses_existing_history_without_rerunning(tmp_path, monkeypatch):
@@ -149,3 +152,4 @@ def test_ensure_adaptive_baseline_reference_reuses_existing_history_without_reru
     assert baseline_reference is not None
     assert baseline_reference.history_path == existing_run_dir / "history.csv"
     assert baseline_reference.accuracy_by_epoch == {1: 0.79, 2: 0.83}
+    assert baseline_reference.generated_for_current_run is False
