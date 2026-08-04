@@ -214,6 +214,10 @@ class ComputeCostMetric(BaseMetric):
             input_sample=self.input_sample,
         )
         metrics = _numeric_items("compute", model_metrics)
+        metrics.update({
+            "executed_gmac_per_image": float(model_metrics.macs_per_sample) / 1e9,
+            "executed_gflop_per_image": 2.0 * float(model_metrics.macs_per_sample) / 1e9,
+        })
 
         if self.log_per_layer:
             for name, layer_metrics in per_layer.items():
