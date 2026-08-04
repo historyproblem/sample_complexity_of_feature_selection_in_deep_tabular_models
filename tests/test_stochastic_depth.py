@@ -281,3 +281,17 @@ def test_stochastic_depth_experiment_config_and_hydra_compose():
     assert composed.model.backbone.final_survival_probability == pytest.approx(0.5)
     assert composed.model.backbone.survival_schedule == "linear"
     assert composed.training_arguments.batchnorm_recalibration.enabled is False
+
+
+def test_stochastic_depth_pl08_experiment_config_composes():
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
+        composed = compose(
+            config_name="train",
+            overrides=["experiment=stochastic_depth_resnet50_cifar10_pl08"],
+        )
+
+    assert composed.model.backbone._target_ == "net_complexity.wrappers.StochasticDepthResNet50"
+    assert composed.model.backbone.final_survival_probability == pytest.approx(0.8)
+    assert composed.model.backbone.survival_schedule == "linear"
+    assert composed.mlflow.run_name == "stochastic_depth_resnet50_cifar10_pL_0.8"

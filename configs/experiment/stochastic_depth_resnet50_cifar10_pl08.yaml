@@ -1,0 +1,16 @@
+# @package _global_
+
+defaults:
+  - stochastic_depth_resnet50_cifar10
+  - _self_
+
+# Huang et al. linear schedule:
+# p_l = 1 - (l / L) * (1 - p_L), with p_L = 0.8 for the last block.
+model:
+  backbone:
+    final_survival_probability: 0.8
+
+mlflow:
+  tags:
+    recipe: "stochastic_depth_resnet50_cifar10_pl08"
+    final_survival_probability: "0.8"
