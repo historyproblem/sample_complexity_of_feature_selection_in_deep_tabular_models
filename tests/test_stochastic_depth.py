@@ -301,18 +301,17 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
         / "tuning"
-        / "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_repeats3_ordered.yaml"
+        / "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered.yaml"
     )
     tune_cfg = OmegaConf.load(
-        CONFIGS_DIR / "tune_stochastic_depth_resnet50_pL_grid_repeats3.yaml"
+        CONFIGS_DIR / "tune_stochastic_depth_resnet50_pL_grid.yaml"
     )
 
     assert tune_cfg.defaults == [
         {"experiment": "stochastic_depth_resnet50_cifar10"},
         {
             "tuning": (
-                "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_"
-                "repeats3_ordered"
+                "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered"
             )
         },
         "_self_",
@@ -321,7 +320,7 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
     assert tuning_cfg.tuning.enabled is True
     assert tuning_cfg.tuning.mode == "grid"
     assert tuning_cfg.tuning.n_trials == 6
-    assert tuning_cfg.tuning.repeats_per_trial == 3
+    assert tuning_cfg.tuning.repeats_per_trial == 1
     assert tuning_cfg.tuning.seed_base == 42
     assert tuning_cfg.tuning.seed_stride == 1
     assert tuning_cfg.tuning.points_in_order is True
@@ -346,16 +345,16 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
         "14.3",
         "16.0",
     ]
-    assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"3"}
+    assert all("mlflow.tags.repeats_per_trial" not in point for point in points)
 
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
         composed = compose(
-            config_name="tune_stochastic_depth_resnet50_pL_grid_repeats3",
+            config_name="tune_stochastic_depth_resnet50_pL_grid",
         )
 
     assert composed.tuning.study_name == (
-        "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_repeats3_ordered"
+        "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered"
     )
     assert composed.model.backbone._target_ == "net_complexity.wrappers.StochasticDepthResNet50"
     assert composed.training_arguments.batchnorm_recalibration.enabled is False
