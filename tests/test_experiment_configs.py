@@ -815,7 +815,7 @@ def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():
 
     assert cfg.metrics.train_metrics[2].log_channel_zero_probs is False
     assert cfg.metrics.valid_metrics[2].log_channel_zero_probs is False
-    assert cfg.metrics.test_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.test_metrics[-1].log_channel_zero_probs is False
 
 
 def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_recipe():
