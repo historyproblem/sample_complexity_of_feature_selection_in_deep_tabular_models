@@ -767,6 +767,7 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 _AUTO_RUN_LABEL_FIELDS = (
     ("lambda_init", "model.lambda_coef"),
+    ("pL", "model.backbone.final_survival_probability"),
     ("entropy", "model.entropy_regularization"),
     ("regularization", "model.backbone.resnet_block.gate_regularization"),
     ("step", "training_arguments.adaptive_lambda.log_step_init"),

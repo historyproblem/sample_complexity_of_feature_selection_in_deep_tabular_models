@@ -295,3 +295,67 @@ def test_stochastic_depth_pl08_experiment_config_composes():
     assert composed.model.backbone.final_survival_probability == pytest.approx(0.8)
     assert composed.model.backbone.survival_schedule == "linear"
     assert composed.mlflow.run_name == "stochastic_depth_resnet50_cifar10_pL_0.8"
+
+
+def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_repeats3_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR / "tune_stochastic_depth_resnet50_pL_grid_repeats3.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "stochastic_depth_resnet50_cifar10"},
+        {
+            "tuning": (
+                "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_"
+                "repeats3_ordered"
+            )
+        },
+        "_self_",
+    ]
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.tuning.enabled is True
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 6
+    assert tuning_cfg.tuning.repeats_per_trial == 3
+    assert tuning_cfg.tuning.seed_base == 42
+    assert tuning_cfg.tuning.seed_stride == 1
+    assert tuning_cfg.tuning.points_in_order is True
+    assert tuning_cfg.reporting.run_label_fields.pL == (
+        "model.backbone.final_survival_probability"
+    )
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["model.backbone.final_survival_probability"] for point in points] == [
+        0.25,
+        0.35,
+        0.5,
+        0.65,
+        0.8,
+        1.0,
+    ]
+    assert [point["mlflow.tags.expected_active_blocks"] for point in points] == [
+        "9.625",
+        "10.475",
+        "11.75",
+        "13.025",
+        "14.3",
+        "16.0",
+    ]
+    assert {point["mlflow.tags.repeats_per_trial"] for point in points} == {"3"}
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
+        composed = compose(
+            config_name="tune_stochastic_depth_resnet50_pL_grid_repeats3",
+        )
+
+    assert composed.tuning.study_name == (
+        "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_repeats3_ordered"
+    )
+    assert composed.model.backbone._target_ == "net_complexity.wrappers.StochasticDepthResNet50"
+    assert composed.training_arguments.batchnorm_recalibration.enabled is False

@@ -200,3 +200,18 @@ def test_automatic_labels_use_only_config_fields_that_vary(history_df):
         "lambda_init_1_entropy_plus_negative_entropy",
     ]
     assert set(labeled_history["run_label"]) == set(labeled_summary["run_label"])
+
+
+def test_automatic_labels_include_stochastic_depth_survival_probability(history_df):
+    summary = pd.DataFrame(
+        {
+            "run_name": ["run_1", "run_2"],
+            "model.lambda_coef": [0.0, 0.0],
+            "model.backbone.final_survival_probability": [0.5, 0.8],
+        }
+    )
+
+    labeled_summary, labeled_history = _apply_automatic_run_labels(summary, history_df)
+
+    assert labeled_summary["run_label"].tolist() == ["pL_0.5", "pL_0.8"]
+    assert set(labeled_history["run_label"]) == {"pL_0.5", "pL_0.8"}
