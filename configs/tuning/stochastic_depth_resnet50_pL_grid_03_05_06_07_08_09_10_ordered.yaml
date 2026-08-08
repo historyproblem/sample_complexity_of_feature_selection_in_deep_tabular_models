@@ -15,10 +15,10 @@ reporting:
 tuning:
   enabled: true
   mode: "grid"
-  study_name: "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered"
+  study_name: "stochastic_depth_resnet50_pL_grid_03_05_06_07_08_09_10_ordered"
   direction: "maximize"
   objective_metric: "valid_accuracy"
-  n_trials: 6
+  n_trials: 7
   repeats_per_trial: 1
   timeout: null
   n_jobs: 1
@@ -32,36 +32,42 @@ tuning:
     _target_: optuna.pruners.NopPruner
   points_in_order: true
   points:
-    - model.backbone.final_survival_probability: 0.25
-      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL025
-      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL025
-      mlflow.tags.final_survival_probability: "0.25"
-      mlflow.tags.expected_active_blocks: "9.625"
-      mlflow.tags.expected_disabled_blocks: "6.375"
-    - model.backbone.final_survival_probability: 0.35
-      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL035
-      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL035
-      mlflow.tags.final_survival_probability: "0.35"
-      mlflow.tags.expected_active_blocks: "10.475"
-      mlflow.tags.expected_disabled_blocks: "5.525"
+    - model.backbone.final_survival_probability: 0.3
+      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL03
+      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL03
+      mlflow.tags.final_survival_probability: "0.3"
+      mlflow.tags.expected_active_blocks: "10.05"
+      mlflow.tags.expected_disabled_blocks: "5.95"
     - model.backbone.final_survival_probability: 0.5
       mlflow.run_name: stochastic_depth_resnet50_cifar10_pL05
       mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL05
       mlflow.tags.final_survival_probability: "0.5"
       mlflow.tags.expected_active_blocks: "11.75"
       mlflow.tags.expected_disabled_blocks: "4.25"
-    - model.backbone.final_survival_probability: 0.65
-      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL065
-      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL065
-      mlflow.tags.final_survival_probability: "0.65"
-      mlflow.tags.expected_active_blocks: "13.025"
-      mlflow.tags.expected_disabled_blocks: "2.975"
+    - model.backbone.final_survival_probability: 0.6
+      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL06
+      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL06
+      mlflow.tags.final_survival_probability: "0.6"
+      mlflow.tags.expected_active_blocks: "12.6"
+      mlflow.tags.expected_disabled_blocks: "3.4"
+    - model.backbone.final_survival_probability: 0.7
+      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL07
+      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL07
+      mlflow.tags.final_survival_probability: "0.7"
+      mlflow.tags.expected_active_blocks: "13.45"
+      mlflow.tags.expected_disabled_blocks: "2.55"
     - model.backbone.final_survival_probability: 0.8
       mlflow.run_name: stochastic_depth_resnet50_cifar10_pL08
       mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL08
       mlflow.tags.final_survival_probability: "0.8"
       mlflow.tags.expected_active_blocks: "14.3"
       mlflow.tags.expected_disabled_blocks: "1.7"
+    - model.backbone.final_survival_probability: 0.9
+      mlflow.run_name: stochastic_depth_resnet50_cifar10_pL09
+      mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL09
+      mlflow.tags.final_survival_probability: "0.9"
+      mlflow.tags.expected_active_blocks: "15.15"
+      mlflow.tags.expected_disabled_blocks: "0.85"
     - model.backbone.final_survival_probability: 1.0
       mlflow.run_name: stochastic_depth_resnet50_cifar10_pL10
       mlflow.tags.recipe: stochastic_depth_resnet50_cifar10_pL10

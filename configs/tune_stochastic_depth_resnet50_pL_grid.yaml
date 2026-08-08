@@ -1,6 +1,6 @@
 defaults:
   - experiment: stochastic_depth_resnet50_cifar10
-  - tuning: stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered
+  - tuning: stochastic_depth_resnet50_pL_grid_03_05_06_07_08_09_10_ordered
   - _self_
 
 hydra:

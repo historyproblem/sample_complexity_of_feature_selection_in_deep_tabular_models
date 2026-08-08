@@ -301,7 +301,7 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
         / "tuning"
-        / "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered.yaml"
+        / "stochastic_depth_resnet50_pL_grid_03_05_06_07_08_09_10_ordered.yaml"
     )
     tune_cfg = OmegaConf.load(
         CONFIGS_DIR / "tune_stochastic_depth_resnet50_pL_grid.yaml"
@@ -311,7 +311,7 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
         {"experiment": "stochastic_depth_resnet50_cifar10"},
         {
             "tuning": (
-                "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered"
+                "stochastic_depth_resnet50_pL_grid_03_05_06_07_08_09_10_ordered"
             )
         },
         "_self_",
@@ -319,7 +319,7 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
     assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
     assert tuning_cfg.tuning.enabled is True
     assert tuning_cfg.tuning.mode == "grid"
-    assert tuning_cfg.tuning.n_trials == 6
+    assert tuning_cfg.tuning.n_trials == 7
     assert tuning_cfg.tuning.repeats_per_trial == 1
     assert tuning_cfg.tuning.seed_base == 42
     assert tuning_cfg.tuning.seed_stride == 1
@@ -330,19 +330,21 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
 
     points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
     assert [point["model.backbone.final_survival_probability"] for point in points] == [
-        0.25,
-        0.35,
+        0.3,
         0.5,
-        0.65,
+        0.6,
+        0.7,
         0.8,
+        0.9,
         1.0,
     ]
     assert [point["mlflow.tags.expected_active_blocks"] for point in points] == [
-        "9.625",
-        "10.475",
+        "10.05",
         "11.75",
-        "13.025",
+        "12.6",
+        "13.45",
         "14.3",
+        "15.15",
         "16.0",
     ]
     assert all("mlflow.tags.repeats_per_trial" not in point for point in points)
@@ -354,7 +356,7 @@ def test_stochastic_depth_tuning_config_runs_requested_pL_grid():
         )
 
     assert composed.tuning.study_name == (
-        "stochastic_depth_resnet50_pL_grid_025_035_05_065_08_10_ordered"
+        "stochastic_depth_resnet50_pL_grid_03_05_06_07_08_09_10_ordered"
     )
     assert composed.model.backbone._target_ == "net_complexity.wrappers.StochasticDepthResNet50"
     assert composed.training_arguments.batchnorm_recalibration.enabled is False
