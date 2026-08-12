@@ -6,7 +6,10 @@ import pytest
 from omegaconf import OmegaConf
 
 from net_complexity.metrics.aig import AIGActivationsMetric
-from net_complexity.models.aig import AIGBlockGate
+from net_complexity.models.aig import (
+    AIGBlockGate,
+    bernoulli_kl_from_closed_open_log_odds,
+)
 from net_complexity.models.feature_selection import (
     AIGBottleneckLayer,
     ClassificationFeatureSelectionWrapper,
@@ -74,7 +77,11 @@ def test_aig_posterior_regularization_is_finite_for_extreme_logits(magnitude):
     )
 
     mean_p_open, negative_entropy = gate.posterior_regularization_terms()
-    reg_loss = 0.25 * mean_p_open + negative_entropy
+    reg_loss = bernoulli_kl_from_closed_open_log_odds(
+        mean_p_open,
+        negative_entropy,
+        0.25,
+    )
     reg_loss.backward()
 
     assert torch.isfinite(mean_p_open)
@@ -89,6 +96,7 @@ def test_aig_posterior_regularization_is_finite_for_extreme_logits(magnitude):
         ("disabled", 0.0),
         ("plus_negative_entropy", 1.0),
         ("minus_negative_entropy", -1.0),
+        ("bernoulli_kl", 1.0),
     ],
 )
 def test_aig_wrapper_logs_soft_posterior_regularization_components(
@@ -117,10 +125,137 @@ def test_aig_wrapper_logs_soft_posterior_regularization_components(
 
     output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
 
-    expected = 0.25 * output.mean_p_open + entropy_sign * output.negative_entropy
+    if entropy_regularization == "bernoulli_kl":
+        expected = bernoulli_kl_from_closed_open_log_odds(
+            output.mean_p_open,
+            output.negative_entropy,
+            0.25,
+        )
+    else:
+        expected = 0.25 * output.mean_p_open + entropy_sign * output.negative_entropy
     torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
     torch.testing.assert_close(output.reg_loss, expected)
     torch.testing.assert_close(output.loss, output.ce_loss + expected)
+
+
+@pytest.mark.parametrize("closed_open_log_odds", [-2.0, 0.0, 0.25, 1.0, 20.0])
+def test_aig_bernoulli_kl_matches_torch_distribution(closed_open_log_odds):
+    probabilities = torch.tensor([0.05, 0.25, 0.5, 0.9])
+    mean_p_open = probabilities.mean()
+    negative_entropy = (
+        probabilities * probabilities.log()
+        + (1.0 - probabilities) * (1.0 - probabilities).log()
+    ).mean()
+
+    actual = bernoulli_kl_from_closed_open_log_odds(
+        mean_p_open,
+        negative_entropy,
+        closed_open_log_odds,
+    )
+    prior_probability = torch.sigmoid(torch.tensor(-closed_open_log_odds))
+    expected = torch.distributions.kl_divergence(
+        torch.distributions.Bernoulli(probs=probabilities),
+        torch.distributions.Bernoulli(probs=prior_probability),
+    ).mean()
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_aig_bernoulli_kl_remains_active_at_zero_log_odds():
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=TinyAIGClassifier(),
+        lambda_coef=0.0,
+        bypass_on_zero_lambda=True,
+        entropy_regularization="bernoulli_kl",
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+    expected = torch.distributions.kl_divergence(
+        torch.distributions.Bernoulli(probs=wrapper.backbone.gate.keep_probabilities),
+        torch.distributions.Bernoulli(probs=torch.tensor(0.5)),
+    ).mean()
+
+    assert wrapper.backbone.gate.bypass is False
+    torch.testing.assert_close(output.reg_loss, expected)
+    torch.testing.assert_close(output.loss, output.ce_loss + expected)
+
+    wrapper.set_lambda_coef(0.0, bypass_gumbel=True)
+    assert wrapper.backbone.gate.bypass is False
+
+
+def test_aig_bernoulli_kl_sums_factorized_gate_terms():
+    class TwoGateAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_1 = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.gate_2 = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate_1(x)
+            x = x * self.gate_2(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=TwoGateAIGClassifier(),
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=False,
+        entropy_regularization="bernoulli_kl",
+        posterior_kl_reduction="sum",
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+    prior_probability = torch.sigmoid(torch.tensor(-0.25))
+    expected = torch.stack(
+        [
+            torch.distributions.kl_divergence(
+                torch.distributions.Bernoulli(probs=gate.keep_probabilities),
+                torch.distributions.Bernoulli(probs=prior_probability),
+            ).mean()
+            for gate in (wrapper.backbone.gate_1, wrapper.backbone.gate_2)
+        ]
+    ).sum()
+
+    torch.testing.assert_close(output.reg_loss, expected)
+    torch.testing.assert_close(output.loss, output.ce_loss + expected)
+
+
+def test_aig_entropy_mode_requires_probability_regularization():
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l2_activation")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=TinyAIGClassifier(),
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=False,
+        entropy_regularization="bernoulli_kl",
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    with pytest.raises(ValueError, match="gate_regularization='l1_probability'"):
+        wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
 
 
 def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
@@ -128,6 +263,14 @@ def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
         ClassificationFeatureSelectionWrapper(
             backbone=nn.Linear(4, 3),
             entropy_regularization="unknown",
+        )
+
+
+def test_aig_wrapper_rejects_unknown_posterior_kl_reduction():
+    with pytest.raises(ValueError, match="posterior_kl_reduction must be one of"):
+        ClassificationFeatureSelectionWrapper(
+            backbone=nn.Linear(4, 3),
+            posterior_kl_reduction="unknown",
         )
 
 

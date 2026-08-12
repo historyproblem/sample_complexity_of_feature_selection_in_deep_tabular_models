@@ -2,7 +2,8 @@
 
 model:
   bypass_on_zero_lambda: false
-  # disabled | plus_negative_entropy | minus_negative_entropy
+  # Use method=aig_bernoulli_kl for the variational KL objective.
+  # disabled | plus_negative_entropy | minus_negative_entropy | bernoulli_kl
   entropy_regularization: disabled
   criterion:
     _target_: torch.nn.CrossEntropyLoss

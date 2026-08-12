@@ -1,0 +1,19 @@
+# @package _global_
+
+# Variational AIG objective from nn_reduction_paper.pdf, Eq. (4), with beta=1.
+# model.lambda_coef = log((1 - prior_open_probability) / prior_open_probability)
+model:
+  bypass_on_zero_lambda: false
+  entropy_regularization: bernoulli_kl
+  # Eq. (2) factorizes over gates, so their KL terms are summed.
+  posterior_kl_reduction: sum
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_AIG_regularization_loss
+    _partial_: true
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.AIGBottleneckLayer
+      _partial_: true
+      gate_regularization: l1_probability

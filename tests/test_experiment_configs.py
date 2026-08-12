@@ -214,6 +214,27 @@ def test_tune_resnet50_aig_entropy_grid_uses_requested_defaults():
     ]
 
 
+def test_aig_bernoulli_kl_method_matches_variational_objective():
+    cfg = OmegaConf.load(CONFIGS_DIR / "method" / "aig_bernoulli_kl.yaml")
+
+    assert cfg.model.bypass_on_zero_lambda is False
+    assert cfg.model.entropy_regularization == "bernoulli_kl"
+    assert cfg.model.posterior_kl_reduction == "sum"
+    assert cfg.model.backbone.resnet_block.gate_regularization == "l1_probability"
+
+
+def test_resnet50_aig_bernoulli_kl_recipe_uses_fixed_prior_log_odds():
+    cfg = OmegaConf.load(
+        CONFIGS_DIR / "experiment" / "resnet50_aig_bernoulli_kl_alpha1_cifar10.yaml"
+    )
+
+    assert {"/method": "aig_bernoulli_kl"} in cfg.defaults
+    assert cfg.model.lambda_coef == 1.0
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is False
+    assert cfg.mlflow.tags.prior_open_probability == "0.26894142137"
+
+
 def test_masked_gumbel_method_matches_current_gumbel_defaults():
     cfg = OmegaConf.load(CONFIGS_DIR / "method" / "gumbel_masked.yaml")
 

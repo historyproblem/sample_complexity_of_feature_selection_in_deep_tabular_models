@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: aig_bernoulli_kl
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: aig
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  # Shared gate prior pi = sigmoid(-1) ~= 0.268941.
+  lambda_coef: 1.0
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+training_arguments:
+  # Keep the prior fixed so lambda_coef remains the Eq. (4) prior log-odds.
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+
+mlflow:
+  run_name: "resnet50_aig_bernoulli_kl_alpha1_cifar10"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "aig_bernoulli_kl"
+    recipe: "resnet50_aig_bernoulli_kl_alpha1_cifar10"
+    prior_open_probability: "0.26894142137"
+    closed_open_log_odds: "1"

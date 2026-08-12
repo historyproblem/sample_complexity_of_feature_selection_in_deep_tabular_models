@@ -11,7 +11,10 @@ ENTROPY_REGULARIZATION_MODES = {
     "disabled": 0.0,
     "plus_negative_entropy": 1.0,
     "minus_negative_entropy": -1.0,
+    "bernoulli_kl": 1.0,
 }
+
+POSTERIOR_KL_REDUCTIONS = {"mean", "sum"}
 
 
 def entropy_regularization_sign(mode: str) -> float:
@@ -22,6 +25,40 @@ def entropy_regularization_sign(mode: str) -> float:
             f"entropy_regularization must be one of: {allowed}. Got: {mode!r}"
         )
     return ENTROPY_REGULARIZATION_MODES[normalized]
+
+
+def normalize_posterior_kl_reduction(reduction: str) -> str:
+    normalized = str(reduction).strip().lower()
+    if normalized not in POSTERIOR_KL_REDUCTIONS:
+        allowed = ", ".join(sorted(POSTERIOR_KL_REDUCTIONS))
+        raise ValueError(
+            f"posterior_kl_reduction must be one of: {allowed}. Got: {reduction!r}"
+        )
+    return normalized
+
+
+def bernoulli_kl_from_closed_open_log_odds(
+    mean_p_open: torch.Tensor,
+    negative_entropy: torch.Tensor,
+    closed_open_log_odds: float,
+) -> torch.Tensor:
+    """Return mean Bernoulli KL for a shared prior over AIG gates.
+
+    ``closed_open_log_odds`` is the coefficient from Eq. (4) of the
+    variational reduction objective::
+
+        alpha = log((1 - pi) / pi)
+
+    where ``pi`` is the prior probability that a gate is open.  Expanding
+    ``KL(Bernoulli(p) || Bernoulli(pi))`` gives
+
+        negative_entropy + alpha * p + softplus(-alpha).
+
+    The softplus term is constant with respect to the model parameters, but
+    retaining it makes the reported regularization loss the actual KL value.
+    """
+    alpha = mean_p_open.new_tensor(float(closed_open_log_odds))
+    return negative_entropy + alpha * mean_p_open + F.softplus(-alpha)
 
 
 class AIGBlockGate(nn.Module):

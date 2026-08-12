@@ -6,7 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .aig import AIGBlockGate, entropy_regularization_sign
+from .aig import (
+    AIGBlockGate,
+    bernoulli_kl_from_closed_open_log_odds,
+    entropy_regularization_sign,
+    normalize_posterior_kl_reduction,
+)
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
@@ -19,6 +24,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  gumbel_init_mode: str = "auto",
                  bypass_on_zero_lambda: bool = True,
                  entropy_regularization: str = "disabled",
+                 posterior_kl_reduction: str = "mean",
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -31,6 +37,9 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.entropy_regularization_sign = entropy_regularization_sign(
             self.entropy_regularization
         )
+        self.posterior_kl_reduction = normalize_posterior_kl_reduction(
+            posterior_kl_reduction
+        )
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
         self.set_aig_bypass(self._should_bypass_gumbel())
@@ -40,7 +49,8 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         ce_loss = self.criterion(logits, y)
         mean_p_open = None
         negative_entropy = None
-        if float(self.lambda_coef) == 0.0:
+        entropy_enabled = self.entropy_regularization != "disabled"
+        if float(self.lambda_coef) == 0.0 and not entropy_enabled:
             raw_reg_loss = logits.new_zeros(())
             reg_loss = raw_reg_loss
             loss = ce_loss
@@ -48,12 +58,26 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             posterior_terms = get_AIG_posterior_regularization_terms(self.backbone)
             if posterior_terms is not None:
                 mean_p_open, negative_entropy = posterior_terms
-                reg_loss = (
-                    self.lambda_coef * mean_p_open
-                    + self.entropy_regularization_sign * negative_entropy
-                )
+                if self.entropy_regularization == "bernoulli_kl":
+                    reg_loss = bernoulli_kl_from_closed_open_log_odds(
+                        mean_p_open,
+                        negative_entropy,
+                        self.lambda_coef,
+                    )
+                    if self.posterior_kl_reduction == "sum":
+                        reg_loss = reg_loss * len(_get_unique_aig_gates(self.backbone))
+                else:
+                    reg_loss = (
+                        self.lambda_coef * mean_p_open
+                        + self.entropy_regularization_sign * negative_entropy
+                    )
                 raw_reg_loss = mean_p_open
                 loss = ce_loss + reg_loss
+            elif entropy_enabled:
+                raise ValueError(
+                    "AIG entropy regularization requires every gate to use "
+                    "gate_regularization='l1_probability'."
+                )
             else:
                 raw_reg_loss = self.regularization_loss(self.backbone)
                 reg_loss = self.lambda_coef * raw_reg_loss
@@ -70,7 +94,11 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         )
 
     def _should_bypass_gumbel(self) -> bool:
-        return self.bypass_on_zero_lambda and float(self.lambda_coef) == 0.0
+        return (
+            self.bypass_on_zero_lambda
+            and float(self.lambda_coef) == 0.0
+            and self.entropy_regularization == "disabled"
+        )
 
     def _resolve_gumbel_init_mode(self) -> str:
         mode = str(self.gumbel_init_mode).lower()
@@ -117,6 +145,8 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.lambda_coef = float(lambda_coef)
         if bypass_gumbel is None:
             bypass_gumbel = self._should_bypass_gumbel()
+        elif self.entropy_regularization != "disabled":
+            bypass_gumbel = False
         self.set_gumbel_bypass(bool(bypass_gumbel))
         self.set_aig_bypass(bool(bypass_gumbel))
 
@@ -931,11 +961,7 @@ def get_AIG_posterior_regularization_terms(
     model: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Aggregate soft-posterior terms for probability-regularized AIG gates."""
-    gates_by_id: dict[int, AIGBlockGate] = {}
-    for module in _get_aig_modules(model).values():
-        gate = module if isinstance(module, AIGBlockGate) else module.gate
-        gates_by_id[id(gate)] = gate
-    gates = list(gates_by_id.values())
+    gates = _get_unique_aig_gates(model)
 
     if not gates or not all(
         gate.regularization == "l1_probability" for gate in gates
@@ -946,6 +972,14 @@ def get_AIG_posterior_regularization_terms(
     mean_p_open = torch.stack([term[0] for term in terms]).mean()
     negative_entropy = torch.stack([term[1] for term in terms]).mean()
     return mean_p_open, negative_entropy
+
+
+def _get_unique_aig_gates(model: nn.Module) -> list[AIGBlockGate]:
+    gates_by_id: dict[int, AIGBlockGate] = {}
+    for module in _get_aig_modules(model).values():
+        gate = module if isinstance(module, AIGBlockGate) else module.gate
+        gates_by_id[id(gate)] = gate
+    return list(gates_by_id.values())
 
 
 def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):

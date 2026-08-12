@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .aig import AIGBlockGate, entropy_regularization_sign
+from .aig import (
+    AIGBlockGate,
+    bernoulli_kl_from_closed_open_log_odds,
+    entropy_regularization_sign,
+    normalize_posterior_kl_reduction,
+)
 from .outputs import ClassifModelOutput
 
 
@@ -287,6 +292,7 @@ class AIGEfficientNetV2(nn.Module):
         gate_temperature: float = 1.0,
         gate_regularization: str = "l2_gate",
         entropy_regularization: str = "disabled",
+        posterior_kl_reduction: str = "mean",
         stem_stride: int = 1,
         criterion: nn.Module | None = None,
     ) -> None:
@@ -297,6 +303,9 @@ class AIGEfficientNetV2(nn.Module):
         self.entropy_regularization = str(entropy_regularization).strip().lower()
         self.entropy_regularization_sign = entropy_regularization_sign(
             self.entropy_regularization
+        )
+        self.posterior_kl_reduction = normalize_posterior_kl_reduction(
+            posterior_kl_reduction
         )
         self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
 
@@ -428,7 +437,11 @@ class AIGEfficientNetV2(nn.Module):
                     nn.init.zeros_(module.bias)
 
     def _should_bypass_aig(self) -> bool:
-        return self.bypass_on_zero_lambda and float(self.lambda_coef) == 0.0
+        return (
+            self.bypass_on_zero_lambda
+            and float(self.lambda_coef) == 0.0
+            and self.entropy_regularization == "disabled"
+        )
 
     def _iter_gates(self):
         for module in self.modules():
@@ -446,10 +459,18 @@ class AIGEfficientNetV2(nn.Module):
         bypass_gumbel: bool | None = None,
     ) -> None:
         self.lambda_coef = float(lambda_coef)
-        bypass = self._should_bypass_aig() if bypass_gumbel is None else bool(bypass_gumbel)
+        if bypass_gumbel is None:
+            bypass = self._should_bypass_aig()
+        elif self.entropy_regularization != "disabled":
+            bypass = False
+        else:
+            bypass = bool(bypass_gumbel)
         self.set_aig_bypass(bypass)
 
-    def _collect_aux(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _collect_aux(
+        self,
+        logits: torch.Tensor,
+    ) -> dict[str, torch.Tensor | int | None]:
         probabilities = []
         values = []
         gate_losses = []
@@ -490,13 +511,14 @@ class AIGEfficientNetV2(nn.Module):
             "gate_loss": gate_loss,
             "mean_p_open": mean_p_open,
             "negative_entropy": negative_entropy,
+            "posterior_gate_count": len(posterior_terms),
         }
 
     def forward(
         self,
         x: torch.Tensor,
         y: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]] | ClassifModelOutput:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | int | None]] | ClassifModelOutput:
         x = self.stem(x)
         x = self.blocks(x)
         logits = self.head(x)
@@ -509,9 +531,23 @@ class AIGEfficientNetV2(nn.Module):
         mean_p_open = aux["mean_p_open"]
         negative_entropy = aux["negative_entropy"]
         if mean_p_open is not None and negative_entropy is not None:
-            gate_loss = (
-                float(self.lambda_coef) * mean_p_open
-                + self.entropy_regularization_sign * negative_entropy
+            if self.entropy_regularization == "bernoulli_kl":
+                gate_loss = bernoulli_kl_from_closed_open_log_odds(
+                    mean_p_open,
+                    negative_entropy,
+                    self.lambda_coef,
+                )
+                if self.posterior_kl_reduction == "sum":
+                    gate_loss = gate_loss * int(aux["posterior_gate_count"])
+            else:
+                gate_loss = (
+                    float(self.lambda_coef) * mean_p_open
+                    + self.entropy_regularization_sign * negative_entropy
+                )
+        elif self.entropy_regularization != "disabled":
+            raise ValueError(
+                "AIG entropy regularization requires every gate to use "
+                "gate_regularization='l1_probability'."
             )
         else:
             gate_loss = float(self.lambda_coef) * aux["gate_loss"]
