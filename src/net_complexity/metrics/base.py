@@ -54,6 +54,19 @@ class MultiLossMetric(BaseMetric):
         elif regularization_loss is None:
             regularization_loss = 0.0
         self.losses_dict['regularization_loss'].append(float(regularization_loss))
+        reg_loss = getattr(output, "reg_loss", None)
+        if isinstance(reg_loss, torch.Tensor):
+            reg_loss = reg_loss.detach().item()
+        elif reg_loss is None:
+            reg_loss = regularization_loss
+        self.losses_dict['reg_loss'].append(float(reg_loss))
+
+        for name in ("mean_p_open", "negative_entropy"):
+            value = getattr(output, name, None)
+            if value is not None:
+                if isinstance(value, torch.Tensor):
+                    value = value.detach().item()
+                self.losses_dict[name].append(float(value))
 
         self.losses_dict['loss'].append(float(output.loss.detach().item()))
 
