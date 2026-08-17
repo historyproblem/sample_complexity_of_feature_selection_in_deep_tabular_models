@@ -66,6 +66,9 @@ class BaselineAccuracyReference:
     history_path: Path
     metric_name: str
     accuracy_by_epoch: dict[int, float]
+    full_train_time_sec: float = 0.0
+    num_epochs_executed: int = 0
+    generated_for_current_run: bool = False
 
 
 @dataclass
@@ -345,18 +348,33 @@ def _load_baseline_accuracy_history(history_path: Path) -> tuple[str, dict[int, 
     return metric_name, accuracy_by_epoch
 
 
-def _load_baseline_accuracy_reference(root_dir: Path) -> BaselineAccuracyReference | None:
+def _load_baseline_accuracy_reference(
+    root_dir: Path,
+    *,
+    generated_for_current_run: bool = False,
+) -> BaselineAccuracyReference | None:
     history_candidates = _iter_baseline_history_candidates(root_dir)
     if not history_candidates:
         return None
 
     history_path = history_candidates[-1]
     metric_name, accuracy_by_epoch = _load_baseline_accuracy_history(history_path)
+    full_train_time_sec = 0.0
+    num_epochs_executed = 0
+    with history_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            epoch_time = row.get("epoch_time_sec")
+            if epoch_time not in {None, ""}:
+                full_train_time_sec += float(epoch_time)
+            num_epochs_executed += 1
     return BaselineAccuracyReference(
         root_dir=root_dir,
         history_path=history_path,
         metric_name=metric_name,
         accuracy_by_epoch=accuracy_by_epoch,
+        full_train_time_sec=full_train_time_sec,
+        num_epochs_executed=num_epochs_executed,
+        generated_for_current_run=generated_for_current_run,
     )
 
 
@@ -424,7 +442,10 @@ def _ensure_adaptive_baseline_reference(
         progress_context=baseline_progress_context,
     )
 
-    baseline_reference = _load_baseline_accuracy_reference(baseline_root_dir)
+    baseline_reference = _load_baseline_accuracy_reference(
+        baseline_root_dir,
+        generated_for_current_run=True,
+    )
     if baseline_reference is None:
         raise FileNotFoundError(
             f"Baseline run finished but no history.csv was found under: {baseline_root_dir}"
@@ -1009,6 +1030,50 @@ def _resolve_model_gumbel_gate_modes(model: nn.Module) -> tuple[str | None, str 
     )
 
 
+def _load_model_checkpoint_for_evaluation(
+    model: nn.Module,
+    checkpoint_path: Path,
+    *,
+    device: str,
+    gate_mode_schedule: GateModeScheduleState | None = None,
+) -> dict[str, Any]:
+    """Restore the model and non-state-dict settings used by an epoch checkpoint."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    extra_state = checkpoint.get("extra_state", {})
+    lambda_coef = extra_state.get("model_lambda_coef")
+    bypass_gumbel = extra_state.get("gumbel_bypass_enabled")
+    if lambda_coef is not None:
+        _set_model_lambda_coef(
+            model,
+            float(lambda_coef),
+            bypass_gumbel=(
+                bool(bypass_gumbel) if bypass_gumbel is not None else None
+            ),
+        )
+
+    train_gate_mode = extra_state.get("gumbel_train_gate_mode")
+    eval_gate_mode = extra_state.get("gumbel_eval_gate_mode")
+    checkpoint_epoch = int(checkpoint["epoch"])
+    if gate_mode_schedule is not None and (
+        train_gate_mode is None or eval_gate_mode is None
+    ):
+        scheduled_train_mode, scheduled_eval_mode, _ = (
+            gate_mode_schedule.resolve_epoch_state(checkpoint_epoch)
+        )
+        train_gate_mode = train_gate_mode or scheduled_train_mode
+        eval_gate_mode = eval_gate_mode or scheduled_eval_mode
+    if train_gate_mode is not None or eval_gate_mode is not None:
+        _set_model_gumbel_gate_modes(
+            model,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+        )
+
+    return checkpoint
+
+
 def _progress_prefix(progress_context: ProgressContext | None = None) -> str | None:
     parts: list[str] = []
     if progress_context is not None:
@@ -1586,6 +1651,10 @@ def train(model: nn.Module,
                     "history_path": str(baseline_accuracy_reference.history_path),
                     "metric_name": baseline_accuracy_reference.metric_name,
                     "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+                    "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
+                    "num_epochs_executed": baseline_accuracy_reference.num_epochs_executed,
+                    "generated_for_current_run": baseline_accuracy_reference.generated_for_current_run,
+                    "included_in_full_train_time": False,
                 }
             runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
             run_history.set_runtime_metadata(runtime_metadata)
@@ -1655,6 +1724,8 @@ def train(model: nn.Module,
         best_checkpoint_extra_state = {
             "model_lambda_coef": _resolve_model_lambda_coef(model),
             "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+            "gumbel_train_gate_mode": _resolve_model_gumbel_gate_modes(model)[0],
+            "gumbel_eval_gate_mode": _resolve_model_gumbel_gate_modes(model)[1],
         }
 
         if run_history is not None:
@@ -1887,6 +1958,28 @@ def train(model: nn.Module,
                     },
                 )
 
+    test_checkpoint_epoch = final_epoch
+    if run_history is not None:
+        best_checkpoint_path = run_history.checkpoints_dir / "best.pt"
+        if not best_checkpoint_path.is_file():
+            raise FileNotFoundError(
+                "Cannot evaluate the best validation checkpoint because it was not "
+                f"created: {best_checkpoint_path}"
+            )
+        best_checkpoint = _load_model_checkpoint_for_evaluation(
+            model,
+            best_checkpoint_path,
+            device=device,
+            gate_mode_schedule=gate_mode_schedule,
+        )
+        test_checkpoint_epoch = int(best_checkpoint["epoch"])
+        runtime_metadata = dict(run_history.runtime_metadata)
+        runtime_metadata["test_evaluation"] = {
+            "checkpoint": str(best_checkpoint_path.relative_to(run_history.run_dir)),
+            "checkpoint_epoch": test_checkpoint_epoch,
+        }
+        run_history.set_runtime_metadata(runtime_metadata)
+
     evaluate(
         model,
         dataloaders.test_dataloader,
@@ -1894,7 +1987,7 @@ def train(model: nn.Module,
         device,
         total_epochs=final_epoch,
         stage="test",
-        epoch=final_epoch,
+        epoch=test_checkpoint_epoch,
         run_history=run_history,
         progress_context=progress_context,
     )
@@ -1902,7 +1995,7 @@ def train(model: nn.Module,
     if mlflow_logger is not None:
         mlflow_logger.log_metrics(
             test_metrics,
-            step=final_epoch,
+            step=test_checkpoint_epoch,
         )
         mlflow_logger.log_model(model, model_name="final_model")
     if run_history is not None:
@@ -1917,6 +2010,11 @@ def train(model: nn.Module,
         "last_train_metrics": last_train_metrics,
         "last_valid_metrics": last_valid_metrics,
         "test_metrics": dict(test_metrics),
+        "num_epochs_executed": completed_epochs,
+        "full_train_time_sec": sum(
+            float(record.get("epoch_time_sec", 0.0) or 0.0)
+            for record in (run_history.history_records if run_history is not None else [])
+        ),
     }
     if adaptive_lambda is not None:
         result["adaptive_lambda"] = adaptive_lambda.summary_state()
@@ -2087,12 +2185,26 @@ def run_training(
         run_history,
         progress_context=progress_context,
     )
+    runtime_snapshot["measurement_conditions"] = {
+        "device": device,
+        "batch_size": OmegaConf.select(config, "dataloaders.batch_size"),
+        "precision": (
+            OmegaConf.select(config, "training_arguments.precision")
+            or OmegaConf.select(config, "precision")
+            or "fp32"
+        ),
+        "parallel_training": False,
+    }
     if baseline_accuracy_reference is not None:
         runtime_snapshot["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),
             "history_path": str(baseline_accuracy_reference.history_path),
             "metric_name": baseline_accuracy_reference.metric_name,
             "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+            "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
+            "num_epochs_executed": baseline_accuracy_reference.num_epochs_executed,
+            "generated_for_current_run": baseline_accuracy_reference.generated_for_current_run,
+            "included_in_full_train_time": False,
         }
     run_history.set_runtime_metadata(runtime_snapshot)
     _log_runtime_debug_snapshot(runtime_snapshot)
@@ -2144,5 +2256,9 @@ def run_training(
             "history_path": str(baseline_accuracy_reference.history_path),
             "metric_name": baseline_accuracy_reference.metric_name,
             "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
+            "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
+            "num_epochs_executed": baseline_accuracy_reference.num_epochs_executed,
+            "generated_for_current_run": baseline_accuracy_reference.generated_for_current_run,
+            "included_in_full_train_time": False,
         }
     return result

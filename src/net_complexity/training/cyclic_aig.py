@@ -36,6 +36,7 @@ Config section (``cyclic_layer_dropping``)::
 """
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
@@ -426,9 +427,48 @@ def run_cyclic_aig_training(
     )
     final_result = run_training(final_cfg, progress_context=progress_context)
 
-    return {
+    cycle_train_time_sec = sum(
+        float(result.get("full_train_time_sec", 0.0))
+        for result in cycle_results
+    )
+    final_retrain_time_sec = float(final_result.get("full_train_time_sec", 0.0))
+    full_train_time_sec = cycle_train_time_sec + final_retrain_time_sec
+    num_epochs_executed = sum(
+        int(result.get("num_epochs_executed", 0))
+        for result in cycle_results
+    ) + int(final_result.get("num_epochs_executed", 0))
+    baseline_costs: dict[str, Mapping[str, Any]] = {}
+    for sub_result in [*cycle_results, final_result]:
+        baseline = sub_result.get("adaptive_lambda_baseline")
+        if isinstance(baseline, Mapping):
+            baseline_costs[str(baseline.get("history_path"))] = baseline
+    one_time_baseline_cost_sec = sum(
+        float(baseline.get("full_train_time_sec", 0.0))
+        for baseline in baseline_costs.values()
+    )
+    one_time_baseline_epochs = sum(
+        int(baseline.get("num_epochs_executed", 0))
+        for baseline in baseline_costs.values()
+    )
+
+    cyclic_result = {
         "num_cycles_completed": len(cycle_results),
         "final_disabled_layers": disabled_layers,
         "cycle_results": cycle_results,
         "final_result": final_result,
+        "training_cost": {
+            "cycle_train_time_sec": cycle_train_time_sec,
+            "final_retrain_time_sec": final_retrain_time_sec,
+            "full_train_time_sec": full_train_time_sec,
+            "num_epochs_executed": num_epochs_executed,
+            "one_time_baseline_cost_sec": one_time_baseline_cost_sec,
+            "one_time_baseline_epochs": one_time_baseline_epochs,
+            "baseline_included_in_full_train_time": False,
+        },
     }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "cyclic_summary.json").write_text(
+        json.dumps(cyclic_result, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    return cyclic_result

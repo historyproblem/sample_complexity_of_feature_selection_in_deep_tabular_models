@@ -443,6 +443,18 @@ class RunHistory:
     ) -> None:
         finished_at = datetime.now()
         duration_sec = (finished_at - self.started_at).total_seconds()
+        full_train_time_sec = sum(
+            float(record.get("epoch_time_sec", 0.0) or 0.0)
+            for record in self.history_records
+        )
+        train_forward_time_sec = sum(
+            float(record.get("train_time_sec", 0.0) or 0.0)
+            for record in self.history_records
+        )
+        validation_time_sec = sum(
+            float(record.get("valid_time_sec", 0.0) or 0.0)
+            for record in self.history_records
+        )
         cfg_lambda = OmegaConf.select(self.config, "model.lambda_coef")
         warmup_cfg = OmegaConf.select(self.config, "training_arguments.lambda_warmup")
         adaptive_lambda_cfg = OmegaConf.select(self.config, "training_arguments.adaptive_lambda")
@@ -489,6 +501,10 @@ class RunHistory:
                 "duration_sec": duration_sec,
                 "num_epochs_logged": len(self.history_records),
                 "num_batches_logged": len(self.batch_records),
+                "num_epochs_executed": len(self.history_records),
+                "full_train_time_sec": full_train_time_sec,
+                "train_forward_backward_time_sec": train_forward_time_sec,
+                "validation_time_sec": validation_time_sec,
             },
             "final_train": _filter_channel_metrics(final_train_metrics or self.last_train_metrics),
             "final_valid": _filter_channel_metrics(final_valid_metrics or self.last_valid_metrics),

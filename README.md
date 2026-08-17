@@ -112,6 +112,18 @@ Artifacts are split by intent:
 - single training run: `outputs/runs/<timestamp>_<run_name>/` with scalar `history.csv`, per-channel `channel_history.csv.gz`, `config_resolved.yaml`, `summary.json`, `checkpoints/`, and `.hydra/`
 - tuning study: `outputs/studies/<timestamp>_<study_name>/` with `study_config.yaml`, `trials.csv`, `summary.json`, `best_trial.yaml`, `runs/`, and `.hydra/`
 
+Compute is reported primarily as multiply-adds per image. The canonical test
+field is `test_executed_gmac_per_image`; `test_executed_gflop_per_image` is
+defined as exactly twice that value. AIG additionally reports
+`test_ideal_routed_gmac_per_image`, averaged over gate activations from the
+entire evaluation loader. This is an ideal conditional-routing estimate; the
+current one-step AIG forward still executes the full residual branch.
+
+Run summaries report `timing.full_train_time_sec = sum(epoch_time_sec)` and the
+number of executed epochs. Cyclic AIG writes `cyclic_summary.json`, where full
+training time includes all search cycles plus final retraining. Automatically
+generated adaptive-lambda baselines are reported separately as a one-time cost.
+
 Hydra metadata now lives inside the same run or study directory instead of a separate `outputs/YYYY-MM-DD/...` tree.
 
 ## 📊 Experiment Tracking with MLflow
