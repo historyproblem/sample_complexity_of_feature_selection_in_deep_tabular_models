@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .aig import AIGBlockGate
+from .aig import AIGBlockGate, entropy_regularization_sign
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
@@ -18,6 +18,8 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  lambda_coef: float = 0.01,
                  gumbel_init_mode: str = "auto",
                  bypass_on_zero_lambda: bool = True,
+                 entropy_regularization: str = "disabled",
+                 entropy_regularization_coef: float = 1.0,
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -26,6 +28,11 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.lambda_coef = lambda_coef
         self.gumbel_init_mode = gumbel_init_mode
         self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
+        self.entropy_regularization = str(entropy_regularization).strip().lower()
+        self.entropy_regularization_sign = entropy_regularization_sign(
+            self.entropy_regularization
+        )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
         self.set_aig_bypass(self._should_bypass_gumbel())
@@ -33,16 +40,37 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
     def forward(self, X, y) -> ClassifModelOutput:
         logits = self.backbone(X)
         ce_loss = self.criterion(logits, y)
+        mean_p_open = None
+        negative_entropy = None
         if float(self.lambda_coef) == 0.0:
-            reg_loss = logits.new_zeros(())
+            raw_reg_loss = logits.new_zeros(())
+            reg_loss = raw_reg_loss
             loss = ce_loss
         else:
-            reg_loss = self.regularization_loss(self.backbone)
-            loss = ce_loss + self.lambda_coef*reg_loss
+            posterior_terms = get_AIG_posterior_regularization_terms(self.backbone)
+            if posterior_terms is not None:
+                mean_p_open, negative_entropy = posterior_terms
+                reg_loss = (
+                    self.lambda_coef * mean_p_open
+                    + (
+                        self.entropy_regularization_sign
+                        * self.entropy_regularization_coef
+                        * negative_entropy
+                    )
+                )
+                raw_reg_loss = mean_p_open
+                loss = ce_loss + reg_loss
+            else:
+                raw_reg_loss = self.regularization_loss(self.backbone)
+                reg_loss = self.lambda_coef * raw_reg_loss
+                loss = ce_loss + reg_loss
 
         return ClassifModelOutput(
             ce_loss=ce_loss,
-            regularization_loss=reg_loss,
+            regularization_loss=raw_reg_loss,
+            reg_loss=reg_loss,
+            mean_p_open=mean_p_open,
+            negative_entropy=negative_entropy,
             loss=loss,
             logits=logits
         )
@@ -1009,6 +1037,25 @@ class AIGRegularizationLoss:
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(norm={self.norm!r})"
+def get_AIG_posterior_regularization_terms(
+    model: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Aggregate soft-posterior terms for probability-regularized AIG gates."""
+    gates_by_id: dict[int, AIGBlockGate] = {}
+    for module in _get_aig_modules(model).values():
+        gate = module if isinstance(module, AIGBlockGate) else module.gate
+        gates_by_id[id(gate)] = gate
+    gates = list(gates_by_id.values())
+
+    if not gates or not all(
+        gate.regularization == "l1_probability" for gate in gates
+    ):
+        return None
+
+    terms = [gate.posterior_regularization_terms() for gate in gates]
+    mean_p_open = torch.stack([term[0] for term in terms]).mean()
+    negative_entropy = torch.stack([term[1] for term in terms]).mean()
+    return mean_p_open, negative_entropy
 
 
 def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):

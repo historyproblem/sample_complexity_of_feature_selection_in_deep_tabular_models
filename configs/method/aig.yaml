@@ -2,6 +2,9 @@
 
 model:
   bypass_on_zero_lambda: false
+  # disabled | plus_negative_entropy | minus_negative_entropy
+  entropy_regularization: disabled
+  entropy_regularization_coef: 1.0
   criterion:
     _target_: torch.nn.CrossEntropyLoss
   regularization_loss:

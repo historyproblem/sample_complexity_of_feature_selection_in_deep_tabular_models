@@ -768,6 +768,7 @@ def collect_runs(study_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 _AUTO_RUN_LABEL_FIELDS = (
     ("lambda_init", "model.lambda_coef"),
     ("entropy", "model.entropy_regularization"),
+    ("entropy_coef", "model.entropy_regularization_coef"),
     ("regularization", "model.backbone.resnet_block.gate_regularization"),
     ("step", "training_arguments.adaptive_lambda.log_step_init"),
     ("update", "training_arguments.adaptive_lambda.update_every_epochs"),

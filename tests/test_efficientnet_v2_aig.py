@@ -94,6 +94,25 @@ def test_aig_efficientnetv2_s_training_engine_forward_contract():
     )
 
 
+def test_aig_efficientnetv2_zero_entropy_coef_keeps_aig_active():
+    model = AIGEfficientNetV2S(
+        num_classes=10,
+        lambda_coef=0.25,
+        bypass_on_zero_lambda=True,
+        gate_regularization="l1_probability",
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.0,
+    )
+    model.eval()
+
+    output = model(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]))
+
+    assert all(not module.bypass for module in get_AIG_modules(model).values())
+    torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
+    torch.testing.assert_close(output.reg_loss, 0.25 * output.mean_p_open)
+    torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+
 def test_aig_efficientnetv2_s_bypass_on_zero_lambda():
     model = AIGEfficientNetV2S(
         num_classes=10,
@@ -200,6 +219,56 @@ def test_efficientnetv2_aig_scaled_epoch_tuning_config_uses_expected_lambda_step
         assert point["mlflow.tags.flops_logging"] == "enabled"
         assert "mlflow.tags.adaptive_log_step" not in point
         assert "mlflow.tags.recovery" not in point
+
+
+def test_efficientnetv2_s_aig_plus_neg_entropy_beta_grid_uses_requested_points():
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep.yaml"
+    )
+    cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep_ordered.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "efficientnetv2_s_aig_adaptive_lambda_init1em4_cifar10"},
+        {
+            "tuning": (
+                "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_"
+                "120ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    assert cfg.training_arguments.num_epochs == 120
+    assert cfg.training_arguments.gradient_norm_logging.enabled is True
+    assert cfg.training_arguments.gradient_norm_logging.every_n_batches == 5
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    assert cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert cfg.scheduler.T_max == 120
+    assert cfg.reporting.run_label_fields.beta == "model.entropy_regularization_coef"
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_trials == 4
+    assert cfg.tuning.repeats_per_trial == 1
+    assert cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(cfg.tuning.points, resolve=False)
+    assert [point["model.lambda_coef"] for point in points] == [0.0001] * 4
+    assert [point["model.gate_regularization"] for point in points] == [
+        "l1_probability",
+    ] * 4
+    assert [point["model.entropy_regularization"] for point in points] == [
+        "plus_negative_entropy",
+    ] * 4
+    assert [point["model.entropy_regularization_coef"] for point in points] == [
+        0.0,
+        0.1,
+        0.3,
+        1.0,
+    ]
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"120"}
 
 
 def test_efficientnetv2_aig_init1em4_experiment_uses_flops_metrics():

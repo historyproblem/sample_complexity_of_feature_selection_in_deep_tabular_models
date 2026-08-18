@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .aig import AIGBlockGate
+from .aig import AIGBlockGate, entropy_regularization_sign
 from .outputs import ClassifModelOutput
 
 
@@ -286,6 +286,8 @@ class AIGEfficientNetV2(nn.Module):
         gate_threshold: float = 0.5,
         gate_temperature: float = 1.0,
         gate_regularization: str = "l2_gate",
+        entropy_regularization: str = "disabled",
+        entropy_regularization_coef: float = 1.0,
         stem_stride: int = 1,
         criterion: nn.Module | None = None,
     ) -> None:
@@ -293,6 +295,11 @@ class AIGEfficientNetV2(nn.Module):
         self.variant = str(variant).lower()
         self.lambda_coef = float(lambda_coef)
         self.bypass_on_zero_lambda = bool(bypass_on_zero_lambda)
+        self.entropy_regularization = str(entropy_regularization).strip().lower()
+        self.entropy_regularization_sign = entropy_regularization_sign(
+            self.entropy_regularization
+        )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
         self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
 
         layer_infos = [
@@ -448,6 +455,7 @@ class AIGEfficientNetV2(nn.Module):
         probabilities = []
         values = []
         gate_losses = []
+        posterior_terms = []
 
         for gate in self._iter_gates():
             if gate.keep_probabilities is None or gate.activations is None:
@@ -455,6 +463,8 @@ class AIGEfficientNetV2(nn.Module):
             probabilities.append(gate.keep_probabilities.flatten(1))
             values.append(gate.activations.flatten(1))
             gate_losses.append(gate.regularization_loss())
+            if gate.regularization == "l1_probability":
+                posterior_terms.append(gate.posterior_regularization_terms())
 
         if probabilities:
             gate_probabilities = torch.cat(probabilities, dim=1)
@@ -468,11 +478,20 @@ class AIGEfficientNetV2(nn.Module):
             gate_loss = logits.new_zeros(())
             mean_active_ratio = logits.new_ones(())
 
+        if posterior_terms and len(posterior_terms) == len(gate_losses):
+            mean_p_open = torch.stack([term[0] for term in posterior_terms]).mean()
+            negative_entropy = torch.stack([term[1] for term in posterior_terms]).mean()
+        else:
+            mean_p_open = None
+            negative_entropy = None
+
         return {
             "gate_probabilities": gate_probabilities,
             "gate_values": gate_values,
             "mean_active_ratio": mean_active_ratio,
             "gate_loss": gate_loss,
+            "mean_p_open": mean_p_open,
+            "negative_entropy": negative_entropy,
         }
 
     def forward(
@@ -489,11 +508,26 @@ class AIGEfficientNetV2(nn.Module):
             return logits, aux
 
         ce_loss = self.criterion(logits, y)
-        gate_loss = aux["gate_loss"]
-        loss = ce_loss + float(self.lambda_coef) * gate_loss
+        mean_p_open = aux["mean_p_open"]
+        negative_entropy = aux["negative_entropy"]
+        if mean_p_open is not None and negative_entropy is not None:
+            gate_loss = (
+                float(self.lambda_coef) * mean_p_open
+                + (
+                    self.entropy_regularization_sign
+                    * self.entropy_regularization_coef
+                    * negative_entropy
+                )
+            )
+        else:
+            gate_loss = float(self.lambda_coef) * aux["gate_loss"]
+        loss = ce_loss + gate_loss
         return ClassifModelOutput(
             ce_loss=ce_loss,
-            regularization_loss=gate_loss,
+            regularization_loss=aux["gate_loss"],
+            reg_loss=gate_loss,
+            mean_p_open=mean_p_open,
+            negative_entropy=negative_entropy,
             loss=loss,
             logits=logits,
             mean_activations=[aux["mean_active_ratio"]],
