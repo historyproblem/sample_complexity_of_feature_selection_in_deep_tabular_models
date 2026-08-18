@@ -1,4 +1,5 @@
 from .aig import AIGActivationsMetric
+from .autopruner import AutoPrunerComplexityMetric, AutoPrunerProbMetric
 from .base import BaseMetric, MultiLossMetric, Multimetric
 from .classification import Accuracy
 from .complexity import (
@@ -20,6 +21,8 @@ from .storage import (
 __all__ = [
     "AIGActivationsMetric",
     "Accuracy",
+    "AutoPrunerComplexityMetric",
+    "AutoPrunerProbMetric",
     "BartlettSpectralComplexityMetric",
     "BaseMetric",
     "ComputeCostMetric",

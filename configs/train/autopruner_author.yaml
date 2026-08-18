@@ -1,0 +1,15 @@
+# @package _global_
+
+training_arguments:
+  # Four sequential groups x 8 pruning epochs, then 30 fine-tuning epochs.
+  num_epochs: 62
+  gradient_norm_logging:
+    enabled: false
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+  collapse_guard:
+    enabled: false

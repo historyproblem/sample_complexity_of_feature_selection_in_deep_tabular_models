@@ -119,6 +119,10 @@ defined as exactly twice that value. AIG additionally reports
 entire evaluation loader. This is an ideal conditional-routing estimate; the
 current one-step AIG forward still executes the full residual branch.
 
+The author-faithful AutoPruner implementation, its exact ResNet-50
+hyperparameters, CIFAR-10 adaptation, physical channel exporter, and launch
+commands are documented in [`docs/autopruner.md`](docs/autopruner.md).
+
 Run summaries report `timing.full_train_time_sec = sum(epoch_time_sec)` and the
 number of executed epochs. Cyclic AIG writes `cyclic_summary.json`, where full
 training time includes all search cycles plus final retraining. Automatically

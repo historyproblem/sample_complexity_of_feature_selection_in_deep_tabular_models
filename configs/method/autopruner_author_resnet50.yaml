@@ -1,0 +1,15 @@
+# @package _global_
+
+# Luo & Wu's official ResNet-50 pruning recipe.
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  pruning_epochs_per_stage: 8
+  final_fine_tune_epochs: 30
+  alpha_update_interval: 100
+  pruning_lr: 0.001
+  pruning_weight_decay: 0.0005
+  final_weight_decay: 0.0001
+  stagewise: true
+  reset_optimizer_each_stage: true
+  select_best_per_stage: true

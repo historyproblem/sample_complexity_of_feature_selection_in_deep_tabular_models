@@ -12,7 +12,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
@@ -27,7 +27,14 @@ from net_complexity.tuning.restart_guard import CollapseDetected, CollapseGuard
 
 
 EpochEndCallback = Callable[
-    [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, RunHistory | None],
+    [
+        int,
+        Mapping[str, float],
+        Mapping[str, float],
+        nn.Module,
+        torch.optim.Optimizer,
+        Optional[RunHistory],
+    ],
     None,
 ]
 ProgressContext = Mapping[str, Any]
@@ -1628,6 +1635,13 @@ def train(model: nn.Module,
             lambda_warmup.step(epoch_num, model)
         if gate_mode_schedule is not None:
             gate_mode_schedule.step(epoch_num, model)
+        epoch_start_hook = getattr(model, "on_train_epoch_start", None)
+        if callable(epoch_start_hook):
+            epoch_start_hook(
+                epoch=epoch_num,
+                optimizer=optimizer,
+                batches_per_epoch=len(dataloaders.train_dataloader),
+            )
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
@@ -1674,6 +1688,13 @@ def train(model: nn.Module,
         if gradient_norm_logger is not None:
             train_metrics.update(gradient_norm_logger.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
+        validation_end_hook = getattr(model, "on_validation_epoch_end", None)
+        if callable(validation_end_hook):
+            validation_end_hook(
+                epoch=epoch_num,
+                valid_metrics=valid_metrics,
+                optimizer=optimizer,
+            )
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
@@ -1925,6 +1946,11 @@ def train(model: nn.Module,
         )
         test_checkpoint_epoch = int(best_checkpoint["epoch"])
         runtime_metadata = dict(run_history.runtime_metadata)
+        best_checkpoint_hook = getattr(model, "on_best_checkpoint_loaded", None)
+        if callable(best_checkpoint_hook):
+            postprocessing_info = best_checkpoint_hook(run_dir=run_history.run_dir)
+            if isinstance(postprocessing_info, Mapping):
+                runtime_metadata["model_postprocessing"] = dict(postprocessing_info)
         runtime_metadata["test_evaluation"] = {
             "checkpoint": str(best_checkpoint_path.relative_to(run_history.run_dir)),
             "checkpoint_epoch": test_checkpoint_epoch,

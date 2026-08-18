@@ -1,0 +1,10 @@
+# @package _global_
+
+run_history:
+  root_dir: outputs/runs
+  monitor: valid_accuracy
+  mode: max
+  # Epochs 1..32 learn the four groups; compare final fine-tuning checkpoints.
+  min_epoch: 33
+  use_hydra_output_dir: true
+  log_gate_history: false

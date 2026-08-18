@@ -35,6 +35,19 @@ from .models.feature_selection import (
     replace_layers_by_regex,
 )
 from .models.aig import AIGBlockGate
+from .models.autopruner import (
+    AutoPrunerBottleneck,
+    AutoPrunerLayer,
+    AutoPrunerResNet,
+    AutoPrunerResNet50,
+    AutoPrunerWrapper,
+    PrunedAutoPrunerBottleneck,
+    autopruner_pruning_spec,
+    export_pruned_autopruner_backbone,
+    get_autopruner_modules,
+    load_autopruner_pretrained_backbone,
+    save_pruned_autopruner_checkpoint,
+)
 from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
@@ -45,6 +58,11 @@ __all__ = [
     "AIGEfficientNetV2",
     "AIGEfficientNetV2M",
     "AIGEfficientNetV2S",
+    "AutoPrunerBottleneck",
+    "AutoPrunerLayer",
+    "AutoPrunerResNet",
+    "AutoPrunerResNet50",
+    "AutoPrunerWrapper",
     "CIFARPrunedGumbelBasicBlock",
     "CIFARGumbelBasicBlock",
     "CIFARMaskedGumbelBasicBlock",
@@ -61,6 +79,7 @@ __all__ = [
     "GumbleSoftmax",
     "MaskedGumbelLayer",
     "PrunedCIFARResNet",
+    "PrunedAutoPrunerBottleneck",
     "ResNet50",
     "ResNet101",
     "ResNet152",
@@ -82,4 +101,9 @@ __all__ = [
     "replace_layers_by_regex",
     "apply_layer_skipping",
     "apply_layer_skipping_from_config",
+    "autopruner_pruning_spec",
+    "export_pruned_autopruner_backbone",
+    "get_autopruner_modules",
+    "load_autopruner_pretrained_backbone",
+    "save_pruned_autopruner_checkpoint",
 ]

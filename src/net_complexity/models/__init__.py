@@ -1,5 +1,18 @@
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet, LambdaLayer
 from .aig import AIGBlockGate
+from .autopruner import (
+    AutoPrunerBottleneck,
+    AutoPrunerLayer,
+    AutoPrunerResNet,
+    AutoPrunerResNet50,
+    AutoPrunerWrapper,
+    PrunedAutoPrunerBottleneck,
+    autopruner_pruning_spec,
+    export_pruned_autopruner_backbone,
+    get_autopruner_modules,
+    load_autopruner_pretrained_backbone,
+    save_pruned_autopruner_checkpoint,
+)
 from .efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .feature_selection import (
     AIGBottleneckLayer,
@@ -48,6 +61,11 @@ __all__ = [
     "AIGEfficientNetV2",
     "AIGEfficientNetV2M",
     "AIGEfficientNetV2S",
+    "AutoPrunerBottleneck",
+    "AutoPrunerLayer",
+    "AutoPrunerResNet",
+    "AutoPrunerResNet50",
+    "AutoPrunerWrapper",
     "Block",
     "Bottleneck",
     "CIFARBasicBlock",
@@ -71,6 +89,7 @@ __all__ = [
     "LambdaLayer",
     "MaskedGumbelLayer",
     "PrunedCIFARResNet",
+    "PrunedAutoPrunerBottleneck",
     "ResNet",
     "ResNet50",
     "ResNet101",
@@ -93,4 +112,9 @@ __all__ = [
     "replace_layers_by_regex",
     "apply_layer_skipping",
     "apply_layer_skipping_from_config",
+    "autopruner_pruning_spec",
+    "export_pruned_autopruner_backbone",
+    "get_autopruner_modules",
+    "load_autopruner_pretrained_backbone",
+    "save_pruned_autopruner_checkpoint",
 ]

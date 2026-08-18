@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: autopruner_resnet50
+  - /method: autopruner_author_resnet50
+  - /train: autopruner_author
+  - /optimizer: sgd_autopruner_author
+  - /scheduler: none
+  - /metrics: autopruner
+  - /run_history: autopruner_valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+mlflow:
+  enabled: false
+  run_name: "autopruner_resnet50_cifar10_keep_${model.backbone.target_keep_ratio}"
+  tags:
+    model_type: "ResNet50_AutoPruner"
+    method: "autopruner"
+    recipe: "author_hparams_cifar10_adaptation"
