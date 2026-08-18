@@ -98,6 +98,21 @@ python3 src/net_complexity/tune.py \
   model.pretrained_checkpoint=/absolute/path/to/checkpoints/best.pt
 ```
 
+For an overnight series on one V100 32 GB, use the dedicated 11-hour config:
+
+```bash
+python3 src/net_complexity/tune.py \
+  --config-name=tune_autopruner_resnet50_cifar10_v100_11h \
+  model.pretrained_checkpoint=/absolute/path/to/checkpoints/best.pt
+```
+
+It runs sequentially (`n_jobs=1`) and evaluates both author-reported ratios
+with seeds 42, 43, 44, and 45: eight runs in total. This series restores the
+authors' batch size 256, eight data-loader workers, and pinned host memory.
+All method parameters remain fixed; only the published keep ratio and random
+seed vary. The 10.5-hour Optuna timeout is a soft boundary checked between
+ratio points, so the external job limit should still be set to 11 hours.
+
 To export a trained model programmatically:
 
 ```python

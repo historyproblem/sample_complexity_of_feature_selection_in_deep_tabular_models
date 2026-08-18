@@ -11,10 +11,16 @@ from net_complexity.metrics.autopruner import AutoPrunerComplexityMetric
 from net_complexity.models.autopruner import (
     AUTHOR_ALPHA_START_RESNET,
     AUTHOR_ALPHA_STOP_RESNET,
+    AUTHOR_ALPHA_UPDATE_INTERVAL,
     AUTHOR_CODE_WINDOW_SIZE,
     AUTHOR_FINAL_FINE_TUNE_EPOCHS,
+    AUTHOR_FINAL_WEIGHT_DECAY,
+    AUTHOR_INITIAL_PRUNING_THRESHOLD,
+    AUTHOR_INITIAL_REGULARIZATION,
+    AUTHOR_MOMENTUM,
     AUTHOR_PRUNING_EPOCHS_PER_STAGE,
     AUTHOR_PRUNING_LR,
+    AUTHOR_PRUNING_WEIGHT_DECAY,
     AUTHOR_REGULARIZATION_SCALE,
     AutoPrunerLayer,
     AutoPrunerResNet,
@@ -309,6 +315,9 @@ def test_author_configs_pin_resnet_hyperparameters_and_ratio_grid():
     method_cfg = OmegaConf.load(
         REPO_ROOT / "configs/method/autopruner_author_resnet50.yaml"
     )
+    optimizer_cfg = OmegaConf.load(
+        REPO_ROOT / "configs/optimizer/sgd_autopruner_author.yaml"
+    )
     train_cfg = OmegaConf.load(REPO_ROOT / "configs/train/autopruner_author.yaml")
     tuning_cfg = OmegaConf.load(
         REPO_ROOT / "configs/tuning/autopruner_keep_ratio_grid.yaml"
@@ -320,11 +329,47 @@ def test_author_configs_pin_resnet_hyperparameters_and_ratio_grid():
     assert model_cfg.model.backbone.code_window_size == AUTHOR_CODE_WINDOW_SIZE
     assert method_cfg.model.pruning_epochs_per_stage == AUTHOR_PRUNING_EPOCHS_PER_STAGE
     assert method_cfg.model.final_fine_tune_epochs == AUTHOR_FINAL_FINE_TUNE_EPOCHS
+    assert method_cfg.model.alpha_update_interval == AUTHOR_ALPHA_UPDATE_INTERVAL
+    assert method_cfg.model.pruning_lr == AUTHOR_PRUNING_LR
+    assert method_cfg.model.pruning_weight_decay == AUTHOR_PRUNING_WEIGHT_DECAY
+    assert method_cfg.model.final_weight_decay == AUTHOR_FINAL_WEIGHT_DECAY
     assert method_cfg.model.select_best_per_stage is True
+    assert optimizer_cfg.optimizer.lr == AUTHOR_PRUNING_LR
+    assert optimizer_cfg.optimizer.momentum == AUTHOR_MOMENTUM
+    assert optimizer_cfg.optimizer.weight_decay == AUTHOR_PRUNING_WEIGHT_DECAY
+    assert AUTHOR_INITIAL_REGULARIZATION == 10.0
+    assert AUTHOR_REGULARIZATION_SCALE == 100.0
+    assert AUTHOR_INITIAL_PRUNING_THRESHOLD == 0.95
     assert train_cfg.training_arguments.num_epochs == 62
     assert tuning_cfg.tuning.search_space[
         "model.backbone.target_keep_ratio"
     ].choices == [0.5, 0.3]
+
+
+def test_v100_overnight_series_uses_only_author_ratios_and_four_seeds():
+    cfg = OmegaConf.load(
+        REPO_ROOT
+        / "configs/tuning/autopruner_author_resnet50_v100_11h.yaml"
+    )
+
+    assert cfg.dataloaders.batch_size == 256
+    assert cfg.dataloaders.num_workers == 8
+    assert cfg.dataloaders.pin_memory is True
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.repeats_per_trial == 4
+    assert cfg.tuning.seed_base == 42
+    assert cfg.tuning.seed_stride == 1
+    assert cfg.tuning.timeout == 37800
+    assert cfg.tuning.points_in_order is True
+    assert [
+        point["model.backbone.target_keep_ratio"]
+        for point in cfg.tuning.points
+    ] == [0.5, 0.3]
+    assert all(
+        point["mlflow.tags.author_hyperparameters"] == "true"
+        for point in cfg.tuning.points
+    )
 
 
 def test_run_history_can_delay_best_checkpoint_selection_until_fine_tuning(tmp_path):
