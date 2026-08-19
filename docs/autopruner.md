@@ -113,6 +113,20 @@ All method parameters remain fixed; only the published keep ratio and random
 seed vary. The 10.5-hour Optuna timeout is a soft boundary checked between
 ratio points, so the external job limit should still be set to 11 hours.
 
+If a compatible CIFAR-10 checkpoint has not been trained yet, use the
+end-to-end V100 runner instead:
+
+```bash
+python3 scripts/run_autopruner_cifar10_v100_11h.py
+```
+
+It first trains the controlled plain ResNet-50 baseline for 200 epochs, checks
+that the resulting `best.pt` exists and is non-empty, and only then passes its
+exact absolute path to AutoPruner. To leave room for baseline training in the
+same 11-hour allocation, this combined runner uses three repeats per published
+keep ratio (six pruning runs). The standalone tuning config above remains the
+eight-run series for machines where the baseline already exists.
+
 To export a trained model programmatically:
 
 ```python
