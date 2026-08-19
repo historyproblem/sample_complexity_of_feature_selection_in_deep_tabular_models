@@ -8,15 +8,18 @@ metrics:
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthActiveBlocksMetric
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthFLOPsMetric
       sample_size: 1
+      backward_flops_multiplier: 2.0
   valid_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthActiveBlocksMetric
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthFLOPsMetric
       sample_size: 1
+      backward_flops_multiplier: 2.0
   test_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthActiveBlocksMetric
     - _target_: net_complexity.metrics.stochastic_depth.StochasticDepthFLOPsMetric
       sample_size: 1
+      backward_flops_multiplier: 2.0
