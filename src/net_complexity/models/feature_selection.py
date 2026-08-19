@@ -12,6 +12,34 @@ from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
 
 
+_VALID_BACKBONE_WEIGHT_INITS = {"default", "paper_kaiming_normal"}
+
+
+def apply_paper_style_conv_init(model: nn.Module) -> None:
+    """Kaiming-normal Conv2d init matching the reference ConvNet-AIG backbone.
+
+    ``convnet_aig.py`` initializes every Conv2d as
+    ``weight.data.normal_(0, sqrt(2. / (kh * kw * out_channels)))``, then
+    overwrites the gate's *final* router conv ("fc2") with a low-variance
+    ``normal_(0, 0.001)`` for its low-variance gate init. We reproduce the
+    same net effect: apply the general init everywhere except each
+    ``AIGBlockGate``'s final router conv, which keeps whatever
+    ``AIGBlockGate.reset_parameters()`` already set (that already matches the
+    reference's low-variance gate init exactly).
+
+    This is opt-in (``ClassificationFeatureSelectionWrapper(backbone_weight_init=
+    "paper_kaiming_normal")``) — PyTorch's default Conv2d init (kaiming-uniform)
+    remains the default for every existing config that doesn't request this.
+    """
+    gate_final_conv_ids = {
+        id(gate.router[-1]) for gate in model.modules() if isinstance(gate, AIGBlockGate)
+    }
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d) and id(module) not in gate_final_conv_ids:
+            fan = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+            nn.init.normal_(module.weight, mean=0.0, std=math.sqrt(2.0 / fan))
+
+
 class ClassificationFeatureSelectionWrapper(nn.Module):
     def __init__(self,
                  backbone: nn.Module,
@@ -20,6 +48,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  bypass_on_zero_lambda: bool = True,
                  entropy_regularization: str = "disabled",
                  entropy_regularization_coef: float = 1.0,
+                 backbone_weight_init: str = "default",
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -33,6 +62,14 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             self.entropy_regularization
         )
         self.entropy_regularization_coef = float(entropy_regularization_coef)
+        self.backbone_weight_init = str(backbone_weight_init).strip().lower()
+        if self.backbone_weight_init not in _VALID_BACKBONE_WEIGHT_INITS:
+            allowed = ", ".join(sorted(_VALID_BACKBONE_WEIGHT_INITS))
+            raise ValueError(
+                f"backbone_weight_init must be one of: {allowed}. Got: {backbone_weight_init!r}"
+            )
+        if self.backbone_weight_init == "paper_kaiming_normal":
+            apply_paper_style_conv_init(self.backbone)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
         self.set_aig_bypass(self._should_bypass_gumbel())
@@ -48,6 +85,12 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             loss = ce_loss
         else:
             posterior_terms = get_AIG_posterior_regularization_terms(self.backbone)
+            if posterior_terms is None and self.entropy_regularization != "disabled":
+                # Channel-granularity (Gumbel) counterpart of the AIG posterior path.
+                # Gated on entropy_regularization so that every existing Gumbel
+                # recipe (entropy_regularization defaults to "disabled") keeps
+                # using its configured `regularization_loss` callable unchanged.
+                posterior_terms = get_gumbel_posterior_regularization_terms(self.backbone)
             if posterior_terms is not None:
                 mean_p_open, negative_entropy = posterior_terms
                 reg_loss = (
@@ -494,6 +537,23 @@ class GumbelLayer(nn.Module):
         probs = F.softmax(self.logits, dim=1)[:, 1]
         return torch.mean(probs)
 
+    def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return mean p(open) and mean negative entropy of the per-channel posterior.
+
+        Channel-granularity counterpart of ``AIGBlockGate.posterior_regularization_terms``
+        (see ``feature_selection.get_gumbel_posterior_regularization_terms``), used to
+        drive the same ``entropy_regularization`` / ``entropy_regularization_coef``
+        knobs on ``ClassificationFeatureSelectionWrapper`` for Gumbel channel gates.
+        """
+        if self._bypass:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        log_probs = F.log_softmax(self.logits, dim=-1)  # [num_channels, 2]
+        probs = log_probs.exp()
+        mean_p_open = probs[:, 1].mean()
+        negative_entropy = (probs * log_probs).sum(dim=-1).mean()
+        return mean_p_open, negative_entropy
+
     # ACTUAL: probability readout used by current metrics/logging in the main_gumbel pipeline.
     def get_selection_probs(self) -> torch.Tensor:
         """Get selection probabilities for each feature."""
@@ -667,6 +727,63 @@ class GumbelBottleneckLayer(Bottleneck):
         return x
 
 
+class MaskedGumbelBottleneckLayer(Bottleneck):
+    """Bottleneck block with a MaskedGumbelLayer channel gate.
+
+    Channel-granularity analogue of ``AIGBottleneckLayer`` / ``GumbelBottleneckLayer``,
+    used by the iterative channel-pruning search phase
+    (``training.cyclic_channel_pruning``): channels confirmed dead in earlier
+    cycles are passed in via ``disabled_channels`` and stay permanently masked
+    (see ``MaskedGumbelLayer``), while the remaining channels keep a live,
+    trainable gate for further search.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+        disabled_channels: list[int] | None = None,
+    ):
+        super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.gumbel_layer = MaskedGumbelLayer(
+            input_dim=out_channels * self.expansion,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+            disabled_channels=disabled_channels,
+        )
+
+    def forward(self, x):
+        identity = x
+
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+        x = self.batch_norm3(self.conv3(x))
+        x = self.gumbel_layer(x)
+
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
     def __init__(
@@ -762,6 +879,21 @@ class MaskedGumbelLayer(GumbelLayer):
         if total_enabled == 0:
             return torch.tensor(0.0, device=self.logits.device)
         return (probs * self.channel_mask).sum() / total_enabled
+
+    def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._bypass:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        total_enabled = self.channel_mask.sum()
+        if total_enabled == 0:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        log_probs = F.log_softmax(self.logits, dim=-1)
+        probs = log_probs.exp()
+        mean_p_open = (probs[:, 1] * self.channel_mask).sum() / total_enabled
+        per_channel_negative_entropy = (probs * log_probs).sum(dim=-1)
+        negative_entropy = (per_channel_negative_entropy * self.channel_mask).sum() / total_enabled
+        return mean_p_open, negative_entropy
 
     def get_selection_probs(self) -> torch.Tensor:
         probs = super().get_selection_probs()
@@ -1037,6 +1169,71 @@ class AIGRegularizationLoss:
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(norm={self.norm!r})"
+
+
+class AIGTargetRateLoss:
+    """Per-layer target-rate regularizer for AIG gates (Eq. 10, Veit & Belongie, 2020).
+
+    Faithful reproduction of the original ConvNet-AIG training loss
+    (https://github.com/andreasveit/convnet-aig, ``train_img.py``): for every
+    gated block whose target rate is below 1, penalize the squared deviation
+    between the target rate and the batch-mean gate activation. Blocks listed
+    in ``always_on_blocks`` keep a live, *unpenalized* gate — this is not the
+    same as ``set_bypass(True)``: the gate still samples stochastically and can
+    close if the classification loss favors it, it is simply excluded from the
+    target-rate penalty (matching the paper's downsampling-layer schedule).
+
+    This is the "classic AIG" baseline loss, kept separate from
+    ``AIGRegularizationLoss`` / the ``entropy_regularization`` mechanism, which
+    are this project's own contribution.
+
+    Args:
+        target_rate: Uniform target rate applied to every gated block not
+            listed in ``always_on_blocks``.
+        always_on_blocks: 0-based indices of gated blocks (in the order
+            returned by ``get_AIG_modules``, i.e. network execution order) to
+            exclude from the penalty.
+    """
+
+    def __init__(
+        self,
+        target_rate: float = 0.7,
+        always_on_blocks: tuple[int, ...] | list[int] = (),
+    ) -> None:
+        if not 0.0 <= target_rate <= 1.0:
+            raise ValueError("target_rate must be within [0.0, 1.0].")
+        self.target_rate = float(target_rate)
+        self.always_on_blocks = frozenset(int(i) for i in always_on_blocks)
+
+    def __call__(self, model: nn.Module):
+        aig_modules = _get_aig_modules(model)
+        activations = [
+            module.activations
+            for module in aig_modules.values()
+            if getattr(module, "activations", None) is not None
+        ]
+        if not activations:
+            return 0.0
+
+        deviations = [
+            (self.target_rate - activation.mean()) ** 2
+            for index, activation in enumerate(activations)
+            if index not in self.always_on_blocks
+        ]
+        if not deviations:
+            return activations[0].new_zeros(())
+
+        # Normalized by the total number of gated blocks (including always-on
+        # ones), matching the reference implementation's `acts / len(activation_rates)`.
+        return sum(deviations) / len(activations)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(target_rate={self.target_rate!r}, "
+            f"always_on_blocks={sorted(self.always_on_blocks)!r})"
+        )
+
+
 def get_AIG_posterior_regularization_terms(
     model: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -1053,6 +1250,27 @@ def get_AIG_posterior_regularization_terms(
         return None
 
     terms = [gate.posterior_regularization_terms() for gate in gates]
+    mean_p_open = torch.stack([term[0] for term in terms]).mean()
+    negative_entropy = torch.stack([term[1] for term in terms]).mean()
+    return mean_p_open, negative_entropy
+
+
+def get_gumbel_posterior_regularization_terms(
+    model: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Channel-granularity counterpart of ``get_AIG_posterior_regularization_terms``.
+
+    Aggregates ``GumbelLayer.posterior_regularization_terms()`` (mean p(open),
+    mean negative entropy) across every Gumbel selector in the model, weighting
+    each layer equally — the same convention as ``get_gumbel_loss``. Returns
+    ``None`` when the model has no Gumbel selectors so callers can fall back to
+    a plain ``regularization_loss`` callable.
+    """
+    gumbel_modules = _get_gumbel_modules(model)
+    if not gumbel_modules:
+        return None
+
+    terms = [module.posterior_regularization_terms() for module in gumbel_modules.values()]
     mean_p_open = torch.stack([term[0] for term in terms]).mean()
     negative_entropy = torch.stack([term[1] for term in terms]).mean()
     return mean_p_open, negative_entropy

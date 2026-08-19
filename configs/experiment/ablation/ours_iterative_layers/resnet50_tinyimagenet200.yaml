@@ -1,0 +1,72 @@
+# @package _global_
+#
+# "Our approach" — iterative cyclic pruning, block/layer granularity, on
+# ResNet50/TinyImageNet200. See resnet50_cifar10.yaml in this folder for the
+# full explanation of the algorithm.
+#
+# Launch:
+#   python src/net_complexity/cli/cyclic_train.py \
+#       experiment=ablation/ours_iterative_layers/resnet50_tinyimagenet200
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet50_tinyimagenet200
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0001
+  bypass_on_zero_lambda: false
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.3
+  backbone:
+    resnet_block:
+      temperature: 1.0
+      gate_regularization: l1_probability
+
+training_arguments:
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+layer_skipping:
+  enabled: true
+  disabled_layers: []
+
+cyclic_layer_dropping:
+  enabled: true
+  max_cycles: 10
+  drop_mode: threshold
+  g_prob_threshold: 0.1
+  max_param_fraction: 0.10
+  aig_epochs: 120
+  recovery_epochs: 30
+  final_epochs: 180
+  use_plain_model_for_final: true
+  disable_mlflow_for_cycles: false
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_ours_iterative_layers_resnet50_tinyimagenet200_thr${cyclic_layer_dropping.g_prob_threshold}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "ours_iterative_layers"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_ours_iterative_layers_resnet50_tinyimagenet200"
+    gate_regularization: "l1_probability"
+    entropy_regularization: "plus_negative_entropy"
+
+run_history:
+  log_gate_history: true

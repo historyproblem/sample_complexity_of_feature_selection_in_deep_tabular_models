@@ -79,6 +79,10 @@ cyclic_layer_dropping:
 
   aig_epochs: 240
   final_epochs: 240
+  # Epochs for each intermediate no-regularization recovery pass, run after
+  # every cycle's drop decision (not only at the end). Falls back to
+  # final_epochs if unset.
+  recovery_epochs: 30
   use_plain_model_for_final: true
   disable_mlflow_for_cycles: false
 

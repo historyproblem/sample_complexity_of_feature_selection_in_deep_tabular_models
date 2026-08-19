@@ -1,0 +1,29 @@
+# @package _global_
+#
+# Classic ConvNet-AIG baseline (Veit & Belongie, "Convolutional Networks with
+# Adaptive Inference Graphs", IJCV 2020) — the literal per-layer target-rate
+# loss (Eq. 10), reproduced in AIGTargetRateLoss from the reference
+# implementation (https://github.com/andreasveit/convnet-aig, train_img.py).
+# This is the literature baseline for the AIG-t ablation, kept separate from
+# this project's own AIGRegularizationLoss / entropy-regularized gate
+# (see aig.yaml, aig_l1.yaml, and the "ours_*" ablation families).
+
+model:
+  bypass_on_zero_lambda: false
+  lambda_coef: 2.0  # lambda used by the paper for its own ConvNet-AIG experiments
+  # Kaiming-normal conv init matching convnet_aig.py's ResNet_ImageNet/ResNet_cifar
+  # (normal_(0, sqrt(2/n)) on every conv, except the gate's final conv which keeps
+  # its own low-variance init). Only used here — "ours" AIG variants keep PyTorch's
+  # default init since matching the paper's init isn't the point there.
+  backbone_weight_init: paper_kaiming_normal
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.AIGTargetRateLoss
+    target_rate: 0.5
+    always_on_blocks: []
+  backbone:
+    resnet_block:
+      _target_: net_complexity.wrappers.AIGBottleneckLayer
+      _partial_: true
+      gate_regularization: l2_gate

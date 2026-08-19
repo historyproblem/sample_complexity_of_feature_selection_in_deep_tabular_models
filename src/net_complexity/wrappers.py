@@ -3,6 +3,8 @@ from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_fr
 from .models.feature_selection import (
     AIGBottleneckLayer,
     AIGRegularizationLoss,
+    AIGTargetRateLoss,
+    apply_paper_style_conv_init,
     PrunedBottleneck,
     PrunedCIFARBasicBlock,
     CIFARGumbelBasicBlock,
@@ -19,6 +21,7 @@ from .models.feature_selection import (
     GumbelBottleneckLayer,
     GumbelLayer,
     GumbleSoftmax,
+    MaskedGumbelBottleneckLayer,
     MaskedGumbelLayer,
     ResNet50,
     ResNet101,
@@ -47,6 +50,9 @@ from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
 __all__ = [
     "AIGRegularizationLoss",
+    "AIGTargetRateLoss",
+    "apply_paper_style_conv_init",
+    "MaskedGumbelBottleneckLayer",
     "CIFARPrunedGumbelBasicBlock",
     "PrunedBottleneck",
     "PrunedCIFARBasicBlock",

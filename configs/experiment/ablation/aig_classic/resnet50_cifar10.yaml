@@ -1,0 +1,41 @@
+# @package _global_
+#
+# Ablation baseline: classic ConvNet-AIG (Veit & Belongie 2020, Eq. 10
+# target-rate loss) on ResNet50/CIFAR10 — compare against this project's own
+# entropy-regularized AIG variant (experiment/ablation/ours_non_iterative)
+# and DepGraph (experiment/ablation/depgraph).
+#
+# Sweep t via: model.regularization_loss.target_rate=0.3
+# See configs/tuning/ablation_aig_classic_t_grid_resnet50_cifar10_ordered.yaml
+# for a ready-made grid over t in {0.3, 0.4, 0.5, 0.6, 0.7}, launched via
+# configs/tune_ablation_aig_classic_t_grid_resnet50_cifar10.yaml.
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: aig_target_rate
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_aig_classic_resnet50_cifar10_t${model.regularization_loss.target_rate}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "aig_classic"
+    dataset: "cifar10"
+    recipe: "ablation_aig_classic_resnet50_cifar10"
+    target_rate: "${model.regularization_loss.target_rate}"

@@ -1,0 +1,35 @@
+# @package _global_
+#
+# Ablation baseline: classic ConvNet-AIG (Veit & Belongie 2020, Eq. 10
+# target-rate loss) on ResNet50/TinyImageNet200.
+# Sweep t via: model.regularization_loss.target_rate=0.3
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet50_tinyimagenet200
+  - /method: aig_target_rate
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_aig_classic_resnet50_tinyimagenet200_t${model.regularization_loss.target_rate}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "aig_classic"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_aig_classic_resnet50_tinyimagenet200"
+    target_rate: "${model.regularization_loss.target_rate}"

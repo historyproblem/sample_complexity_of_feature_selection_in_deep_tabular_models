@@ -1,0 +1,52 @@
+# @package _global_
+#
+# Fullest currently-available metrics set: classification accuracy, compute
+# cost (GMAC/GFLOP, static and AIG-adjusted), parameter/sparsity statistics,
+# and per-selector activation probabilities for every gating family
+# (AIG block gates, Gumbel/masked-Gumbel channel gates, STG channel gates).
+# Metric classes for a gating family that is not present in the model simply
+# return {} (see AIGActivationsMetric/GumbelProbMetric/STGProbMetric), so this
+# config is safe to reuse across AIG, Gumbel, STG, DepGraph, and plain models
+# alike — every ablation family in configs/experiment/ablation uses it so
+# results stay directly comparable.
+#
+# log_channel_zero_probs=true logs one metric per channel for Gumbel/masked-
+# Gumbel selectors — required by cyclic_channel_pruning to decide which
+# channels to drop, and generally the most complete per-channel signal
+# available. This means large models can log thousands of scalar metrics per
+# epoch; that's an intentional completeness/verbosity trade-off for this
+# config specifically.
+
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+      sample_size: 1
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+      log_channel_zero_probs: true
+    - _target_: net_complexity.metrics.stg.STGProbMetric
+    - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+      sample_size: 1
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+      log_channel_zero_probs: true
+    - _target_: net_complexity.metrics.stg.STGProbMetric
+    - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+  test_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+    - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+    - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+      sample_size: 1
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+      log_channel_zero_probs: true
+    - _target_: net_complexity.metrics.stg.STGProbMetric
+    - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+    - _target_: net_complexity.metrics.complexity.ComputeCostMetric

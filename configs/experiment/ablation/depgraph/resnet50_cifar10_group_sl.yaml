@@ -1,0 +1,61 @@
+# @package _global_
+#
+# DepGraph baseline on ResNet50/CIFAR10 — the *sparsity-learning* recipe
+# (reference: reproduce/main.py's "group_sl" method -> GroupNormPruner +
+# GroupMagnitudeImportance). Unlike the other depgraph/* configs (which
+# prune directly from a normally-trained checkpoint — the paper's own
+# "Ours w/o SL" ablation), this one first runs a short extra training phase
+# (sl_epochs) that calls GroupNormPruner.regularize(model) after every
+# backward pass, inducing group-level sparsity before pruning — this is the
+# recipe behind the paper's headline "Ours" numbers, not the weaker baseline.
+#
+# Required override: depgraph_pruning.source_run_dir=<plain baseline run dir>
+# (needs the real training dataloader for the sparsity-learning phase, so
+# /data must point at the same dataset as the source checkpoint).
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+depgraph_pruning:
+  enabled: true
+  source_checkpoint: null
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  importance: magnitude_l2
+  sparsity_learning: true
+  reg: 1.0e-4        # regularization coefficient for GroupNormPruner.regularize()
+  sl_epochs: 20
+  sl_lr: 0.01
+  sl_momentum: 0.9
+  target_speedup: 2.0
+  global_pruning: true
+  iterative_steps: 200
+  example_input_size: [3, 32, 32]
+  random_seed: 42
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_depgraph_resnet50_cifar10_group_sl_speedup${depgraph_pruning.target_speedup}"
+  tags:
+    model_type: "ResNet50_DepGraph"
+    method: "depgraph"
+    dataset: "cifar10"
+    recipe: "ablation_depgraph_resnet50_cifar10_group_sl"
+    importance: "magnitude_l2"
+    sparsity_learning: "true"
+    target_speedup: "${depgraph_pruning.target_speedup}"

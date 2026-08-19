@@ -1,0 +1,8 @@
+defaults:
+  - experiment: ablation/ours_iterative_channels/resnet50_cifar10
+  - _self_
+
+hydra:
+  run:
+    dir: ${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_${mlflow.run_name}
+  output_subdir: .hydra

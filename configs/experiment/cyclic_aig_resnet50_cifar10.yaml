@@ -97,6 +97,13 @@ cyclic_layer_dropping:
   # Epochs for the final plain-training run on the surviving architecture.
   final_epochs: 200
 
+  # Epochs for each intermediate no-regularization recovery pass, run after
+  # every cycle's drop decision (not only at the end) so every pruning level
+  # in the trajectory gets a clean accuracy/compute reading. Falls back to
+  # final_epochs if unset. Kept short relative to final_epochs since it runs
+  # once per cycle.
+  recovery_epochs: 30
+
   # Replace AIGBottleneckLayer with standard Bottleneck in the final run so
   # there is no stochastic gate noise during final training.
   use_plain_model_for_final: true

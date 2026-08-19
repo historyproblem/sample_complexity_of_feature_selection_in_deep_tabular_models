@@ -192,6 +192,15 @@ _NUM_BLOCKS_BY_TARGET = {
     "CIFARResNet110": [18, 18, 18],
 }
 
+# Bottleneck-based ResNet50/101/152 (net_complexity.models.resnet.ResNet) —
+# distinct from the CIFARResNet family above, which uses BasicBlock and a
+# 3-stage layout.
+_BOTTLENECK_LAYER_LIST_BY_TARGET = {
+    "ResNet50": [3, 4, 6, 3],
+    "ResNet101": [3, 4, 23, 3],
+    "ResNet152": [3, 8, 36, 3],
+}
+
 
 def _mask_dict_to_pruning_spec(mask_dict: dict[str, list[int]]) -> dict[str, list[int]]:
     """Convert channel_history layer-name keys to PrunedCIFARResNet pruning_spec keys."""
@@ -228,32 +237,82 @@ def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
         )
 
 
-def build_structurally_pruned_model_from_config(
+def _is_bottleneck_backbone_target(backbone_target: str) -> bool:
+    return any(name in backbone_target for name in _BOTTLENECK_LAYER_LIST_BY_TARGET)
+
+
+def build_pruned_bottleneck_model(
     config: DictConfig,
-    cfg: DictConfig,
+    pruning_spec: dict[str, list[int]],
 ) -> nn.Module:
-    """Build a PrunedCIFARResNet wrapped in ClassificationFeatureSelectionWrapper.
+    """Build a Bottleneck-based ``PrunedResNet`` wrapped in ``ClassificationFeatureSelectionWrapper``.
 
-    Reads the channel mask (from channel_history file or explicit YAML),
-    converts it to a per-block pruning_spec, and constructs a fresh model
-    whose residual branches are physically narrowed to the active channels.
-
-    The returned model has the same interface as the standard training model:
-    forward(X, y) -> ClassifModelOutput.
+    Bottleneck (ResNet50/101/152) counterpart of the CIFARResNet path in
+    ``build_structurally_pruned_model_from_config``. Unlike that function,
+    this one takes the pruning spec directly (already in ``{"layerN.B":
+    [channel_indices]}`` form) so callers that already hold it in memory —
+    e.g. the iterative channel-pruning cycle — do not need to round-trip it
+    through a mask file.
     """
+    from .feature_selection import ClassificationFeatureSelectionWrapper
+    from .pruned_bottleneck import PrunedResNet
+
+    num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 1000)
+    in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
+    stem_kernel_size = int(OmegaConf.select(config, "model.backbone.stem_kernel_size") or 7)
+    stem_stride = int(OmegaConf.select(config, "model.backbone.stem_stride") or 2)
+    stem_padding = int(OmegaConf.select(config, "model.backbone.stem_padding") or 3)
+    use_maxpool_cfg = OmegaConf.select(config, "model.backbone.use_maxpool")
+    use_maxpool = True if use_maxpool_cfg is None else bool(use_maxpool_cfg)
+
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+    layer_list = next(
+        (v for k, v in _BOTTLENECK_LAYER_LIST_BY_TARGET.items() if k in backbone_target),
+        None,
+    )
+    if layer_list is None:
+        raise ValueError(
+            "build_pruned_bottleneck_model: could not infer ResNet50/101/152 depth from "
+            f"model.backbone._target_={backbone_target!r}."
+        )
+
+    backbone = PrunedResNet(
+        pruning_spec=pruning_spec,
+        layer_list=layer_list,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
+    )
+
+    lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)
+    criterion_cfg = OmegaConf.select(config, "model.criterion")
+    criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
+
+    total_disabled = sum(len(v) for v in pruning_spec.values())
+    print(
+        f"[channel_pruning] Structural pruning applied (Bottleneck): "
+        f"{len(pruning_spec)} blocks affected, "
+        f"{total_disabled} channels removed from residual branches."
+    )
+
+    return ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=lambda_coef,
+        criterion=criterion,
+        regularization_loss=lambda m: 0,
+    )
+
+
+def _build_pruned_cifar_model(
+    config: DictConfig,
+    pruning_spec: dict[str, list[int]],
+) -> nn.Module:
     from .feature_selection import ClassificationFeatureSelectionWrapper
     from .pruned_resnet import PrunedCIFARResNet
 
-    mask_dict = _load_mask_dict(cfg)
-    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
-
-    if not pruning_spec:
-        print(
-            "[channel_pruning] WARNING: no prunable layers found in mask - "
-            "PrunedCIFARResNet will be equivalent to the full model."
-        )
-
-    # Read backbone parameters from model config
     num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 10)
     in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
     shortcut_option = str(
@@ -280,7 +339,6 @@ def build_structurally_pruned_model_from_config(
     criterion_cfg = OmegaConf.select(config, "model.criterion")
     criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
-    # Log a summary of the pruning
     total_disabled = sum(len(v) for v in pruning_spec.values())
     print(
         f"[channel_pruning] Structural pruning applied: "
@@ -294,3 +352,33 @@ def build_structurally_pruned_model_from_config(
         criterion=criterion,
         regularization_loss=lambda m: 0,
     )
+
+
+def build_structurally_pruned_model_from_config(
+    config: DictConfig,
+    cfg: DictConfig,
+) -> nn.Module:
+    """Build a physically channel-pruned model wrapped in ClassificationFeatureSelectionWrapper.
+
+    Reads the channel mask (from channel_history file or explicit YAML),
+    converts it to a per-block pruning_spec, and constructs a fresh model
+    whose residual branches are physically narrowed to the active channels.
+    Dispatches to the CIFARResNet (BasicBlock) or Bottleneck (ResNet50/101/152)
+    builder based on ``model.backbone._target_``.
+
+    The returned model has the same interface as the standard training model:
+    forward(X, y) -> ClassifModelOutput.
+    """
+    mask_dict = _load_mask_dict(cfg)
+    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
+
+    if not pruning_spec:
+        print(
+            "[channel_pruning] WARNING: no prunable layers found in mask - "
+            "the pruned model will be equivalent to the full model."
+        )
+
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+    if _is_bottleneck_backbone_target(backbone_target):
+        return build_pruned_bottleneck_model(config, pruning_spec)
+    return _build_pruned_cifar_model(config, pruning_spec)

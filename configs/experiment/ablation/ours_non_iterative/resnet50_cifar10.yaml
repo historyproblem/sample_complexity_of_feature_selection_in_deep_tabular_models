@@ -1,0 +1,56 @@
+# @package _global_
+#
+# "Our approach" — single-shot (non-iterative) block/layer-granularity AIG
+# gating with entropy regularization, on ResNet50/CIFAR10. Same gate
+# regularization recipe as ablation/ours_iterative_layers, but trained once
+# with no cyclic drop/recovery loop — the "our AIG variant, plain" ablation
+# point, comparable directly against ablation/aig_classic (same architecture,
+# different regularizer).
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0001
+  bypass_on_zero_lambda: false
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.3
+  backbone:
+    resnet_block:
+      temperature: 1.0
+      gate_regularization: l1_probability
+
+training_arguments:
+  num_epochs: 200
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 200
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_ours_non_iterative_resnet50_cifar10_lambda${model.lambda_coef}_beta${model.entropy_regularization_coef}"
+  tags:
+    model_type: "ResNet50_AIG"
+    method: "ours_non_iterative"
+    dataset: "cifar10"
+    recipe: "ablation_ours_non_iterative_resnet50_cifar10"
+    gate_regularization: "l1_probability"
+    entropy_regularization: "plus_negative_entropy"

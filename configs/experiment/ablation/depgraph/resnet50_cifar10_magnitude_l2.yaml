@@ -1,0 +1,67 @@
+# @package _global_
+#
+# DepGraph structural-pruning baseline (Fang et al., CVPR 2023) on
+# ResNet50/CIFAR10 — group-L2-norm importance (the paper's own default
+# criterion). Prunes a *plain*-trained checkpoint (no gates), then fine-tunes
+# the physically narrowed model.
+#
+# Required override before running:
+#   depgraph_pruning.source_run_dir=outputs/runs/<your best_practice_resnet50_on_cifar10 run>
+# (or depgraph_pruning.source_checkpoint=/path/to/best.pt directly).
+#
+# Other importance criteria for the same backbone/dataset ("different pruning
+# approaches"):
+#   resnet50_cifar10_magnitude_l1.yaml, resnet50_cifar10_random.yaml,
+#   resnet50_cifar10_bn_scale.yaml, resnet50_cifar10_group_sl.yaml
+#
+# sparsity_learning=false (this file) reproduces the paper's own "Ours w/o SL"
+# ablation: importance is ranked directly on the normally-trained checkpoint,
+# with no prior sparsification phase. See resnet50_cifar10_group_sl.yaml for
+# the full sparsity-learning recipe (their headline "Ours" numbers).
+#
+# Pruning targets a measured FLOPs speedup via progressive pruning
+# (reproduce/main.py's progressive_pruning), not a fixed channel ratio, so it
+# lands on a comparable compute budget to the AIG-classic operating points.
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+depgraph_pruning:
+  enabled: true
+  source_checkpoint: null
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  importance: magnitude_l2
+  sparsity_learning: false
+  target_speedup: 2.0
+  global_pruning: true
+  iterative_steps: 200
+  example_input_size: [3, 32, 32]
+  random_seed: 42
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_depgraph_resnet50_cifar10_magnitude_l2_speedup${depgraph_pruning.target_speedup}"
+  tags:
+    model_type: "ResNet50_DepGraph"
+    method: "depgraph"
+    dataset: "cifar10"
+    recipe: "ablation_depgraph_resnet50_cifar10_magnitude_l2"
+    importance: "magnitude_l2"
+    sparsity_learning: "false"
+    target_speedup: "${depgraph_pruning.target_speedup}"

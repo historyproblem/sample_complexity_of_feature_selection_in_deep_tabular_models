@@ -1,0 +1,67 @@
+# @package _global_
+#
+# "Our approach" — iterative cyclic pruning, channel granularity, on
+# ResNet101/TinyImageNet200. See
+# ablation/ours_iterative_channels/resnet50_cifar10.yaml for the full
+# explanation of the algorithm.
+#
+# Launch:
+#   python src/net_complexity/cli/cyclic_train.py \
+#       --config-name cyclic_channel_train \
+#       experiment=ablation/ours_iterative_channels/resnet101_tinyimagenet200
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet101_tinyimagenet200
+  - /method: gumbel_masked_bottleneck
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0001
+  bypass_on_zero_lambda: true
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.3
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+training_arguments:
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+cyclic_channel_pruning:
+  enabled: true
+  max_cycles: 10
+  drop_mode: threshold
+  g_prob_threshold: 0.1
+  max_param_fraction: 0.10
+  gumbel_epochs: 80
+  recovery_epochs: 20
+  final_epochs: 180
+  disable_mlflow_for_cycles: false
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_ours_iterative_channels_resnet101_tinyimagenet200_thr${cyclic_channel_pruning.g_prob_threshold}"
+  tags:
+    model_type: "ResNet101_Gumbel"
+    method: "ours_iterative_channels"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_ours_iterative_channels_resnet101_tinyimagenet200"
+    entropy_regularization: "plus_negative_entropy"
+
+run_history:
+  log_gate_history: true

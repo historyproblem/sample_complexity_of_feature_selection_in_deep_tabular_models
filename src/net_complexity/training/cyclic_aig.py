@@ -13,6 +13,14 @@ Two layer-selection modes are supported via ``cyclic_layer_dropping.drop_mode``:
     first) and greedily added until the budget would be exceeded.  Converges
     when no candidate layer fits within the remaining budget.
 
+After every cycle's drop decision (converged or not), the current
+architecture is retrained *without* AIG regularization ("recovery pass") —
+not only once at the very end. This gives every pruning level in the
+trajectory a clean, regularization-free accuracy/compute reading, instead of
+only the final one. The last recovery pass (on convergence or once
+``max_cycles`` is reached) plays the role of the previous "final" run and
+uses ``final_epochs`` if set.
+
 Config section (``cyclic_layer_dropping``)::
 
     cyclic_layer_dropping:
@@ -30,7 +38,8 @@ Config section (``cyclic_layer_dropping``)::
 
       # --- training schedule ---
       aig_epochs: 200           # epochs per AIG cycle (overrides training_arguments.num_epochs)
-      final_epochs: 200         # epochs for the final plain-training run
+      recovery_epochs: 30       # epochs for each intermediate no-regularization recovery pass
+      final_epochs: 200         # epochs for the *last* recovery pass (falls back to recovery_epochs)
       use_plain_model_for_final: true
       disable_mlflow_for_cycles: false
 """
@@ -254,17 +263,25 @@ def _build_cycle_config(
     return cfg
 
 
-def _build_final_config(
+def _build_recovery_config(
     base_config: DictConfig,
     disabled_layers: list[str],
     output_root: Path,
+    *,
+    stage_name: str,
+    epochs: int | None,
 ) -> DictConfig:
+    """Build a no-regularization ("recovery") sub-run config for the given architecture.
+
+    Used both after every intermediate cycle (to report an accuracy/compute
+    operating point for that pruning level without AIG regularization noise)
+    and for the final polish run at the end of the loop (``stage_name="final"``).
+    """
     cfg = deepcopy(base_config)
     cyclic_cfg = cfg.cyclic_layer_dropping
 
-    final_epochs = getattr(cyclic_cfg, "final_epochs", None)
-    if final_epochs is not None:
-        OmegaConf.update(cfg, "training_arguments.num_epochs", int(final_epochs), merge=False)
+    if epochs is not None:
+        _set_num_epochs(cfg, int(epochs))
 
     OmegaConf.update(cfg, "model.lambda_coef", 0.0, merge=False)
     OmegaConf.update(cfg, "training_arguments.adaptive_lambda.enabled", False, merge=False)
@@ -279,20 +296,58 @@ def _build_final_config(
                 del cfg.model.backbone["resnet_block"]
 
     _set_disabled_layers(cfg, disabled_layers)
-    _configure_run_history(cfg, output_root / "final")
+    _configure_run_history(cfg, output_root / stage_name)
 
     base_name = (
         (getattr(cfg.run_history, "run_name", None) if hasattr(cfg, "run_history") else None)
         or (getattr(cfg.mlflow, "run_name", None) if hasattr(cfg, "mlflow") else None)
         or "run"
     )
-    _set_run_name(cfg, f"{base_name}_final")
+    _set_run_name(cfg, f"{base_name}_{stage_name}")
 
-    # Re-enable MLflow for the final (summary) run
+    # Recovery/final runs are always logged, regardless of disable_mlflow_for_cycles
+    # (that flag only suppresses the noisy AIG search cycles).
     if hasattr(cfg, "mlflow"):
         OmegaConf.update(cfg, "mlflow.enabled", True, merge=False)
 
     return cfg
+
+
+def _run_recovery_pass(
+    base_config: DictConfig,
+    disabled_layers: list[str],
+    output_root: Path,
+    *,
+    cycle_idx: int,
+    is_final: bool,
+    progress_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Train the current architecture without AIG regularization ("recovery").
+
+    Runs after every cycle's drop decision — not only at the very end — so
+    that each pruning level in the trajectory gets a clean, regularization-free
+    accuracy/compute measurement. ``recovery_epochs`` controls the budget for
+    intermediate cycles; the last recovery pass (``is_final=True``) uses
+    ``final_epochs`` when set, falling back to ``recovery_epochs`` otherwise,
+    for a possibly longer final polish.
+    """
+    cyclic_cfg = base_config.cyclic_layer_dropping
+    stage_name = "final" if is_final else f"cycle_{cycle_idx}_recovery"
+
+    epochs = None
+    if is_final:
+        epochs = getattr(cyclic_cfg, "final_epochs", None)
+    if epochs is None:
+        epochs = getattr(cyclic_cfg, "recovery_epochs", None)
+
+    recovery_cfg = _build_recovery_config(
+        base_config,
+        disabled_layers,
+        output_root,
+        stage_name=stage_name,
+        epochs=epochs,
+    )
+    return run_training(recovery_cfg, progress_context=progress_context)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +405,7 @@ def run_cyclic_aig_training(
 
     disabled_layers: list[str] = _read_initial_disabled_layers(config)
     cycle_results: list[dict[str, Any]] = []
+    recovery_results: list[dict[str, Any]] = []
 
     _banner = "=" * 60
 
@@ -387,32 +443,59 @@ def run_cyclic_aig_training(
 
         if drop_mode == "threshold":
             new_drop = _layers_to_drop(layer_probs, threshold, disabled_layers)
-            if not new_drop:
+            converged = not new_drop
+            if converged:
                 print(
                     f"Cycle {cycle + 1} | no layers with g_prob < {threshold} — converged."
                 )
-                break
-            print(f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s): {new_drop}")
+            else:
+                print(f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s): {new_drop}")
 
         else:  # param_budget
             freeable_counts, total_params = _pruneable_param_counts(cycle_cfg)
             new_drop = _layers_to_drop_by_param_budget(
                 layer_probs, disabled_layers, freeable_counts, total_params, max_param_fraction,
             )
-            if not new_drop:
+            converged = not new_drop
+            if converged:
                 print(
                     f"Cycle {cycle + 1} | no layers fit within "
                     f"{max_param_fraction:.1%} budget — converged."
                 )
-                break
-            freed = sum(freeable_counts[n] for n in new_drop)
-            print(
-                f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s)"
-                f" — {freed:,} params freed ({freed / total_params:.1%} of {total_params:,}): "
-                f"{new_drop}"
-            )
+            else:
+                freed = sum(freeable_counts[n] for n in new_drop)
+                print(
+                    f"Cycle {cycle + 1} | dropping {len(new_drop)} layer(s)"
+                    f" — {freed:,} params freed ({freed / total_params:.1%} of {total_params:,}): "
+                    f"{new_drop}"
+                )
 
-        disabled_layers = disabled_layers + new_drop
+        if not converged:
+            disabled_layers = disabled_layers + new_drop
+
+        # Recovery pass: retrain the current (post-drop) architecture without AIG
+        # regularization, every cycle — not only at the very end — so each
+        # pruning level in the trajectory gets a clean accuracy/compute reading.
+        is_final_recovery = converged or cycle == max_cycles - 1
+        print(
+            f"\nCycle {cycle + 1} | recovery pass (no regularization)"
+            f" | disabled={len(disabled_layers)}"
+            f"{' | final' if is_final_recovery else ''}"
+        )
+        recovery_result = _run_recovery_pass(
+            config,
+            disabled_layers,
+            output_root,
+            cycle_idx=cycle,
+            is_final=is_final_recovery,
+            progress_context=progress_context,
+        )
+        recovery_results.append(recovery_result)
+
+        if converged:
+            break
+
+    final_result = recovery_results[-1]
 
     print(f"\n{_banner}")
     print(f"Final Training | {len(disabled_layers)} layer(s) permanently disabled")
@@ -420,25 +503,22 @@ def run_cyclic_aig_training(
         print(f"  Disabled: {disabled_layers}")
     print(_banner)
 
-    final_cfg = _build_final_config(
-        base_config=config,
-        disabled_layers=disabled_layers,
-        output_root=output_root,
-    )
-    final_result = run_training(final_cfg, progress_context=progress_context)
-
     cycle_train_time_sec = sum(
         float(result.get("full_train_time_sec", 0.0))
         for result in cycle_results
     )
+    recovery_train_time_sec = sum(
+        float(result.get("full_train_time_sec", 0.0))
+        for result in recovery_results
+    )
     final_retrain_time_sec = float(final_result.get("full_train_time_sec", 0.0))
-    full_train_time_sec = cycle_train_time_sec + final_retrain_time_sec
-    num_epochs_executed = sum(
-        int(result.get("num_epochs_executed", 0))
-        for result in cycle_results
-    ) + int(final_result.get("num_epochs_executed", 0))
+    full_train_time_sec = cycle_train_time_sec + recovery_train_time_sec
+    num_epochs_executed = (
+        sum(int(result.get("num_epochs_executed", 0)) for result in cycle_results)
+        + sum(int(result.get("num_epochs_executed", 0)) for result in recovery_results)
+    )
     baseline_costs: dict[str, Mapping[str, Any]] = {}
-    for sub_result in [*cycle_results, final_result]:
+    for sub_result in [*cycle_results, *recovery_results]:
         baseline = sub_result.get("adaptive_lambda_baseline")
         if isinstance(baseline, Mapping):
             baseline_costs[str(baseline.get("history_path"))] = baseline
@@ -455,9 +535,11 @@ def run_cyclic_aig_training(
         "num_cycles_completed": len(cycle_results),
         "final_disabled_layers": disabled_layers,
         "cycle_results": cycle_results,
+        "recovery_results": recovery_results,
         "final_result": final_result,
         "training_cost": {
             "cycle_train_time_sec": cycle_train_time_sec,
+            "recovery_train_time_sec": recovery_train_time_sec,
             "final_retrain_time_sec": final_retrain_time_sec,
             "full_train_time_sec": full_train_time_sec,
             "num_epochs_executed": num_epochs_executed,

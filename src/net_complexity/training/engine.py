@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
+from net_complexity.models.aig import AIGBlockGate
 from net_complexity.models.feature_selection import get_AIG_modules, get_gumbel_modules, get_stg_modules
 from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, AdaptiveLambdaController
 from net_complexity.training.gradient_norms import GradientNormLogger
@@ -56,7 +57,7 @@ class OptimizerBuildInfo:
 
 @dataclass(frozen=True)
 class GateParameterSpec:
-    parameter: nn.Parameter
+    parameters: tuple[nn.Parameter, ...]
     num_gates: int
 
 
@@ -142,6 +143,16 @@ def _build_scheduler(config: DictConfig, optimizer: torch.optim.Optimizer) -> Sc
 
 
 def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
+    """Collect gate parameters eligible for a separate optimizer param group.
+
+    Gumbel/STG: the per-channel logits/mu tensor, one gate per channel
+    (num_gates = channel count) — matches the existing main_gumbel pipeline.
+
+    AIG: only the block gate's *final* router conv (weight + bias) — mirroring
+    the reference ConvNet-AIG optimizer, which splits out only 'fc2' (not the
+    hidden fc1/fc1bn layer) into its own param group. One AIG gate makes a
+    single block-level decision, so num_gates = 1 per block (not per-channel).
+    """
     gate_specs: list[GateParameterSpec] = []
     seen_parameter_ids: set[int] = set()
 
@@ -151,7 +162,7 @@ def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
         if parameter.requires_grad and parameter_id not in seen_parameter_ids:
             gate_specs.append(
                 GateParameterSpec(
-                    parameter=parameter,
+                    parameters=(parameter,),
                     num_gates=int(parameter.shape[0]),
                 )
             )
@@ -163,11 +174,25 @@ def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
         if parameter.requires_grad and parameter_id not in seen_parameter_ids:
             gate_specs.append(
                 GateParameterSpec(
-                    parameter=parameter,
+                    parameters=(parameter,),
                     num_gates=int(parameter.numel()),
                 )
             )
             seen_parameter_ids.add(parameter_id)
+
+    for module in get_AIG_modules(model).values():
+        gate = module if isinstance(module, AIGBlockGate) else module.gate
+        final_conv = gate.router[-1]
+        parameters = tuple(
+            parameter
+            for parameter in (final_conv.weight, final_conv.bias)
+            if parameter is not None
+            and parameter.requires_grad
+            and id(parameter) not in seen_parameter_ids
+        )
+        if parameters:
+            gate_specs.append(GateParameterSpec(parameters=parameters, num_gates=1))
+            seen_parameter_ids.update(id(parameter) for parameter in parameters)
 
     return gate_specs
 
@@ -204,13 +229,13 @@ def _build_optimizer(
             OptimizerBuildInfo(gate_weight_decay_scale=gate_weight_decay_scale),
         )
 
-    gate_parameter_ids = {id(spec.parameter) for spec in gate_specs}
+    gate_parameter_ids = {id(parameter) for spec in gate_specs for parameter in spec.parameters}
     base_parameters = [
         parameter
         for parameter in model.parameters()
         if parameter.requires_grad and id(parameter) not in gate_parameter_ids
     ]
-    gate_parameters = [spec.parameter for spec in gate_specs]
+    gate_parameters = [parameter for spec in gate_specs for parameter in spec.parameters]
 
     base_weight_decay = float(getattr(optimizer_cfg, "weight_decay", 0.0))
     gate_weight_decay = base_weight_decay * gate_weight_decay_scale / float(num_gates)
@@ -2135,13 +2160,26 @@ def run_training(
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
 
+    depgraph_pruning_cfg = getattr(config, "depgraph_pruning", None)
+    depgraph_pruning_enabled = (
+        depgraph_pruning_cfg is not None
+        and bool(getattr(depgraph_pruning_cfg, "enabled", False))
+    )
+
     channel_pruning_cfg = getattr(config, "channel_pruning", None)
     pruning_enabled = (
         channel_pruning_cfg is not None
         and bool(getattr(channel_pruning_cfg, "enabled", True))
     )
 
-    if pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
+    if depgraph_pruning_enabled:
+        # DepGraph baseline: build a torch-pruning-pruned model from a plain
+        # trained checkpoint instead of instantiating the full model from config.
+        from net_complexity.models.depgraph_pruning import (
+            build_depgraph_pruned_model_from_config,
+        )
+        model = build_depgraph_pruned_model_from_config(config, depgraph_pruning_cfg)
+    elif pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
         # Structural pruning: build a physically narrowed model from scratch
         # instead of instantiating the full model from config.
         from net_complexity.models.channel_pruning import (

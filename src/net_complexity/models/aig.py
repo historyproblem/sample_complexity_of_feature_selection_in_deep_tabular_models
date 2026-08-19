@@ -100,7 +100,11 @@ class AIGBlockGate(nn.Module):
     def reset_parameters(self) -> None:
         final_conv = self.router[-1]
         assert isinstance(final_conv, nn.Conv2d)
-        nn.init.zeros_(final_conv.weight)
+        # Small-variance normal init for the gate's final conv, matching the
+        # reference ConvNet-AIG implementation (convnet_aig.py: "Initialize
+        # last layer of gate with low variance", weight.data.normal_(0, 0.001))
+        # rather than an exact zero init.
+        nn.init.normal_(final_conv.weight, mean=0.0, std=0.001)
         if self.init_logits is not None:
             off_logit, on_logit = self.init_logits
         else:
