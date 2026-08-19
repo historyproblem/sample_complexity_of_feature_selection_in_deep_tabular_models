@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from net_complexity.models.autopruner import (
     get_autopruner_modules,
     load_autopruner_pretrained_backbone,
 )
+from net_complexity.training.engine import _assert_runtime_lambda_consistency
 from net_complexity.training.run_history import RunHistory
 
 
@@ -344,6 +346,30 @@ def test_author_configs_pin_resnet_hyperparameters_and_ratio_grid():
     assert tuning_cfg.tuning.search_space[
         "model.backbone.target_keep_ratio"
     ].choices == [0.5, 0.3]
+
+
+def test_autopruner_runtime_does_not_require_unrelated_global_lambda(tmp_path):
+    model = AutoPrunerWrapper(_tiny_backbone(), select_best_per_stage=False)
+    config = OmegaConf.create(
+        {
+            "model": {},
+            "mlflow": {"run_name": "autopruner_without_global_lambda"},
+        }
+    )
+    run_history = SimpleNamespace(
+        run_name="autopruner_without_global_lambda",
+        run_dir=tmp_path,
+    )
+
+    snapshot = _assert_runtime_lambda_consistency(
+        config,
+        model,
+        run_history,
+        progress_context={"grid_params": {}, "optuna_trial_params": {}},
+    )
+
+    assert snapshot["cfg_model_lambda_coef"] is None
+    assert snapshot["model_lambda_coef"] is None
 
 
 def test_v100_overnight_series_uses_only_author_ratios_and_four_seeds():

@@ -545,28 +545,41 @@ def _assert_runtime_lambda_consistency(
 ) -> dict[str, Any]:
     cfg_lambda = _resolve_lambda_value(config)
     model_lambda = _resolve_model_lambda_coef(model)
-    assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
-    assert model_lambda is not None, "Instantiated model is missing lambda_coef."
-    assert abs(float(cfg_lambda) - float(model_lambda)) < 1e-12, (
-        f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match model.lambda_coef={model_lambda}."
-    )
-
     progress_context = progress_context or {}
     grid_params = progress_context.get("grid_params") or {}
-    if LAMBDA_CONFIG_PATH in grid_params:
-        grid_lambda = float(grid_params[LAMBDA_CONFIG_PATH])
-        assert abs(float(cfg_lambda) - grid_lambda) < 1e-12, (
-            f"grid_params['{LAMBDA_CONFIG_PATH}']={grid_lambda} does not match "
-            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
-        )
-
     trial_params = progress_context.get("optuna_trial_params") or {}
-    if LAMBDA_CONFIG_PATH in trial_params:
-        trial_lambda = float(trial_params[LAMBDA_CONFIG_PATH])
-        assert abs(float(cfg_lambda) - trial_lambda) < 1e-12, (
-            f"trial.params['{LAMBDA_CONFIG_PATH}']={trial_lambda} does not match "
-            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+
+    if cfg_lambda is None or model_lambda is None:
+        assert cfg_lambda is None and model_lambda is None, (
+            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match "
+            f"model.lambda_coef={model_lambda}."
         )
+        assert LAMBDA_CONFIG_PATH not in grid_params, (
+            f"grid_params contains '{LAMBDA_CONFIG_PATH}', but the method has "
+            "no global lambda_coef."
+        )
+        assert LAMBDA_CONFIG_PATH not in trial_params, (
+            f"trial.params contains '{LAMBDA_CONFIG_PATH}', but the method has "
+            "no global lambda_coef."
+        )
+    else:
+        assert abs(float(cfg_lambda) - float(model_lambda)) < 1e-12, (
+            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match "
+            f"model.lambda_coef={model_lambda}."
+        )
+        if LAMBDA_CONFIG_PATH in grid_params:
+            grid_lambda = float(grid_params[LAMBDA_CONFIG_PATH])
+            assert abs(float(cfg_lambda) - grid_lambda) < 1e-12, (
+                f"grid_params['{LAMBDA_CONFIG_PATH}']={grid_lambda} does not match "
+                f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+            )
+
+        if LAMBDA_CONFIG_PATH in trial_params:
+            trial_lambda = float(trial_params[LAMBDA_CONFIG_PATH])
+            assert abs(float(cfg_lambda) - trial_lambda) < 1e-12, (
+                f"trial.params['{LAMBDA_CONFIG_PATH}']={trial_lambda} does not match "
+                f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
+            )
 
     expected_run_name = _resolve_expected_run_name(config)
     if expected_run_name is not None:
