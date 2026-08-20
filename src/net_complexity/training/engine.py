@@ -2178,7 +2178,7 @@ def run_training(
         from net_complexity.models.depgraph_pruning import (
             build_depgraph_pruned_model_from_config,
         )
-        model = build_depgraph_pruned_model_from_config(config, depgraph_pruning_cfg)
+        model = build_depgraph_pruned_model_from_config(config, depgraph_pruning_cfg, device=device)
     elif pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
         # Structural pruning: build a physically narrowed model from scratch
         # instead of instantiating the full model from config.

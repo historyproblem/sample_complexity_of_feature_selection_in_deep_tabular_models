@@ -54,6 +54,17 @@ from omegaconf import DictConfig, OmegaConf
 
 import torch_pruning as tp
 
+# NNPACK is a CPU-only conv backend; PyTorch tries it first for every eligible
+# CPU conv2d call. In some containerized environments (cgroup memory limits
+# confusing NNPACK's availability check, or /proc/cpuinfo not parsing) it
+# fails to initialize and PyTorch logs a warning on *every single call*
+# instead of once — with DependencyGraph tracing and progressive pruning
+# each doing many forward passes, this floods the log. Disabling it is a
+# no-op on CUDA tensors and only removes a (broken, in that scenario)
+# CPU acceleration path — the safe default for this module regardless of
+# which device the actual pruning ends up running on.
+torch.backends.nnpack.enabled = False
+
 _IMPORTANCE_FACTORIES = {
     "magnitude_l1": lambda: tp.importance.GroupMagnitudeImportance(p=1),
     "magnitude_l2": lambda: tp.importance.GroupMagnitudeImportance(p=2),
@@ -212,6 +223,7 @@ def _progressive_prune_to_target_speedup(
 def build_depgraph_pruned_model_from_config(
     config: DictConfig,
     cfg: DictConfig,
+    device: str | None = None,
 ) -> nn.Module:
     """Build a DepGraph-pruned model wrapped in ClassificationFeatureSelectionWrapper.
 
@@ -222,16 +234,29 @@ def build_depgraph_pruned_model_from_config(
     model ready for fine-tuning through the normal training loop
     (forward(X, y) -> ClassifModelOutput, same as every other model in this
     codebase).
+
+    Args:
+        device: Device to trace/prune (and, if ``sparsity_learning: true``,
+            run the extra training phase) on. Defaults to ``config.device``
+            passed in by ``engine.run_training`` — i.e. the same device the
+            rest of training uses. Pruning ResNet50+ on CPU is both far
+            slower (progressive pruning does many forward passes) and, in
+            memory-constrained containers, prone to spurious NNPACK
+            "out of memory" warnings; there is no correctness reason to
+            force CPU here, so this only falls back to CPU when no CUDA
+            device is actually available (e.g. standalone/CI usage).
     """
     from .feature_selection import ClassificationFeatureSelectionWrapper
 
-    device = "cpu"  # tracing/pruning happens on CPU; engine.py moves the result to config.device
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint_path = _resolve_checkpoint_path(cfg)
     backbone = _load_plain_backbone(config, checkpoint_path, device=device)
+    backbone.to(device)
     backbone.eval()
 
     example_shape = _resolve_example_input_size(config, cfg)
-    example_inputs = torch.randn(1, *example_shape)
+    example_inputs = torch.randn(1, *example_shape, device=device)
 
     importance_name = str(getattr(cfg, "importance", "magnitude_l2")).strip().lower()
     importance = _build_importance(importance_name)

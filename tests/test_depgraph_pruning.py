@@ -75,7 +75,7 @@ def test_build_depgraph_pruned_model_reduces_params_and_runs_forward(tmp_path):
 
     original_params = sum(p.numel() for p in _make_backbone().parameters())
 
-    pruned_model = build_depgraph_pruned_model_from_config(config, cfg)
+    pruned_model = build_depgraph_pruned_model_from_config(config, cfg, device="cpu")
     pruned_model.eval()
 
     pruned_params = sum(p.numel() for p in pruned_model.backbone.parameters())
@@ -85,20 +85,51 @@ def test_build_depgraph_pruned_model_reduces_params_and_runs_forward(tmp_path):
     assert output.logits.shape == (2, 5)
 
 
+def test_build_depgraph_pruned_model_defaults_to_cuda_when_available(tmp_path, monkeypatch):
+    """device=None must resolve to the same device engine.py's training loop
+    uses (cuda when available), not a hardcoded CPU — pruning ResNet-sized
+    models on CPU in a memory-constrained container is what caused the
+    NNPACK "out of memory" warning flood / hang this test guards against.
+
+    Monkeypatches torch.cuda.is_available() to True and short-circuits right
+    after the device string is resolved, so this stays safe to run on
+    CPU-only machines (no real CUDA tensor is ever allocated).
+    """
+    checkpoint_path = _write_plain_checkpoint(tmp_path)
+    config, cfg = _make_config(checkpoint_path)
+
+    captured = {}
+
+    class _StopEarly(Exception):
+        pass
+
+    def _fake_load_plain_backbone(config, checkpoint_path, device):
+        captured["device"] = device
+        raise _StopEarly
+
+    monkeypatch.setattr(dg, "_load_plain_backbone", _fake_load_plain_backbone)
+    monkeypatch.setattr(dg.torch.cuda, "is_available", lambda: True)
+
+    with pytest.raises(_StopEarly):
+        build_depgraph_pruned_model_from_config(config, cfg, device=None)
+
+    assert captured["device"] == "cuda"
+
+
 def test_build_depgraph_pruned_model_rejects_unknown_importance(tmp_path):
     checkpoint_path = _write_plain_checkpoint(tmp_path)
     config, cfg = _make_config(checkpoint_path)
     cfg.importance = "not_a_real_criterion"
 
     with pytest.raises(ValueError, match="importance must be one of"):
-        build_depgraph_pruned_model_from_config(config, cfg)
+        build_depgraph_pruned_model_from_config(config, cfg, device="cpu")
 
 
 def test_build_depgraph_pruned_model_missing_checkpoint_raises(tmp_path):
     config, cfg = _make_config(tmp_path / "does_not_exist.pt")
 
     with pytest.raises(FileNotFoundError):
-        build_depgraph_pruned_model_from_config(config, cfg)
+        build_depgraph_pruned_model_from_config(config, cfg, device="cpu")
 
 
 def test_build_depgraph_pruned_model_rejects_target_speedup_at_or_below_one(tmp_path):
@@ -106,7 +137,7 @@ def test_build_depgraph_pruned_model_rejects_target_speedup_at_or_below_one(tmp_
     config, cfg = _make_config(checkpoint_path, target_speedup=1.0)
 
     with pytest.raises(ValueError, match="target_speedup must be > 1.0"):
-        build_depgraph_pruned_model_from_config(config, cfg)
+        build_depgraph_pruned_model_from_config(config, cfg, device="cpu")
 
 
 def test_build_depgraph_pruned_model_rejects_sparsity_learning_for_unsupported_importance(tmp_path):
@@ -114,7 +145,7 @@ def test_build_depgraph_pruned_model_rejects_sparsity_learning_for_unsupported_i
     config, cfg = _make_config(checkpoint_path, importance="random", sparsity_learning=True)
 
     with pytest.raises(ValueError, match="sparsity_learning=true is only supported"):
-        build_depgraph_pruned_model_from_config(config, cfg)
+        build_depgraph_pruned_model_from_config(config, cfg, device="cpu")
 
 
 def test_progressive_prune_to_target_speedup_reaches_or_exceeds_target():

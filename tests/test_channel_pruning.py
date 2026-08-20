@@ -113,7 +113,7 @@ def test_layer_skipping_replaces_blocks_and_invalidates_selector_cache():
     assert len(get_gumbel_modules(wrapper.backbone)) == 9
     assert hasattr(wrapper.backbone, "_net_complexity_module_cache")
 
-    apply_layer_skipping(wrapper, ["layer1.0"])
+    apply_layer_skipping(wrapper, ["layer1.0"], mode="skip")
 
     assert isinstance(wrapper.backbone.layer1[0], SkippedCIFARBasicBlock)
     assert not hasattr(wrapper.backbone, "_net_complexity_module_cache")

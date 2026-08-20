@@ -44,6 +44,28 @@ from .resnet import Bottleneck
 
 _VALID_MODES = {"prune", "skip"}
 
+_MODULE_CACHE_ATTR = "_net_complexity_module_cache"
+
+
+def _invalidate_module_cache(module: nn.Module) -> None:
+    """Drop the get_AIG_modules/get_gumbel_modules/get_stg_modules cache, if any.
+
+    ClassificationFeatureSelectionWrapper.__init__ (via set_aig_bypass /
+    _initialize_gumbel_layers) triggers the first get_*_modules() call on the
+    backbone before layer_skipping runs, caching every gate module present at
+    that point. Replacing a block afterwards (see _replace_block) detaches its
+    gate from the live tree — the cache still holds a reference to it, so it
+    never receives model.to(device) and its forward() is never called again.
+    Any regularizer that later iterates the (stale) cache (e.g.
+    get_AIG_posterior_regularization_terms) then mixes a CPU-resident,
+    never-forwarded gate's fallback tensor into a stack of otherwise-CUDA
+    tensors, crashing with a device-mismatch error. Dropping the cache after
+    every structural edit forces the next get_*_modules() call to re-scan the
+    (now current) tree instead of trusting stale references.
+    """
+    if _MODULE_CACHE_ATTR in getattr(module, "__dict__", {}):
+        delattr(module, _MODULE_CACHE_ATTR)
+
 
 def _replace_block(backbone: nn.Module, key: str, mode: str) -> bool:
     """Navigate backbone to ``layerN.B`` and replace the block.
@@ -150,6 +172,11 @@ def apply_layer_skipping(
     applied = sum(_replace_block(backbone, k, mode) for k in disabled_layers)
     verb = "pruned" if mode == "prune" else "skipped"
     print(f"[layer_skipping] {applied}/{len(disabled_layers)} blocks {verb}.")
+
+    if applied > 0:
+        _invalidate_module_cache(backbone)
+        if model is not backbone:
+            _invalidate_module_cache(model)
 
 
 def apply_layer_skipping_from_config(model: nn.Module, cfg: DictConfig) -> None:

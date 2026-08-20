@@ -16,6 +16,7 @@ from net_complexity.models.feature_selection import (
     get_AIG_regularization_loss,
     parse_AIG_activations,
 )
+from net_complexity.models.layer_skipping import apply_layer_skipping
 from net_complexity.training.engine import _build_adaptive_lambda
 
 
@@ -335,3 +336,48 @@ def test_aig_adaptive_lambda_allows_clean_config_without_recovery_block():
 
     assert controller is not None
     assert controller.recovery_config.enabled is False
+
+
+def test_aig_posterior_terms_survive_layer_skipping_after_wrapper_caches_gate_list():
+    """Regression test for a stale-cache device-mismatch crash.
+
+    ClassificationFeatureSelectionWrapper.__init__ triggers the first
+    get_AIG_modules(backbone) call (via set_aig_bypass), caching every gate
+    present at construction time. Replacing a block afterwards via
+    apply_layer_skipping detaches its gate from the live tree; without cache
+    invalidation, get_AIG_posterior_regularization_terms would keep including
+    that orphaned, never-forwarded-again gate — whose parameters never
+    receive a later model.to(device) call — and crash by stacking a
+    wrong-device fallback tensor together with the live gates' tensors.
+    """
+    backbone = ResNet50(
+        num_classes=4,
+        in_channels=3,
+        stem_kernel_size=3,
+        stem_stride=1,
+        stem_padding=1,
+        use_maxpool=False,
+        resnet_block=partial(AIGBottleneckLayer, temperature=1.0, gate_regularization="l1_probability"),
+    )
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.01,
+        bypass_on_zero_lambda=False,
+    )
+    # __init__ already populated the cache with all 16 gates.
+    assert len(get_AIG_modules(wrapper.backbone)) == 16
+
+    apply_layer_skipping(wrapper, ["layer1.0"], mode="prune")
+
+    # The cache must reflect the post-skipping tree, not the stale 16-gate list.
+    assert len(get_AIG_modules(wrapper.backbone)) == 15
+
+    wrapper.train()
+    output = wrapper(torch.randn(2, 3, 16, 16), torch.tensor([0, 1]))
+    output.loss.backward()
+
+    terms = get_AIG_posterior_regularization_terms(wrapper.backbone)
+    assert terms is not None
+    mean_p_open, negative_entropy = terms
+    assert torch.isfinite(mean_p_open)
+    assert torch.isfinite(negative_entropy)
