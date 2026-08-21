@@ -45,10 +45,10 @@ tuning:
       mlflow.tags.recipe: "autopruner_author_keep_05"
       mlflow.tags.target_keep_ratio: "0.5"
       mlflow.tags.author_hyperparameters: "true"
-      mlflow.tags.repeats_per_ratio: "4"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
     - model.backbone.target_keep_ratio: 0.3
       mlflow.run_name: "autopruner_resnet50_cifar10_keep_03"
       mlflow.tags.recipe: "autopruner_author_keep_03"
       mlflow.tags.target_keep_ratio: "0.3"
       mlflow.tags.author_hyperparameters: "true"
-      mlflow.tags.repeats_per_ratio: "4"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"

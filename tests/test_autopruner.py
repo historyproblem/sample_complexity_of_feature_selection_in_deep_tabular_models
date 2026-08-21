@@ -396,6 +396,23 @@ def test_v100_overnight_series_uses_only_author_ratios_and_four_seeds():
         point["mlflow.tags.author_hyperparameters"] == "true"
         for point in cfg.tuning.points
     )
+    assert all(
+        int(point["mlflow.tags.repeats_per_ratio"]) == 4
+        for point in cfg.tuning.points
+    )
+    cfg.tuning.repeats_per_trial = 3
+    assert all(
+        int(point["mlflow.tags.repeats_per_ratio"]) == 3
+        for point in cfg.tuning.points
+    )
+
+
+def test_autopruner_experiment_enables_mlflow_tracking():
+    cfg = OmegaConf.load(
+        REPO_ROOT / "configs/experiment/autopruner_resnet50_cifar10.yaml"
+    )
+
+    assert cfg.mlflow.enabled is True
 
 
 def test_run_history_can_delay_best_checkpoint_selection_until_fine_tuning(tmp_path):

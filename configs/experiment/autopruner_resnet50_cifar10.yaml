@@ -15,7 +15,7 @@ defaults:
 device: "cuda:0"
 
 mlflow:
-  enabled: false
+  enabled: true
   run_name: "autopruner_resnet50_cifar10_keep_${model.backbone.target_keep_ratio}"
   tags:
     model_type: "ResNet50_AutoPruner"

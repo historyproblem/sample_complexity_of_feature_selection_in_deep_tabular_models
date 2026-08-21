@@ -120,6 +120,20 @@ end-to-end V100 runner instead:
 python3 scripts/run_autopruner_cifar10_v100_11h.py
 ```
 
+The runner always mirrors baseline and pruning stdout/stderr to a timestamped
+file under `outputs/logs`, and writes a neighboring `*.status.json` containing
+the PID, current step, checkpoint path, and terminal success or failure. For a
+launch that survives an SSH disconnect, use its detached mode:
+
+```bash
+python3 scripts/run_autopruner_cifar10_v100_11h.py --detach
+```
+
+The command prints the exact log and status paths before returning. Follow the
+log with `tail -f <printed-log-path>` and inspect the JSON status without
+having to infer success from an empty terminal. Both baseline and AutoPruner
+runs are also recorded in the repository-local `mlflow.db`.
+
 It first trains the controlled plain ResNet-50 baseline for 200 epochs, checks
 that the resulting `best.pt` exists and is non-empty, and only then passes its
 exact absolute path to AutoPruner. To leave room for baseline training in the

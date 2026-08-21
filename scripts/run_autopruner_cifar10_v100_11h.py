@@ -1,18 +1,65 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run(command: list[str]) -> None:
-    print("+", " ".join(command), flush=True)
-    subprocess.run(command, cwd=REPO_ROOT, check=True)
+class RunReporter:
+    def __init__(self, log_path: Path, *, mirror_to_console: bool = True) -> None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path = log_path
+        self.mirror_to_console = mirror_to_console
+        self._handle: TextIO = log_path.open("a", encoding="utf-8", buffering=1)
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def write(self, message: str, *, end: str = "\n") -> None:
+        self._handle.write(message + end)
+        self._handle.flush()
+        if self.mirror_to_console:
+            print(message, end=end, flush=True)
+
+
+def _run(command: list[str], reporter: RunReporter) -> None:
+    reporter.write("+ " + " ".join(command))
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        reporter.write(line, end="")
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
+def _write_status(status_path: Path, payload: dict[str, Any]) -> None:
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = status_path.with_suffix(status_path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(status_path)
+
+
+def _timestamp() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -31,15 +78,106 @@ def _parse_args() -> argparse.Namespace:
             "leaves room for baseline training in one 11-hour V100 job."
         ),
     )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "Start the series in a new session and return immediately. The "
+            "runner prints the PID, durable log path, and status path."
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help=(
+            "Durable combined stdout/stderr log. By default a timestamped file "
+            "is created under outputs/logs."
+        ),
+    )
+    parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-console-mirror",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = _parse_args()
-    if args.repeats_per_ratio <= 0:
-        raise ValueError("--repeats-per-ratio must be positive.")
+def _start_detached(
+    *,
+    repeats_per_ratio: int,
+    run_id: str,
+    log_path: Path,
+    status_path: Path,
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-u",
+        str(Path(__file__).resolve()),
+        "--repeats-per-ratio",
+        str(repeats_per_ratio),
+        "--run-id",
+        run_id,
+        "--log-file",
+        str(log_path),
+        "--no-console-mirror",
+    ]
+    _write_status(
+        status_path,
+        {
+            "status": "launching",
+            "run_id": run_id,
+            "pid": None,
+            "started_at": _timestamp(),
+            "log_file": str(log_path),
+            "status_file": str(status_path),
+        },
+    )
+    try:
+        with log_path.open("a", encoding="utf-8", buffering=1) as handle:
+            handle.write(f"[{_timestamp()}] launching detached: {' '.join(command)}\n")
+            process = subprocess.Popen(
+                command,
+                cwd=REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except BaseException as error:
+        _write_status(
+            status_path,
+            {
+                "status": "failed_to_launch",
+                "run_id": run_id,
+                "pid": None,
+                "finished_at": _timestamp(),
+                "log_file": str(log_path),
+                "status_file": str(status_path),
+                "error_type": type(error).__name__,
+                "error": str(error),
+            },
+        )
+        raise
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    print(f"AutoPruner detached process started: pid={process.pid}", flush=True)
+    print(f"Log: {log_path}", flush=True)
+    print(f"Status: {status_path}", flush=True)
+
+
+def _run_series(
+    *,
+    repeats_per_ratio: int,
+    run_id: str,
+    log_path: Path,
+    status_path: Path,
+    mirror_to_console: bool,
+) -> None:
+    reporter = RunReporter(log_path, mirror_to_console=mirror_to_console)
+    started_at = _timestamp()
+
     baseline_dir = (
         REPO_ROOT
         / "outputs"
@@ -47,31 +185,115 @@ def main() -> None:
         / f"{run_id}_best_practice_resnet50_on_cifar10"
     ).resolve()
     checkpoint = baseline_dir / "checkpoints" / "best.pt"
+    status: dict[str, Any] = {
+        "status": "running",
+        "run_id": run_id,
+        "pid": os.getpid(),
+        "started_at": started_at,
+        "updated_at": started_at,
+        "current_step": "baseline_training",
+        "completed_steps": [],
+        "baseline_dir": str(baseline_dir),
+        "checkpoint": str(checkpoint),
+        "log_file": str(log_path),
+        "status_file": str(status_path),
+        "mlflow_tracking_uri": f"sqlite:///{(REPO_ROOT / 'mlflow.db').resolve()}",
+    }
+    _write_status(status_path, status)
+    reporter.write(f"[{started_at}] AutoPruner series started (pid={os.getpid()})")
+    reporter.write(f"Durable log: {log_path}")
+    reporter.write(f"Status file: {status_path}")
 
-    _run(
-        [
-            sys.executable,
-            "src/net_complexity/train.py",
-            "experiment=best_practice_resnet50_on_cifar10",
-            f"hydra.run.dir={baseline_dir}",
-        ]
-    )
-
-    if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
-        raise RuntimeError(
-            "Baseline training finished without a non-empty best checkpoint: "
-            f"{checkpoint}"
+    try:
+        _run(
+            [
+                sys.executable,
+                "-u",
+                "src/net_complexity/train.py",
+                "experiment=best_practice_resnet50_on_cifar10",
+                f"hydra.run.dir={baseline_dir}",
+            ],
+            reporter,
         )
-    print(f"Verified baseline checkpoint: {checkpoint}", flush=True)
 
-    _run(
-        [
-            sys.executable,
-            "src/net_complexity/tune.py",
-            "--config-name=tune_autopruner_resnet50_cifar10_v100_11h",
-            f"model.pretrained_checkpoint={checkpoint}",
-            f"tuning.repeats_per_trial={args.repeats_per_ratio}",
-        ]
+        if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+            raise RuntimeError(
+                "Baseline training finished without a non-empty best checkpoint: "
+                f"{checkpoint}"
+            )
+        reporter.write(f"Verified baseline checkpoint: {checkpoint}")
+        status["completed_steps"].append("baseline_training")
+        status["current_step"] = "autopruner_tuning"
+        status["updated_at"] = _timestamp()
+        _write_status(status_path, status)
+
+        _run(
+            [
+                sys.executable,
+                "-u",
+                "src/net_complexity/tune.py",
+                "--config-name=tune_autopruner_resnet50_cifar10_v100_11h",
+                f"model.pretrained_checkpoint={checkpoint}",
+                f"tuning.repeats_per_trial={repeats_per_ratio}",
+            ],
+            reporter,
+        )
+        status["completed_steps"].append("autopruner_tuning")
+        status["current_step"] = None
+        status["status"] = "completed"
+        status["finished_at"] = _timestamp()
+        status["updated_at"] = status["finished_at"]
+        _write_status(status_path, status)
+        reporter.write(f"[{status['finished_at']}] AutoPruner series completed")
+    except BaseException as error:
+        status["status"] = "failed"
+        status["finished_at"] = _timestamp()
+        status["updated_at"] = status["finished_at"]
+        status["error_type"] = type(error).__name__
+        status["error"] = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            status["return_code"] = error.returncode
+            status["failed_command"] = list(error.cmd)
+        _write_status(status_path, status)
+        reporter.write(
+            f"[{status['finished_at']}] AutoPruner series failed: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise
+    finally:
+        reporter.close()
+
+
+def main() -> None:
+    args = _parse_args()
+    if args.repeats_per_ratio <= 0:
+        raise ValueError("--repeats-per-ratio must be positive.")
+
+    run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_path = (
+        args.log_file
+        if args.log_file is not None
+        else REPO_ROOT / "outputs" / "logs" / f"{run_id}_autopruner_v100_11h.log"
+    )
+    if not log_path.is_absolute():
+        log_path = (REPO_ROOT / log_path).resolve()
+    status_path = log_path.with_suffix(".status.json")
+
+    if args.detach:
+        _start_detached(
+            repeats_per_ratio=args.repeats_per_ratio,
+            run_id=run_id,
+            log_path=log_path,
+            status_path=status_path,
+        )
+        return
+
+    _run_series(
+        repeats_per_ratio=args.repeats_per_ratio,
+        run_id=run_id,
+        log_path=log_path,
+        status_path=status_path,
+        mirror_to_console=not args.no_console_mirror,
     )
 
 
