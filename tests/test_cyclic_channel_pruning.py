@@ -2,6 +2,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from net_complexity.training.cyclic_channel_pruning import (
+    _cap_channels_to_drop_by_param_budget,
     _channels_to_drop,
     _channels_to_drop_by_param_budget,
     _extract_channel_probs,
@@ -95,6 +96,71 @@ def test_channels_to_drop_by_param_budget_respects_budget_and_min_active():
     )
 
     assert new_drop == {"backbone.layer2.0.gumbel_layer": [0]}
+
+
+def test_cap_channels_to_drop_by_param_budget_skips_expensive_picks_cheaper():
+    class FakeConv:
+        def __init__(self, in_channels):
+            self.in_channels = in_channels
+            self.bias = None
+
+    class FakeBlock:
+        def __init__(self, in_channels):
+            self.conv3 = FakeConv(in_channels)
+
+    class FakeModel:
+        pass
+
+    model = FakeModel()
+    model.backbone = model
+    model.layer2 = [FakeBlock(100)]  # cost = 100 + 0 (no bias) + 2 (BN) = 102
+    model.layer3 = [FakeBlock(20)]  # cost = 20 + 0 (no bias) + 2 (BN) = 22
+
+    # Simulates a threshold pass that already selected these channels
+    # (e.g. g_prob_threshold=0.5); the cap must further restrict them.
+    channels_to_drop = {
+        "backbone.layer2.0.gumbel_layer": [0],
+        "backbone.layer3.0.gumbel_layer": [0, 1],
+    }
+    channel_probs = {
+        "backbone.layer2.0.gumbel_layer": {0: 0.01},
+        "backbone.layer3.0.gumbel_layer": {0: 0.02, 1: 0.5},
+    }
+
+    capped = _cap_channels_to_drop_by_param_budget(
+        model, channels_to_drop, channel_probs, total_params=1000, max_param_fraction=0.05,
+    )
+
+    # budget = 50. Ascending probability order: layer2.0/ch0 (0.01, cost 102)
+    # is checked first but doesn't fit -> skipped (not a stopping condition).
+    # layer3.0/ch0 (0.02, cost 22) fits -> selected, remaining 28.
+    # layer3.0/ch1 (0.5, cost 22) fits -> selected, remaining 6.
+    assert capped == {"backbone.layer3.0.gumbel_layer": [0, 1]}
+
+
+def test_cap_channels_to_drop_by_param_budget_keeps_everything_when_budget_is_sufficient():
+    class FakeConv:
+        in_channels = 10
+        bias = None
+
+    class FakeBlock:
+        conv3 = FakeConv()
+
+    class FakeModel:
+        pass
+
+    model = FakeModel()
+    model.backbone = model
+    model.layer2 = [FakeBlock()]
+
+    channels_to_drop = {"backbone.layer2.0.gumbel_layer": [0, 1]}
+    channel_probs = {"backbone.layer2.0.gumbel_layer": {0: 0.01, 1: 0.02}}
+
+    capped = _cap_channels_to_drop_by_param_budget(
+        model, channels_to_drop, channel_probs, total_params=1000, max_param_fraction=0.5,
+    )
+
+    assert capped == {"backbone.layer2.0.gumbel_layer": [0, 1]}
 
 
 def test_set_disabled_channels_soft_and_structural_toggle_structural_flag():

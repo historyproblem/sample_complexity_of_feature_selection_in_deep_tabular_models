@@ -49,7 +49,7 @@ cyclic_layer_dropping:
   max_cycles: 10
   drop_mode: threshold
   g_prob_threshold: 0.1
-  max_param_fraction: 0.10
+  threshold_max_param_fraction: 0.10
   aig_epochs: 100
   recovery_epochs: 30
   final_epochs: 150

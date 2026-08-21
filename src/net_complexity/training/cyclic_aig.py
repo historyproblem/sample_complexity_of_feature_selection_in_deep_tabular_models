@@ -6,6 +6,16 @@ Two layer-selection modes are supported via ``cyclic_layer_dropping.drop_mode``:
     Drop every layer whose mean validation gate probability is below
     ``g_prob_threshold``.  Converges when no layer falls below the threshold.
 
+    Optionally, ``threshold_max_param_fraction`` caps how many of the params
+    freed by the threshold-selected layers may actually be dropped in a
+    single cycle: the threshold-selected layers are ranked by ascending
+    g_prob (most prunable first) and accepted greedily until the cap (as a
+    fraction of the current model's total params) would be exceeded.  A
+    candidate that doesn't fit is skipped, not a stopping condition, so
+    cheaper lower-ranked layers can still be picked.  Unset (default:
+    ``null``) means no cap — every layer below threshold is dropped, as
+    before.
+
 ``param_budget``
     Dynamically select the subset of layers to drop each cycle so that the
     freed parameter count stays within ``max_param_fraction`` of the current
@@ -32,6 +42,7 @@ Config section (``cyclic_layer_dropping``)::
 
       # used when drop_mode: threshold
       g_prob_threshold: 0.1
+      threshold_max_param_fraction: null  # optional per-cycle cap, drop_mode: threshold only
 
       # used when drop_mode: param_budget
       max_param_fraction: 0.10  # remove at most 10 % of current params per cycle
@@ -191,6 +202,40 @@ def _layers_to_drop_by_param_budget(
             (name, prob)
             for name, prob in layer_probs.items()
             if name not in disabled_set and name in freeable_counts
+        ),
+        key=lambda x: x[1],  # ascending g_prob
+    )
+
+    selected: list[str] = []
+    remaining = budget
+    for name, _ in candidates:
+        cost = freeable_counts[name]
+        if cost <= remaining:
+            selected.append(name)
+            remaining -= cost
+
+    return selected
+
+
+def _cap_layers_to_drop_by_param_budget(
+    layers_to_drop: list[str],
+    layer_probs: dict[str, float],
+    freeable_counts: dict[str, int],
+    total_params: int,
+    max_param_fraction: float,
+) -> list[str]:
+    """Cap an already threshold-selected drop list to a per-cycle param budget.
+
+    Mirrors ``_layers_to_drop_by_param_budget`` but ranks only the layers
+    already selected by ``_layers_to_drop`` (i.e. those below
+    ``g_prob_threshold``), instead of every candidate layer.
+    """
+    budget = int(total_params * max_param_fraction)
+    candidates = sorted(
+        (
+            (name, layer_probs[name])
+            for name in layers_to_drop
+            if name in freeable_counts
         ),
         key=lambda x: x[1],  # ascending g_prob
     )
@@ -398,8 +443,12 @@ def run_cyclic_aig_training(
             f"got {drop_mode!r}"
         )
 
+    threshold_max_param_fraction: float | None = None
     if drop_mode == "threshold":
         threshold = float(cyclic_cfg.g_prob_threshold)
+        raw_cap = getattr(cyclic_cfg, "threshold_max_param_fraction", None)
+        if raw_cap is not None:
+            threshold_max_param_fraction = float(raw_cap)
     else:
         max_param_fraction = float(cyclic_cfg.max_param_fraction)
 
@@ -412,10 +461,15 @@ def run_cyclic_aig_training(
     for cycle in range(max_cycles):
         print(f"\n{_banner}")
         if drop_mode == "threshold":
+            cap_suffix = (
+                f" | cap={threshold_max_param_fraction:.1%}"
+                if threshold_max_param_fraction is not None
+                else ""
+            )
             print(
                 f"Cyclic AIG Training | cycle {cycle + 1}/{max_cycles}"
                 f" | disabled={len(disabled_layers)}"
-                f" | mode=threshold | threshold={threshold}"
+                f" | mode=threshold | threshold={threshold}{cap_suffix}"
             )
         else:
             print(
@@ -443,6 +497,20 @@ def run_cyclic_aig_training(
 
         if drop_mode == "threshold":
             new_drop = _layers_to_drop(layer_probs, threshold, disabled_layers)
+            if threshold_max_param_fraction is not None and new_drop:
+                freeable_counts, total_params = _pruneable_param_counts(cycle_cfg)
+                capped = _cap_layers_to_drop_by_param_budget(
+                    new_drop, layer_probs, freeable_counts, total_params, threshold_max_param_fraction,
+                )
+                if len(capped) < len(new_drop):
+                    freed = sum(freeable_counts[n] for n in capped)
+                    print(
+                        f"Cycle {cycle + 1} | threshold selected {len(new_drop)} layer(s), "
+                        f"capped to {len(capped)} by threshold_max_param_fraction="
+                        f"{threshold_max_param_fraction:.1%}"
+                        f" ({freed:,} params freed, {freed / total_params:.1%} of {total_params:,})."
+                    )
+                new_drop = capped
             converged = not new_drop
             if converged:
                 print(

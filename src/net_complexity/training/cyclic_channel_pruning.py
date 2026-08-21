@@ -16,6 +16,16 @@ Two channel-selection modes are supported via ``cyclic_channel_pruning.drop_mode
     kept active instead (matching ``PrunedGumbelBottleneck``'s requirement of
     at least one active channel).
 
+    Optionally, ``threshold_max_param_fraction`` caps how many of the params
+    freed by the threshold-selected channels may actually be dropped in a
+    single cycle: the threshold-selected channels are ranked by ascending
+    selection probability (most prunable first) and accepted greedily until
+    the cap (as a fraction of the current model's total params) would be
+    exceeded. A candidate that doesn't fit is skipped, not a stopping
+    condition, so cheaper lower-ranked candidates can still be picked. Unset
+    (default: ``null``) means no cap — every channel below threshold is
+    dropped, as before.
+
 ``param_budget``
     Dynamically select the subset of channels to disable each cycle so that
     the freed parameter count stays within ``max_param_fraction`` of the
@@ -43,6 +53,7 @@ Config section (``cyclic_channel_pruning``)::
 
       drop_mode: threshold          # "threshold" (default) or "param_budget"
       g_prob_threshold: 0.1         # used when drop_mode: threshold
+      threshold_max_param_fraction: null  # optional per-cycle cap, drop_mode: threshold only
       max_param_fraction: 0.10      # used when drop_mode: param_budget
 
       gumbel_epochs: 40             # epochs per search cycle
@@ -141,6 +152,43 @@ def _channels_to_drop(
         if candidates:
             result[layer_name] = candidates
     return result
+
+
+def _cap_channels_to_drop_by_param_budget(
+    model,
+    channels_to_drop: dict[str, list[int]],
+    channel_probs: dict[str, dict[int, float]],
+    total_params: int,
+    max_param_fraction: float,
+) -> dict[str, list[int]]:
+    """Cap an already threshold-selected drop set to a per-cycle param budget.
+
+    Ranks only the channels already selected by ``_channels_to_drop`` (i.e.
+    those below ``g_prob_threshold``) by ascending selection probability
+    (most prunable first) and greedily keeps them while the freed param cost
+    fits within ``max_param_fraction`` of ``total_params``. A candidate that
+    doesn't fit is skipped, not a stopping condition, so cheaper candidates
+    further down the ranking can still be kept.
+    """
+    budget = int(total_params * max_param_fraction)
+    candidates: list[tuple[str, int, float, int]] = []
+    for layer_name, channels in channels_to_drop.items():
+        cost = _channel_param_cost(model, layer_name)
+        probs = channel_probs[layer_name]
+        for channel_index in channels:
+            candidates.append((layer_name, channel_index, probs[channel_index], cost))
+
+    candidates.sort(key=lambda item: item[2])  # ascending probability
+
+    remaining = budget
+    selected: dict[str, list[int]] = defaultdict(list)
+    for layer_name, channel_index, _prob, cost in candidates:
+        if cost > remaining:
+            continue
+        selected[layer_name].append(channel_index)
+        remaining -= cost
+
+    return {layer_name: sorted(channels) for layer_name, channels in selected.items()}
 
 
 def _channel_param_cost(model, layer_name: str) -> int:
@@ -328,8 +376,12 @@ def run_cyclic_channel_pruning_training(
             f"got {drop_mode!r}"
         )
 
+    threshold_max_param_fraction: float | None = None
     if drop_mode == "threshold":
         threshold = float(cyclic_cfg.g_prob_threshold)
+        raw_cap = getattr(cyclic_cfg, "threshold_max_param_fraction", None)
+        if raw_cap is not None:
+            threshold_max_param_fraction = float(raw_cap)
     else:
         max_param_fraction = float(cyclic_cfg.max_param_fraction)
 
@@ -341,10 +393,15 @@ def run_cyclic_channel_pruning_training(
 
     for cycle in range(max_cycles):
         total_disabled = sum(len(v) for v in disabled_channels.values())
+        cap_suffix = (
+            f" | cap={threshold_max_param_fraction:.1%}"
+            if threshold_max_param_fraction is not None
+            else ""
+        )
         print(f"\n{_banner}")
         print(
             f"Cyclic Channel Pruning | cycle {cycle + 1}/{max_cycles}"
-            f" | disabled_channels={total_disabled} | mode={drop_mode}"
+            f" | disabled_channels={total_disabled} | mode={drop_mode}{cap_suffix}"
         )
         print(_banner)
 
@@ -357,6 +414,23 @@ def run_cyclic_channel_pruning_training(
 
         if drop_mode == "threshold":
             new_drop = _channels_to_drop(channel_probs, threshold, disabled_channels)
+            if threshold_max_param_fraction is not None and new_drop:
+                from hydra.utils import instantiate as hydra_instantiate
+
+                probe_model = hydra_instantiate(cycle_cfg.model)
+                total_params = sum(p.numel() for p in probe_model.parameters())
+                capped = _cap_channels_to_drop_by_param_budget(
+                    probe_model, new_drop, channel_probs, total_params, threshold_max_param_fraction,
+                )
+                num_before = sum(len(v) for v in new_drop.values())
+                num_after = sum(len(v) for v in capped.values())
+                if num_after < num_before:
+                    print(
+                        f"Cycle {cycle + 1} | threshold selected {num_before} channel(s), "
+                        f"capped to {num_after} by threshold_max_param_fraction="
+                        f"{threshold_max_param_fraction:.1%}."
+                    )
+                new_drop = capped
         else:
             from hydra.utils import instantiate as hydra_instantiate
 
