@@ -1,0 +1,45 @@
+# @package _global_
+#
+# Classic-AIG "static" baseline — post-hoc, structurally pruned version of a
+# trained ablation/aig_classic run, on ResNet101/TinyImageNet200. See
+# resnet50_cifar10.yaml in this folder for the full rationale.
+#
+# Required override before running:
+#   aig_static_pruning.source_run_dir=outputs/runs/<your ablation/aig_classic/resnet101_tinyimagenet200 run for the target t>
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet101_tinyimagenet200
+  - /method: aig_target_rate
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+aig_static_pruning:
+  enabled: true
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  g_prob_threshold: 0.5
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_aig_classic_static_resnet101_tinyimagenet200_thr${aig_static_pruning.g_prob_threshold}"
+  tags:
+    model_type: "ResNet101_AIG_Static"
+    method: "aig_classic_static"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_aig_classic_static_resnet101_tinyimagenet200"
+    g_prob_threshold: "${aig_static_pruning.g_prob_threshold}"

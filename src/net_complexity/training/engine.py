@@ -22,7 +22,7 @@ from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, Adapt
 from net_complexity.training.gradient_norms import GradientNormLogger
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
-from net_complexity.training.run_history import RunHistory
+from net_complexity.training.run_history import RunHistory, _filter_channel_metrics
 from net_complexity.training.tracking import MLflowLogger
 from net_complexity.tuning.restart_guard import CollapseDetected, CollapseGuard
 
@@ -1795,8 +1795,14 @@ def train(model: nn.Module,
         }
 
         if mlflow_logger is not None:
-            mlflow_logger.log_metrics(train_metrics, step=epoch_num)
-            mlflow_logger.log_metrics(valid_metrics, step=epoch_num)
+            # Per-channel selector metrics (log_channel_zero_probs=true) are kept
+            # in train_metrics/valid_metrics themselves (needed by
+            # cyclic_channel_pruning and written to history.csv/summary.json as
+            # before) but never pushed to MLflow — with hundreds of channels
+            # across a ResNet50/101, that's hundreds of near-static scalar
+            # graphs cluttering the MLflow UI for no benefit.
+            mlflow_logger.log_metrics(_filter_channel_metrics(train_metrics), step=epoch_num)
+            mlflow_logger.log_metrics(_filter_channel_metrics(valid_metrics), step=epoch_num)
             controller_numeric_metrics = {
                 key: value
                 for key, value in controller_metrics.items()
@@ -1950,7 +1956,9 @@ def train(model: nn.Module,
             )
             if mlflow_logger is not None:
                 mlflow_logger.log_metrics(
-                    _prefix_metric_keys(recalibrated_valid_metrics, "recalibrated"),
+                    _filter_channel_metrics(
+                        _prefix_metric_keys(recalibrated_valid_metrics, "recalibrated")
+                    ),
                     step=final_epoch,
                 )
         if run_history is not None:
@@ -2019,7 +2027,7 @@ def train(model: nn.Module,
     test_metrics = metrics.test_metrics.compute()
     if mlflow_logger is not None:
         mlflow_logger.log_metrics(
-            test_metrics,
+            _filter_channel_metrics(test_metrics),
             step=test_checkpoint_epoch,
         )
         mlflow_logger.log_model(model, model_name="final_model")
@@ -2166,6 +2174,12 @@ def run_training(
         and bool(getattr(depgraph_pruning_cfg, "enabled", False))
     )
 
+    aig_static_pruning_cfg = getattr(config, "aig_static_pruning", None)
+    aig_static_pruning_enabled = (
+        aig_static_pruning_cfg is not None
+        and bool(getattr(aig_static_pruning_cfg, "enabled", False))
+    )
+
     channel_pruning_cfg = getattr(config, "channel_pruning", None)
     pruning_enabled = (
         channel_pruning_cfg is not None
@@ -2179,6 +2193,15 @@ def run_training(
             build_depgraph_pruned_model_from_config,
         )
         model = build_depgraph_pruned_model_from_config(config, depgraph_pruning_cfg, device=device)
+    elif aig_static_pruning_enabled:
+        # Classic-AIG static baseline: convert a trained aig_classic checkpoint
+        # into a genuinely static, structurally pruned model (see
+        # models/aig_static_pruning.py) instead of instantiating the full
+        # (dynamically gated) model from config.
+        from net_complexity.models.aig_static_pruning import (
+            build_static_aig_model_from_config,
+        )
+        model = build_static_aig_model_from_config(config, aig_static_pruning_cfg, device=device)
     elif pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
         # Structural pruning: build a physically narrowed model from scratch
         # instead of instantiating the full model from config.

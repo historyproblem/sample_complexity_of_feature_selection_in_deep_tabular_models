@@ -1,0 +1,56 @@
+# @package _global_
+#
+# Classic-AIG "static" baseline — post-hoc, structurally pruned version of a
+# trained ablation/aig_classic run, for an honest accuracy-vs-params/FLOPs
+# comparison against DepGraph and "ours" (both of which produce a genuinely
+# static architecture; classic AIG's own params/FLOPs are constant across its
+# t-sweep by design — see src/net_complexity/models/aig_static_pruning.py's
+# module docstring for why, and use valid_aig_flops_active_ratio /
+# valid_aig_active_flops_per_sample to compare classic-AIG operating points
+# among themselves instead).
+#
+# Required override before running:
+#   aig_static_pruning.source_run_dir=outputs/runs/<your ablation/aig_classic/resnet50_cifar10 run for the target t>
+#
+# Blocks whose average validation gate probability (valid_g_prob_*, read from
+# that run's summary.json) falls below g_prob_threshold are physically
+# removed; every surviving block's AIG gate is then bypassed to always-on, so
+# the model fine-tuned below is fully static (no residual per-input
+# branching) — comparable, param-for-param, to the other ablation baselines.
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: aig_target_rate
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0  # gates are bypassed to always-on after pruning; no more AIG regularization during fine-tuning
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+aig_static_pruning:
+  enabled: true
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  g_prob_threshold: 0.5
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_aig_classic_static_resnet50_cifar10_thr${aig_static_pruning.g_prob_threshold}"
+  tags:
+    model_type: "ResNet50_AIG_Static"
+    method: "aig_classic_static"
+    dataset: "cifar10"
+    recipe: "ablation_aig_classic_static_resnet50_cifar10"
+    g_prob_threshold: "${aig_static_pruning.g_prob_threshold}"
