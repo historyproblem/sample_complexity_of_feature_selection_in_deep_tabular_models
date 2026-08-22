@@ -191,23 +191,80 @@ def _cap_channels_to_drop_by_param_budget(
     return {layer_name: sorted(channels) for layer_name, channels in selected.items()}
 
 
-def _channel_param_cost(model, layer_name: str) -> int:
-    """Approximate parameter cost of disabling one channel of ``layer_name``.
+# Suffix of a MaskedGumbelBottleneckLayer gate's module path -> which
+# boundary it controls (see feature_selection.py's MaskedGumbelBottleneckLayer
+# docstring). The three suffixes are mutually exclusive (each is preceded by
+# a "." separator in the module path, so ".gumbel_layer" never matches a
+# "...mid1_gumbel_layer"/"...mid2_gumbel_layer" path), so check order here
+# doesn't matter.
+_GATE_SUFFIXES = (".gumbel_layer", ".mid1_gumbel_layer", ".mid2_gumbel_layer")
 
-    ``layer_name`` is a MaskedGumbelBottleneckLayer.gumbel_layer module path
-    (e.g. "backbone.layer2.0.gumbel_layer"); the freed cost per channel comes
-    from the sibling conv3 (weight + bias) and batch_norm3 (weight + bias) of
-    the same block, which is what physical structural pruning removes.
-    """
-    block_path = layer_name.rsplit(".", 1)[0]  # strip ".gumbel_layer"
+
+def _resolve_block(model, block_path: str):
     block = model
     for part in block_path.split("."):
         block = block[int(part)] if part.isdigit() else getattr(block, part)
-    conv3 = block.conv3
-    cost = int(conv3.in_channels)  # weight: [out, in, 1, 1] -> in per out-channel
-    if conv3.bias is not None:
+    return block
+
+
+def _channel_param_cost(model, layer_name: str) -> int:
+    """Approximate parameter cost of disabling one channel of ``layer_name``.
+
+    ``layer_name`` is a MaskedGumbelBottleneckLayer gate's module path (e.g.
+    "backbone.layer2.0.gumbel_layer", "...mid1_gumbel_layer", or
+    "...mid2_gumbel_layer") — each gate sits on a different boundary of the
+    block and therefore frees weights from a different pair of layers when a
+    channel is physically pruned (see MaskedGumbelBottleneckLayer's
+    docstring for what each boundary is):
+
+      ``.gumbel_layer`` (output, conv3's output before the identity sum):
+        one freed output row of conv3 (weight + bias) + batch_norm3 affine.
+      ``.mid1_gumbel_layer`` (conv1-output / conv2-input boundary):
+        one freed output row of conv1 (weight + bias) + batch_norm1 affine,
+        plus the corresponding input column of conv2 (weight only — conv2's
+        bias/batch_norm2 are per *output* channel, unaffected by narrowing
+        its input).
+      ``.mid2_gumbel_layer`` (conv2-output / conv3-input boundary):
+        one freed output row of conv2 (weight + bias) + batch_norm2 affine,
+        plus the corresponding input column of conv3 (weight only, same
+        reasoning as above).
+    """
+    for suffix in _GATE_SUFFIXES:
+        if layer_name.endswith(suffix):
+            block = _resolve_block(model, layer_name[: -len(suffix)])
+            break
+    else:
+        raise ValueError(
+            f"_channel_param_cost: unrecognized channel-gate module path {layer_name!r} "
+            f"(expected one of the suffixes {_GATE_SUFFIXES})."
+        )
+
+    if suffix == ".gumbel_layer":
+        conv3 = block.conv3
+        cost = int(conv3.in_channels)  # weight: [out, in, 1, 1] -> in per out-channel
+        if conv3.bias is not None:
+            cost += 1
+        cost += 2  # batch_norm3 weight + bias per channel
+        return cost
+
+    if suffix == ".mid1_gumbel_layer":
+        conv1, conv2 = block.conv1, block.conv2
+        kh, kw = conv2.kernel_size
+        cost = int(conv1.in_channels)  # conv1's freed output row
+        if conv1.bias is not None:
+            cost += 1
+        cost += 2  # batch_norm1
+        cost += int(conv2.out_channels) * kh * kw  # conv2's freed input column
+        return cost
+
+    # ".mid2_gumbel_layer"
+    conv2, conv3 = block.conv2, block.conv3
+    kh, kw = conv2.kernel_size
+    cost = int(conv2.in_channels) * kh * kw  # conv2's freed output row
+    if conv2.bias is not None:
         cost += 1
-    cost += 2  # batch_norm3 weight + bias per channel
+    cost += 2  # batch_norm2
+    cost += int(conv3.out_channels)  # conv3's freed input column (1x1 conv)
     return cost
 
 

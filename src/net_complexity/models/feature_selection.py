@@ -728,7 +728,7 @@ class GumbelBottleneckLayer(Bottleneck):
 
 
 class MaskedGumbelBottleneckLayer(Bottleneck):
-    """Bottleneck block with a MaskedGumbelLayer channel gate.
+    """Bottleneck block with MaskedGumbelLayer channel gate(s).
 
     Channel-granularity analogue of ``AIGBottleneckLayer`` / ``GumbelBottleneckLayer``,
     used by the iterative channel-pruning search phase
@@ -736,6 +736,33 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
     cycles are passed in via ``disabled_channels`` and stay permanently masked
     (see ``MaskedGumbelLayer``), while the remaining channels keep a live,
     trainable gate for further search.
+
+    The ``gumbel_layer`` ("output" gate) sits on conv3's output, right before
+    the residual sum with identity — closing a channel there degenerates
+    exactly to identity for that channel. It is always present.
+
+    Optionally (``gate_internal_width=True``), two more MaskedGumbelLayer
+    gates cover the block's internal width, which the output gate alone
+    cannot reach — conv1/conv2 stay at full width regardless of how much of
+    conv3's output is pruned (see ``pruned_bottleneck.py``'s module
+    docstring):
+
+      * ``mid1_gumbel_layer`` — conv1's output / conv2's input boundary.
+        Closing a channel here removes one of conv1's output filters and the
+        corresponding input channel of conv2. There is no "revert to
+        identity" here (these channels never reach the shortcut sum) — this
+        is a genuine narrowing of the block's internal representation, the
+        same kind of channel pruning DepGraph/most structural-pruning
+        methods do.
+      * ``mid2_gumbel_layer`` — conv2's output / conv3's input boundary,
+        same idea, one boundary later.
+
+    These two gates are independent decisions from ``gumbel_layer`` and from
+    each other: conv2 mixes every input channel into every output channel
+    (a full 3x3 conv, not a per-channel identity map), so a channel index at
+    the conv1-conv2 boundary and a channel index at the conv2-conv3 boundary
+    refer to unrelated features, even though both boundaries happen to share
+    the same width (``out_channels``).
     """
 
     def __init__(
@@ -753,6 +780,9 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
         eval_gate_mode: str | None = None,
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
+        gate_internal_width: bool = False,
+        disabled_mid1_channels: list[int] | None = None,
+        disabled_mid2_channels: list[int] | None = None,
     ):
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
         self.gumbel_layer = MaskedGumbelLayer(
@@ -768,11 +798,44 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
             disabled_channels=disabled_channels,
         )
 
+        self.gate_internal_width = bool(gate_internal_width)
+        self.mid1_gumbel_layer = None
+        self.mid2_gumbel_layer = None
+        if self.gate_internal_width:
+            self.mid1_gumbel_layer = MaskedGumbelLayer(
+                input_dim=out_channels,
+                temperature=temperature,
+                beta=beta,
+                force_ones_mask=force_ones_mask,
+                deterministic_soft_mask=deterministic_soft_mask,
+                deterministic_hard_mask=deterministic_hard_mask,
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+                gate_threshold=gate_threshold,
+                disabled_channels=disabled_mid1_channels,
+            )
+            self.mid2_gumbel_layer = MaskedGumbelLayer(
+                input_dim=out_channels,
+                temperature=temperature,
+                beta=beta,
+                force_ones_mask=force_ones_mask,
+                deterministic_soft_mask=deterministic_soft_mask,
+                deterministic_hard_mask=deterministic_hard_mask,
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+                gate_threshold=gate_threshold,
+                disabled_channels=disabled_mid2_channels,
+            )
+
     def forward(self, x):
         identity = x
 
         x = self.relu(self.batch_norm1(self.conv1(x)))
+        if self.mid1_gumbel_layer is not None:
+            x = self.mid1_gumbel_layer(x)
         x = self.relu(self.batch_norm2(self.conv2(x)))
+        if self.mid2_gumbel_layer is not None:
+            x = self.mid2_gumbel_layer(x)
         x = self.batch_norm3(self.conv3(x))
         x = self.gumbel_layer(x)
 

@@ -189,6 +189,15 @@ def test_aig_flops_metric_reports_static_and_gate_adjusted_flops():
     assert computed["aig_active_flops_per_sample"] < computed["aig_static_flops_per_sample"]
     assert 0.0 < computed["aig_flops_skip_ratio"] < 1.0
 
+    assert computed["aig_static_params"] > 0
+    assert computed["aig_active_params"] > 0
+    assert computed["aig_skipped_params"] > 0
+    assert computed["aig_active_params"] < computed["aig_static_params"]
+    assert 0.0 < computed["aig_params_skip_ratio"] < 1.0
+    assert computed["aig_params_active_ratio"] == pytest.approx(
+        computed["aig_active_params"] / computed["aig_static_params"]
+    )
+
 
 def test_efficientnetv2_aig_scaled_epoch_tuning_config_uses_expected_lambda_steps():
     cfg = OmegaConf.load(

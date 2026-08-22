@@ -31,3 +31,10 @@ model:
       train_gate_mode: null
       eval_gate_mode: null
       gate_threshold: 0.5
+      # false (default): only conv3's output is gated/prunable — conv1/conv2
+      # stay at full width regardless of pruning decisions (see
+      # MaskedGumbelBottleneckLayer's docstring).
+      # true: two more independent gates are added, on conv1-out/conv2-in
+      # and conv2-out/conv3-in, so conv1 and conv2 — usually the bulk of a
+      # Bottleneck block's params/FLOPs — become prunable too.
+      gate_internal_width: false

@@ -1,8 +1,16 @@
+from functools import partial
+
 import pytest
 from omegaconf import OmegaConf
 
+from net_complexity.models.feature_selection import (
+    ClassificationFeatureSelectionWrapper,
+    MaskedGumbelBottleneckLayer,
+    ResNet50,
+)
 from net_complexity.training.cyclic_channel_pruning import (
     _cap_channels_to_drop_by_param_budget,
+    _channel_param_cost,
     _channels_to_drop,
     _channels_to_drop_by_param_budget,
     _extract_channel_probs,
@@ -176,6 +184,42 @@ def test_set_disabled_channels_soft_and_structural_toggle_structural_flag():
 
 def test_read_initial_disabled_channels_returns_empty_when_not_configured():
     assert _read_initial_disabled_channels(OmegaConf.create({})) == {}
+
+
+def _make_internal_width_wrapper():
+    backbone = ResNet50(
+        num_classes=5,
+        in_channels=3,
+        resnet_block=partial(MaskedGumbelBottleneckLayer, gate_internal_width=True),
+        stem_kernel_size=3,
+        stem_stride=1,
+        stem_padding=1,
+        use_maxpool=False,
+    )
+    return ClassificationFeatureSelectionWrapper(backbone=backbone, lambda_coef=0.0)
+
+
+def test_channel_param_cost_dispatches_by_gate_suffix():
+    model = _make_internal_width_wrapper()
+
+    # layer2.0: in_channels=256 (layer1's output), planes=128, conv2 kernel 3x3.
+    output_cost = _channel_param_cost(model, "backbone.layer2.0.gumbel_layer")
+    mid1_cost = _channel_param_cost(model, "backbone.layer2.0.mid1_gumbel_layer")
+    mid2_cost = _channel_param_cost(model, "backbone.layer2.0.mid2_gumbel_layer")
+
+    # output: conv3.in_channels(128) + bias(1) + batch_norm3(2)
+    assert output_cost == 128 + 1 + 2
+    # mid1: conv1.in_channels(256) + bias(1) + batch_norm1(2) + conv2.out_channels(128) * 3x3
+    assert mid1_cost == 256 + 1 + 2 + 128 * 9
+    # mid2: conv2.in_channels(128) * 3x3 + bias(1) + batch_norm2(2) + conv3.out_channels(512)
+    assert mid2_cost == 128 * 9 + 1 + 2 + 512
+
+
+def test_channel_param_cost_rejects_unrecognized_gate_path():
+    model = _make_internal_width_wrapper()
+
+    with pytest.raises(ValueError, match="unrecognized channel-gate module path"):
+        _channel_param_cost(model, "backbone.layer2.0.not_a_real_gate")
 
 
 def test_read_initial_disabled_channels_reads_explicit_mask():

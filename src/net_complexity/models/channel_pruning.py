@@ -184,6 +184,20 @@ _LAYER_NAME_RE = re.compile(
     r"(?:backbone\.)?(?P<key>layer\d+\.\d+)\.gumbel_layer$"
 )
 
+# Bottleneck-only: same idea, but also recognizes the optional mid1/mid2
+# internal-width gates (MaskedGumbelBottleneckLayer(gate_internal_width=True),
+# see feature_selection.py) alongside the "output" gate every
+# MaskedGumbelBottleneckLayer has.
+_BOTTLENECK_LAYER_NAME_RE = re.compile(
+    r"(?:backbone\.)?(?P<key>layer\d+\.\d+)\.(?P<gate>gumbel_layer|mid1_gumbel_layer|mid2_gumbel_layer)$"
+)
+
+_BOTTLENECK_GATE_SPEC_KEY = {
+    "gumbel_layer": "output",
+    "mid1_gumbel_layer": "mid1",
+    "mid2_gumbel_layer": "mid2",
+}
+
 _NUM_BLOCKS_BY_TARGET = {
     "CIFARResNet20": [3, 3, 3],
     "CIFARResNet32": [5, 5, 5],
@@ -210,6 +224,27 @@ def _mask_dict_to_pruning_spec(mask_dict: dict[str, list[int]]) -> dict[str, lis
         if m:
             spec[m.group("key")] = channels
     return spec
+
+
+def _mask_dict_to_bottleneck_pruning_spec(
+    mask_dict: dict[str, list[int]],
+) -> dict[str, dict[str, list[int]]]:
+    """Convert channel_history layer-name keys to PrunedResNet's nested pruning_spec.
+
+    Bottleneck-only counterpart of ``_mask_dict_to_pruning_spec``: recognizes
+    all three MaskedGumbelBottleneckLayer gates (output/mid1/mid2, see
+    ``_BOTTLENECK_LAYER_NAME_RE``) instead of only the output gate, and
+    groups them per block into ``{"layerN.B": {"output": [...], "mid1":
+    [...], "mid2": [...]}}`` (only keys with a non-empty channel list are
+    included) so ``PrunedResNet``/``PrunedGumbelBottleneck`` can prune each
+    boundary independently.
+    """
+    spec: dict[str, dict[str, list[int]]] = defaultdict(dict)
+    for layer_name, channels in mask_dict.items():
+        m = _BOTTLENECK_LAYER_NAME_RE.search(layer_name)
+        if m:
+            spec[m.group("key")][_BOTTLENECK_GATE_SPEC_KEY[m.group("gate")]] = channels
+    return dict(spec)
 
 
 def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
@@ -243,7 +278,7 @@ def _is_bottleneck_backbone_target(backbone_target: str) -> bool:
 
 def build_pruned_bottleneck_model(
     config: DictConfig,
-    pruning_spec: dict[str, list[int]],
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
 ) -> nn.Module:
     """Build a Bottleneck-based ``PrunedResNet`` wrapped in ``ClassificationFeatureSelectionWrapper``.
 
@@ -370,15 +405,21 @@ def build_structurally_pruned_model_from_config(
     forward(X, y) -> ClassifModelOutput.
     """
     mask_dict = _load_mask_dict(cfg)
-    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
 
+    if _is_bottleneck_backbone_target(backbone_target):
+        pruning_spec = _mask_dict_to_bottleneck_pruning_spec(mask_dict)
+        if not pruning_spec:
+            print(
+                "[channel_pruning] WARNING: no prunable layers found in mask - "
+                "the pruned model will be equivalent to the full model."
+            )
+        return build_pruned_bottleneck_model(config, pruning_spec)
+
+    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
     if not pruning_spec:
         print(
             "[channel_pruning] WARNING: no prunable layers found in mask - "
             "the pruned model will be equivalent to the full model."
         )
-
-    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
-    if _is_bottleneck_backbone_target(backbone_target):
-        return build_pruned_bottleneck_model(config, pruning_spec)
     return _build_pruned_cifar_model(config, pruning_spec)
