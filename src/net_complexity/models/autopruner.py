@@ -224,7 +224,14 @@ class AutoPrunerLayer(nn.Module):
         return (self.current_code().abs().mean() - self.target_keep_ratio).square()
 
     def weighted_regularization(self) -> torch.Tensor:
-        return self.adaptive_regularization.to(self.current_code()) * self.regularization_error()
+        # ``observe_current_code`` may update the persistent coefficient after
+        # this loss is built but before the training loop calls ``backward``.
+        # Keep the coefficient used by the current graph immutable; consensus
+        # updates are intentionally applied starting with the next batch.
+        coefficient = self.adaptive_regularization.detach().clone().to(
+            self.current_code()
+        )
+        return coefficient * self.regularization_error()
 
     @torch.no_grad()
     def observe_current_code(self, *, allow_convergence_boost: bool) -> bool:

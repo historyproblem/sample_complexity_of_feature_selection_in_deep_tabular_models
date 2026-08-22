@@ -7,6 +7,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -780,11 +781,14 @@ def main(config: DictConfig) -> None:
                         )
                     raise
                 except Exception as exc:
+                    exception_traceback = traceback.format_exc()
                     repeat_failures.append({
                         "repeat_number": repeat_index,
                         "seed": attempt_seed,
                         "attempt_number": attempt_index,
+                        "error_type": type(exc).__name__,
                         "error": str(exc),
+                        "traceback": exception_traceback,
                         "reason": "exception",
                     })
                     tqdm.write(
@@ -797,6 +801,10 @@ def main(config: DictConfig) -> None:
                         )
                         + f" | failed | seed={attempt_seed} | error={exc}"
                     )
+                    # The runner captures stdout/stderr in its durable log. Do
+                    # not discard the original traceback here: the aggregate
+                    # Optuna error below only identifies the failed repeats.
+                    tqdm.write(exception_traceback.rstrip())
                     break
                 finally:
                     if torch.cuda.is_available():

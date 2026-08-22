@@ -58,6 +58,85 @@ def _write_status(status_path: Path, payload: dict[str, Any]) -> None:
     temporary_path.replace(status_path)
 
 
+def _active_run_path() -> Path:
+    return REPO_ROOT / "outputs" / "logs" / "autopruner_v100_11h.active.json"
+
+
+def _pid_is_alive(pid: Any) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _claim_active_run(*, run_id: str, pid: int) -> Path:
+    """Atomically prevent two expensive V100 series from sharing one GPU."""
+
+    active_path = _active_run_path()
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": run_id,
+        "pid": int(pid),
+        "claimed_at": _timestamp(),
+    }
+    while True:
+        try:
+            descriptor = os.open(
+                active_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+        except FileExistsError:
+            try:
+                existing = json.loads(active_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            if existing.get("run_id") == run_id:
+                _write_status(active_path, payload)
+                return active_path
+            if _pid_is_alive(existing.get("pid")):
+                raise RuntimeError(
+                    "Another AutoPruner V100 series is already running: "
+                    f"run_id={existing.get('run_id')} pid={existing.get('pid')}. "
+                    f"Active-run file: {active_path}"
+                )
+            try:
+                active_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        return active_path
+
+
+def _release_active_run(*, run_id: str) -> None:
+    active_path = _active_run_path()
+    try:
+        existing = json.loads(active_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+    if existing.get("run_id") != run_id:
+        return
+    try:
+        active_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -95,6 +174,15 @@ def _parse_args() -> argparse.Namespace:
             "is created under outputs/logs."
         ),
     )
+    parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse an existing non-empty baseline best.pt and skip the 200-epoch "
+            "baseline training step."
+        ),
+    )
     parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-console-mirror",
@@ -110,6 +198,7 @@ def _start_detached(
     run_id: str,
     log_path: Path,
     status_path: Path,
+    baseline_checkpoint: Path | None,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -124,6 +213,9 @@ def _start_detached(
         str(log_path),
         "--no-console-mirror",
     ]
+    if baseline_checkpoint is not None:
+        command.extend(["--baseline-checkpoint", str(baseline_checkpoint)])
+    active_path = _claim_active_run(run_id=run_id, pid=os.getpid())
     _write_status(
         status_path,
         {
@@ -146,7 +238,16 @@ def _start_detached(
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            _write_status(
+                active_path,
+                {
+                    "run_id": run_id,
+                    "pid": process.pid,
+                    "claimed_at": _timestamp(),
+                },
+            )
     except BaseException as error:
+        _release_active_run(run_id=run_id)
         _write_status(
             status_path,
             {
@@ -174,27 +275,39 @@ def _run_series(
     log_path: Path,
     status_path: Path,
     mirror_to_console: bool,
+    baseline_checkpoint: Path | None = None,
 ) -> None:
-    reporter = RunReporter(log_path, mirror_to_console=mirror_to_console)
     started_at = _timestamp()
 
-    baseline_dir = (
-        REPO_ROOT
-        / "outputs"
-        / "runs"
-        / f"{run_id}_best_practice_resnet50_on_cifar10"
-    ).resolve()
-    checkpoint = baseline_dir / "checkpoints" / "best.pt"
+    if baseline_checkpoint is None:
+        baseline_dir = (
+            REPO_ROOT
+            / "outputs"
+            / "runs"
+            / f"{run_id}_best_practice_resnet50_on_cifar10"
+        ).resolve()
+        checkpoint = baseline_dir / "checkpoints" / "best.pt"
+    else:
+        checkpoint = baseline_checkpoint.resolve()
+        baseline_dir = checkpoint.parent.parent
+        if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+            raise FileNotFoundError(
+                "--baseline-checkpoint must point to a non-empty file: "
+                f"{checkpoint}"
+            )
+    reporter = RunReporter(log_path, mirror_to_console=mirror_to_console)
+    baseline_reused = baseline_checkpoint is not None
     status: dict[str, Any] = {
         "status": "running",
         "run_id": run_id,
         "pid": os.getpid(),
         "started_at": started_at,
         "updated_at": started_at,
-        "current_step": "baseline_training",
-        "completed_steps": [],
+        "current_step": "autopruner_tuning" if baseline_reused else "baseline_training",
+        "completed_steps": ["baseline_checkpoint_reused"] if baseline_reused else [],
         "baseline_dir": str(baseline_dir),
         "checkpoint": str(checkpoint),
+        "baseline_reused": baseline_reused,
         "log_file": str(log_path),
         "status_file": str(status_path),
         "mlflow_tracking_uri": f"sqlite:///{(REPO_ROOT / 'mlflow.db').resolve()}",
@@ -205,16 +318,19 @@ def _run_series(
     reporter.write(f"Status file: {status_path}")
 
     try:
-        _run(
-            [
-                sys.executable,
-                "-u",
-                "src/net_complexity/train.py",
-                "experiment=best_practice_resnet50_on_cifar10",
-                f"hydra.run.dir={baseline_dir}",
-            ],
-            reporter,
-        )
+        if baseline_reused:
+            reporter.write(f"Reusing baseline checkpoint: {checkpoint}")
+        else:
+            _run(
+                [
+                    sys.executable,
+                    "-u",
+                    "src/net_complexity/train.py",
+                    "experiment=best_practice_resnet50_on_cifar10",
+                    f"hydra.run.dir={baseline_dir}",
+                ],
+                reporter,
+            )
 
         if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
             raise RuntimeError(
@@ -222,7 +338,8 @@ def _run_series(
                 f"{checkpoint}"
             )
         reporter.write(f"Verified baseline checkpoint: {checkpoint}")
-        status["completed_steps"].append("baseline_training")
+        if not baseline_reused:
+            status["completed_steps"].append("baseline_training")
         status["current_step"] = "autopruner_tuning"
         status["updated_at"] = _timestamp()
         _write_status(status_path, status)
@@ -278,6 +395,15 @@ def main() -> None:
     if not log_path.is_absolute():
         log_path = (REPO_ROOT / log_path).resolve()
     status_path = log_path.with_suffix(".status.json")
+    baseline_checkpoint = args.baseline_checkpoint
+    if baseline_checkpoint is not None:
+        if not baseline_checkpoint.is_absolute():
+            baseline_checkpoint = (REPO_ROOT / baseline_checkpoint).resolve()
+        if not baseline_checkpoint.is_file() or baseline_checkpoint.stat().st_size == 0:
+            raise FileNotFoundError(
+                "--baseline-checkpoint must point to a non-empty file: "
+                f"{baseline_checkpoint}"
+            )
 
     if args.detach:
         _start_detached(
@@ -285,16 +411,22 @@ def main() -> None:
             run_id=run_id,
             log_path=log_path,
             status_path=status_path,
+            baseline_checkpoint=baseline_checkpoint,
         )
         return
 
-    _run_series(
-        repeats_per_ratio=args.repeats_per_ratio,
-        run_id=run_id,
-        log_path=log_path,
-        status_path=status_path,
-        mirror_to_console=not args.no_console_mirror,
-    )
+    _claim_active_run(run_id=run_id, pid=os.getpid())
+    try:
+        _run_series(
+            repeats_per_ratio=args.repeats_per_ratio,
+            run_id=run_id,
+            log_path=log_path,
+            status_path=status_path,
+            mirror_to_console=not args.no_console_mirror,
+            baseline_checkpoint=baseline_checkpoint,
+        )
+    finally:
+        _release_active_run(run_id=run_id)
 
 
 if __name__ == "__main__":

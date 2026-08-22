@@ -206,6 +206,80 @@ def test_wrapper_objective_backpropagates_through_active_coders():
     )
 
 
+def test_consensus_update_between_forward_and_backward_is_graph_safe():
+    wrapper = AutoPrunerWrapper(_tiny_backbone(), select_best_per_stage=False)
+    optimizer = torch.optim.SGD(wrapper.parameters(), lr=0.2, momentum=0.9)
+    wrapper.on_train_epoch_start(
+        epoch=1,
+        optimizer=optimizer,
+        batches_per_epoch=AUTHOR_CODE_WINDOW_SIZE + 1,
+    )
+    wrapper.train()
+    active_modules = wrapper._modules_for_stage(0)
+    with torch.no_grad():
+        for module in active_modules:
+            module.coder.weight.zero_()
+            module.coder.bias.fill_(10.0)
+
+    for _ in range(AUTHOR_CODE_WINDOW_SIZE - 1):
+        optimizer.zero_grad(set_to_none=True)
+        output = wrapper(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+        output.loss.backward()
+
+    optimizer.zero_grad(set_to_none=True)
+    boundary_output = wrapper(
+        torch.randn(2, 3, 8, 8),
+        torch.tensor([0, 1]),
+    )
+
+    assert all(int(module.window_count.item()) == 0 for module in active_modules)
+    assert all(
+        float(module.adaptive_regularization.item())
+        == pytest.approx(AUTHOR_REGULARIZATION_SCALE * 0.5)
+        for module in active_modules
+    )
+    torch.testing.assert_close(
+        boundary_output.reg_loss,
+        boundary_output.regularization_loss * AUTHOR_INITIAL_REGULARIZATION,
+    )
+    boundary_output.loss.backward()
+    assert all(module.coder.bias.grad is not None for module in active_modules)
+
+    next_output = wrapper(
+        torch.randn(2, 3, 8, 8),
+        torch.tensor([0, 1]),
+    )
+    torch.testing.assert_close(
+        next_output.reg_loss,
+        next_output.regularization_loss * AUTHOR_REGULARIZATION_SCALE * 0.5,
+    )
+
+
+def test_alpha_update_before_forward_is_graph_safe():
+    wrapper = AutoPrunerWrapper(
+        _tiny_backbone(),
+        alpha_update_interval=2,
+        pruning_epochs_per_stage=1,
+        select_best_per_stage=False,
+    )
+    optimizer = torch.optim.SGD(wrapper.parameters(), lr=0.2, momentum=0.9)
+    wrapper.on_train_epoch_start(epoch=1, optimizer=optimizer, batches_per_epoch=4)
+    wrapper.train()
+    active_modules = wrapper._modules_for_stage(0)
+
+    for expected_alpha in (AUTHOR_ALPHA_START_RESNET,) * 2 + (
+        AUTHOR_ALPHA_STOP_RESNET,
+    ) * 2:
+        optimizer.zero_grad(set_to_none=True)
+        output = wrapper(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+        assert all(
+            float(module.alpha.item()) == pytest.approx(expected_alpha)
+            for module in active_modules
+        )
+        output.loss.backward()
+        optimizer.step()
+
+
 def test_stage_transition_restores_best_validation_state_and_resets_sgd():
     wrapper = AutoPrunerWrapper(
         _tiny_backbone(),
@@ -234,6 +308,19 @@ def test_stage_transition_restores_best_validation_state_and_resets_sgd():
     assert int(wrapper.current_stage_position.item()) == 1
     assert {module.phase_name for module in wrapper._modules_for_stage(0)} == {"hard"}
     assert {module.phase_name for module in wrapper._modules_for_stage(1)} == {"soft"}
+
+    optimizer.zero_grad(set_to_none=True)
+    wrapper.train()
+    output = wrapper(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+    output.loss.backward()
+    assert all(
+        module.coder.weight.grad is None
+        for module in wrapper._modules_for_stage(0)
+    )
+    assert all(
+        module.coder.weight.grad is not None
+        for module in wrapper._modules_for_stage(1)
+    )
 
 
 def test_physical_export_is_equivalent_and_has_fewer_parameters():
