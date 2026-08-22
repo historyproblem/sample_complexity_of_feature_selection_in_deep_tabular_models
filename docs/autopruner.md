@@ -24,7 +24,9 @@ cross_entropy + lambda * (mean(abs(v)) - target_keep_ratio)^2
 ```
 
 The selector is deterministic, but input-dependent during pruning. Every 20
-batches, channel values are thresholded at 0.5 and combined by majority vote.
+batches within an epoch, channel values are thresholded at 0.5 and combined by
+majority vote; as in the official training loop, an incomplete epoch-tail
+window is discarded rather than carried into the next epoch.
 Validation and subsequent pruning groups use that static binary consensus.
 The exporter removes the selectors and slices `conv1`, `bn1`, `conv2`, `bn2`,
 and the input dimension of `conv3`, so reported deployment MACs are real rather
@@ -133,6 +135,18 @@ The command prints the exact log and status paths before returning. Follow the
 log with `tail -f <printed-log-path>` and inspect the JSON status without
 having to infer success from an empty terminal. Both baseline and AutoPruner
 runs are also recorded in the repository-local `mlflow.db`.
+
+To reuse an already trained baseline and skip the 200 baseline epochs:
+
+```bash
+python3 scripts/run_autopruner_cifar10_v100_11h.py \
+  --detach \
+  --baseline-checkpoint=/absolute/path/to/checkpoints/best.pt
+```
+
+The runner rejects a second concurrent series while the first PID is alive,
+so accidentally submitting `--detach` twice cannot make two jobs contend for
+the same GPU.
 
 It first trains the controlled plain ResNet-50 baseline for 200 epochs, checks
 that the resulting `best.pt` exists and is non-empty, and only then passes its

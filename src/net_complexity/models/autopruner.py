@@ -200,7 +200,11 @@ class AutoPrunerLayer(nn.Module):
         pooled_batch = input.mean(dim=0, keepdim=True)
         pooled_spatial = self.pool(pooled_batch)
         logits = self.coder(pooled_spatial).reshape(self.channels)
-        return torch.sigmoid(self.alpha.to(logits) * logits)
+        # Consensus can boost ``alpha`` after this forward and before backward.
+        # The official implementation passes a plain numeric scale into the
+        # graph, so retain the same per-batch snapshot semantics here.
+        alpha = self.alpha.detach().clone().to(logits)
+        return torch.sigmoid(alpha * logits)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         phase = int(self.phase.item())
@@ -258,6 +262,20 @@ class AutoPrunerLayer(nn.Module):
         return True
 
     @torch.no_grad()
+    def discard_partial_consensus_window(self) -> None:
+        """Match the author's epoch-local 20-batch consensus accumulator."""
+
+        self.code_window.zero_()
+        self.window_count.zero_()
+
+    @torch.no_grad()
+    def _boost_alpha(self) -> None:
+        # The author's scale-factor array is updated in place, so the current
+        # scale increases on the batch immediately following this consensus.
+        self.alpha_boost.add_(1.0)
+        self.alpha.add_(1.0)
+
+    @torch.no_grad()
     def _update_consensus(
         self,
         codes: torch.Tensor,
@@ -277,7 +295,7 @@ class AutoPrunerLayer(nn.Module):
 
         pruning_ratio = 1.0 - preserved_ratio
         if pruning_ratio >= float(self.pruning_threshold.item()):
-            self.alpha_boost.add_(1.0)
+            self._boost_alpha()
             minimum_threshold = 1.0 - self.target_keep_ratio
             self.pruning_threshold.fill_(
                 max(
@@ -295,7 +313,7 @@ class AutoPrunerLayer(nn.Module):
             .item()
         )
         if allow_convergence_boost and two_sided_ratio < AUTHOR_TWO_SIDED_TARGET:
-            self.alpha_boost.add_(1.0)
+            self._boost_alpha()
 
     @torch.no_grad()
     def finalize(self) -> None:
@@ -774,6 +792,7 @@ class AutoPrunerWrapper(nn.Module):
         self.stage_indices = tuple(stage_indices)
         self.register_buffer("current_stage_position", torch.zeros((), dtype=torch.long))
         self.register_buffer("batch_step_in_stage", torch.zeros((), dtype=torch.long))
+        self.register_buffer("batch_step_in_epoch", torch.zeros((), dtype=torch.long))
         self.register_buffer("alpha_index", torch.zeros((), dtype=torch.long))
         self.register_buffer("batches_per_epoch", torch.zeros((), dtype=torch.long))
         self._stage_best_accuracy: float | None = None
@@ -889,6 +908,10 @@ class AutoPrunerWrapper(nn.Module):
             self._stage_best_state = None
             if self.reset_optimizer_each_stage:
                 optimizer.state.clear()
+        else:
+            for module in self._active_modules():
+                module.discard_partial_consensus_window()
+        self.batch_step_in_epoch.zero_()
         self._set_optimizer_recipe(
             optimizer,
             epoch=epoch,
@@ -956,14 +979,18 @@ class AutoPrunerWrapper(nn.Module):
         modules = self._active_modules()
         if not modules:
             return
-        batch_step = int(self.batch_step_in_stage.item())
+        batch_step = int(self.batch_step_in_epoch.item())
         if batch_step % self.alpha_update_interval != 0:
             return
         index = int(self.alpha_index.item())
         base_alpha = self._alpha_schedule_value(index)
         for module in modules:
             module.set_alpha_base(base_alpha)
-        self.alpha_index.add_(1)
+        total_steps = (
+            self.pruning_epochs_per_stage * int(self.batches_per_epoch.item())
+        )
+        num_points = max(total_steps // self.alpha_update_interval, 1)
+        self.alpha_index.fill_(min(index + 1, num_points))
 
     def forward(self, input: torch.Tensor, targets: torch.Tensor) -> ClassifModelOutput:
         active_modules = self._active_modules()
@@ -992,6 +1019,7 @@ class AutoPrunerWrapper(nn.Module):
                     allow_convergence_boost=allow_boost,
                 )
             self.batch_step_in_stage.add_(1)
+            self.batch_step_in_epoch.add_(1)
         else:
             raw_regularization = logits.new_zeros(())
             reg_loss = logits.new_zeros(())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -142,3 +143,38 @@ def test_detached_child_receives_reused_baseline_checkpoint(tmp_path, monkeypatc
     active = json.loads(runner._active_run_path().read_text(encoding="utf-8"))
     assert active["pid"] == FakeProcess.pid
     runner._release_active_run(run_id="detached-reuse")
+
+
+def test_runner_records_failed_tuning_command_in_status_and_log(tmp_path, monkeypatch):
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    checkpoint = tmp_path / "existing" / "checkpoints" / "best.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    def fail_command(command, reporter):
+        reporter.write("synthetic tuning traceback")
+        raise subprocess.CalledProcessError(17, command)
+
+    monkeypatch.setattr(runner, "_run", fail_command)
+    log_path = tmp_path / "outputs" / "logs" / "failed.log"
+    status_path = log_path.with_suffix(".status.json")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        runner._run_series(
+            repeats_per_ratio=3,
+            run_id="failed-tuning",
+            log_path=log_path,
+            status_path=status_path,
+            mirror_to_console=False,
+            baseline_checkpoint=checkpoint,
+        )
+
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["current_step"] == "autopruner_tuning"
+    assert status["return_code"] == 17
+    assert "src/net_complexity/tune.py" in status["failed_command"]
+    log = log_path.read_text(encoding="utf-8")
+    assert "synthetic tuning traceback" in log
+    assert "AutoPruner series failed: CalledProcessError" in log

@@ -9,6 +9,8 @@ import torch
 from omegaconf import OmegaConf
 
 from net_complexity.metrics.autopruner import AutoPrunerComplexityMetric
+from net_complexity.metrics.base import MultiLossMetric
+from net_complexity.metrics.classification import Accuracy
 from net_complexity.models.autopruner import (
     AUTHOR_ALPHA_START_RESNET,
     AUTHOR_ALPHA_STOP_RESNET,
@@ -30,7 +32,12 @@ from net_complexity.models.autopruner import (
     get_autopruner_modules,
     load_autopruner_pretrained_backbone,
 )
-from net_complexity.training.engine import _assert_runtime_lambda_consistency
+from net_complexity.training.engine import (
+    _assert_runtime_lambda_consistency,
+    prepare_metrics,
+    train,
+)
+from net_complexity.training.meta import Metrics
 from net_complexity.training.run_history import RunHistory
 
 
@@ -219,7 +226,7 @@ def test_consensus_update_between_forward_and_backward_is_graph_safe():
     with torch.no_grad():
         for module in active_modules:
             module.coder.weight.zero_()
-            module.coder.bias.fill_(10.0)
+            module.coder.bias.fill_(math.log(1.5))
 
     for _ in range(AUTHOR_CODE_WINDOW_SIZE - 1):
         optimizer.zero_grad(set_to_none=True)
@@ -238,6 +245,11 @@ def test_consensus_update_between_forward_and_backward_is_graph_safe():
         == pytest.approx(AUTHOR_REGULARIZATION_SCALE * 0.5)
         for module in active_modules
     )
+    assert all(
+        float(module.alpha_boost.item()) == pytest.approx(1.0)
+        and float(module.alpha.item()) == pytest.approx(2.0)
+        for module in active_modules
+    )
     torch.testing.assert_close(
         boundary_output.reg_loss,
         boundary_output.regularization_loss * AUTHOR_INITIAL_REGULARIZATION,
@@ -249,6 +261,12 @@ def test_consensus_update_between_forward_and_backward_is_graph_safe():
         torch.randn(2, 3, 8, 8),
         torch.tensor([0, 1]),
     )
+    expected_boosted_code = torch.sigmoid(torch.tensor(2.0 * math.log(1.5)))
+    for module in active_modules:
+        torch.testing.assert_close(
+            module.current_code(),
+            torch.full_like(module.current_code(), expected_boosted_code),
+        )
     torch.testing.assert_close(
         next_output.reg_loss,
         next_output.regularization_loss * AUTHOR_REGULARIZATION_SCALE * 0.5,
@@ -278,6 +296,41 @@ def test_alpha_update_before_forward_is_graph_safe():
         )
         output.loss.backward()
         optimizer.step()
+
+
+def test_epoch_boundary_discards_partial_consensus_and_refreshes_alpha():
+    wrapper = AutoPrunerWrapper(
+        _tiny_backbone(),
+        alpha_update_interval=3,
+        pruning_epochs_per_stage=2,
+        select_best_per_stage=False,
+    )
+    optimizer = torch.optim.SGD(wrapper.parameters(), lr=0.2, momentum=0.9)
+    wrapper.on_train_epoch_start(epoch=1, optimizer=optimizer, batches_per_epoch=4)
+    wrapper.train()
+    active_modules = wrapper._modules_for_stage(0)
+
+    for _ in range(4):
+        output = wrapper(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+        output.loss.backward()
+        optimizer.zero_grad(set_to_none=True)
+
+    assert all(int(module.window_count.item()) == 4 for module in active_modules)
+    assert int(wrapper.alpha_index.item()) == 2
+    with torch.no_grad():
+        for module in active_modules:
+            module.alpha.fill_(-7.0)
+
+    wrapper.on_train_epoch_start(epoch=2, optimizer=optimizer, batches_per_epoch=4)
+    assert all(int(module.window_count.item()) == 0 for module in active_modules)
+    assert int(wrapper.batch_step_in_epoch.item()) == 0
+    wrapper(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+
+    assert int(wrapper.alpha_index.item()) == 2
+    assert all(
+        float(module.alpha.item()) == pytest.approx(AUTHOR_ALPHA_STOP_RESNET)
+        for module in active_modules
+    )
 
 
 def test_stage_transition_restores_best_validation_state_and_resets_sgd():
@@ -321,6 +374,115 @@ def test_stage_transition_restores_best_validation_state_and_resets_sgd():
         module.coder.weight.grad is not None
         for module in wrapper._modules_for_stage(1)
     )
+
+
+@pytest.mark.parametrize("target_keep_ratio", [0.5, 0.3])
+def test_training_engine_completes_every_stage_and_fine_tuning_with_anomaly_detection(
+    target_keep_ratio,
+):
+    torch.manual_seed(23)
+    wrapper = AutoPrunerWrapper(
+        _tiny_backbone(target_keep_ratio=target_keep_ratio),
+        pruning_epochs_per_stage=1,
+        final_fine_tune_epochs=1,
+        alpha_update_interval=5,
+        select_best_per_stage=True,
+    )
+    initial_coder_weights = {
+        stage_index: [
+            module.coder.weight.detach().clone()
+            for module in wrapper._modules_for_stage(stage_index)
+        ]
+        for stage_index in wrapper.stage_indices
+    }
+    optimizer = torch.optim.SGD(wrapper.parameters(), lr=0.2, momentum=0.9)
+    train_batches = [
+        (torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))
+        for _ in range(AUTHOR_CODE_WINDOW_SIZE + 1)
+    ]
+    dataloaders = SimpleNamespace(
+        train_dataloader=train_batches,
+        valid_dataloader=[(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))],
+        test_dataloader=[(torch.randn(2, 3, 8, 8), torch.tensor([0, 1]))],
+    )
+    metrics = prepare_metrics(
+        Metrics(
+            train_metrics=[MultiLossMetric(), Accuracy()],
+            valid_metrics=[MultiLossMetric(), Accuracy()],
+            test_metrics=[MultiLossMetric(), Accuracy()],
+        )
+    )
+    training_arguments = OmegaConf.create(
+        {
+            "num_epochs": wrapper.expected_num_epochs,
+            "gradient_norm_logging": {"enabled": False},
+            "lambda_warmup": {"enabled": False},
+            "adaptive_lambda": {"enabled": False},
+            "batchnorm_recalibration": {"enabled": False},
+            "collapse_guard": {"enabled": False},
+        }
+    )
+
+    with torch.autograd.detect_anomaly(check_nan=True):
+        result = train(
+            wrapper,
+            optimizer,
+            scheduler_state=None,
+            dataloaders=dataloaders,
+            training_arguments=training_arguments,
+            metrics=metrics,
+            device="cpu",
+        )
+
+    assert result["num_epochs_executed"] == wrapper.expected_num_epochs == 5
+    assert int(wrapper.current_stage_position.item()) == wrapper.num_pruning_phases
+    modules = get_autopruner_modules(wrapper)
+    assert modules
+    assert all(module.phase_name == "hard" for module in modules.values())
+    assert all(
+        not parameter.requires_grad
+        for module in modules.values()
+        for parameter in module.coder.parameters()
+    )
+    assert all(bool(module.binary_mask.any()) for module in modules.values())
+    for stage_index in wrapper.stage_indices:
+        final_weights = [
+            module.coder.weight.detach()
+            for module in wrapper._modules_for_stage(stage_index)
+        ]
+        assert any(
+            not torch.equal(initial, final)
+            for initial, final in zip(
+                initial_coder_weights[stage_index],
+                final_weights,
+            )
+        )
+
+    wrapper.eval()
+    sample = torch.randn(2, 3, 8, 8)
+    restored = AutoPrunerWrapper(
+        _tiny_backbone(target_keep_ratio=target_keep_ratio),
+        pruning_epochs_per_stage=1,
+        final_fine_tune_epochs=1,
+        alpha_update_interval=5,
+        select_best_per_stage=True,
+    )
+    restored.load_state_dict(wrapper.state_dict(), strict=True)
+    restored.eval()
+    exported = export_pruned_autopruner_backbone(wrapper).eval()
+    with torch.no_grad():
+        torch.testing.assert_close(
+            restored.backbone(sample),
+            wrapper.backbone(sample),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            exported(sample),
+            wrapper.backbone(sample),
+            rtol=1e-5,
+            atol=1e-6,
+        )
 
 
 def test_physical_export_is_equivalent_and_has_fewer_parameters():
