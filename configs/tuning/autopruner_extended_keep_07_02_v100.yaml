@@ -1,0 +1,50 @@
+# @package _global_
+
+# Two exploratory AutoPruner operating points on one V100 32 GB.
+# The training procedure remains author-faithful; only target_keep_ratio is new.
+dataloaders:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "autopruner_extended_resnet50_cifar10_keep_07_02"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 2
+  repeats_per_trial: 3
+  timeout: 37800
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 8
+    threshold: 0.0
+    max_attempts_per_repeat: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.backbone.target_keep_ratio: 0.7
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_07"
+      mlflow.tags.recipe: "autopruner_exploratory_keep_07"
+      mlflow.tags.target_keep_ratio: "0.7"
+      mlflow.tags.author_training_hyperparameters: "true"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.2
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_02"
+      mlflow.tags.recipe: "autopruner_exploratory_keep_02"
+      mlflow.tags.target_keep_ratio: "0.2"
+      mlflow.tags.author_training_hyperparameters: "true"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"

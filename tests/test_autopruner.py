@@ -656,6 +656,47 @@ def test_v100_overnight_series_uses_only_author_ratios_and_four_seeds():
     )
 
 
+def test_v100_extended_series_uses_exploratory_ratios_and_three_seeds():
+    cfg = OmegaConf.load(
+        REPO_ROOT
+        / "configs/tuning/autopruner_extended_keep_07_02_v100.yaml"
+    )
+    entry_cfg = OmegaConf.to_container(
+        OmegaConf.load(
+            REPO_ROOT
+            / "configs/tune_autopruner_resnet50_cifar10_extended.yaml"
+        ),
+        resolve=False,
+    )
+
+    assert cfg.dataloaders.batch_size == 256
+    assert cfg.dataloaders.num_workers == 8
+    assert cfg.dataloaders.pin_memory is True
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_trials == 2
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.repeats_per_trial == 3
+    assert cfg.tuning.seed_base == 42
+    assert cfg.tuning.seed_stride == 1
+    assert cfg.tuning.points_in_order is True
+    assert [
+        point["model.backbone.target_keep_ratio"]
+        for point in cfg.tuning.points
+    ] == [0.7, 0.2]
+    assert all(
+        point["mlflow.tags.author_training_hyperparameters"] == "true"
+        for point in cfg.tuning.points
+    )
+    assert all(
+        point["mlflow.tags.author_reported_keep_ratio"] == "false"
+        for point in cfg.tuning.points
+    )
+    assert entry_cfg["model"]["pretrained_checkpoint"].endswith(
+        "outputs/runs/20260821_032217_762051_best_practice_resnet50_on_cifar10/"
+        "checkpoints/best.pt"
+    )
+
+
 def test_autopruner_experiment_enables_mlflow_tracking():
     cfg = OmegaConf.load(
         REPO_ROOT / "configs/experiment/autopruner_resnet50_cifar10.yaml"
