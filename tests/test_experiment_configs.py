@@ -1931,6 +1931,66 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep():
     assert point["mlflow.tags.num_epochs"] == "150"
 
 
+def test_resnet50_aig_checkpoint_gap_grid_runs_five_tighter_pairs_for_150_epochs():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_"
+                "checkpoint_gap_grid_150ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 150
+    assert tuning_cfg.scheduler.T_max == 150
+    assert adaptive.enabled is True
+    assert adaptive.baseline_history_dir is None
+    assert adaptive.baseline_checkpoint_path == (
+        "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
+    )
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 2
+    assert adaptive.log_step_init == 0.23025850929940458
+    assert tuning_cfg.training_arguments.batchnorm_recalibration.enabled is False
+    assert tuning_cfg.tuning.mode == "grid"
+    assert tuning_cfg.tuning.n_trials == 5
+    assert tuning_cfg.tuning.repeats_per_trial == 1
+    assert tuning_cfg.tuning.points_in_order is True
+    assert tuning_cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["training_arguments.adaptive_lambda.soft_drop"] for point in points] == [
+        0.02,
+        0.015,
+        0.01,
+        0.0075,
+        0.005,
+    ]
+    assert [point["training_arguments.adaptive_lambda.hard_drop"] for point in points] == [
+        0.04,
+        0.03,
+        0.02,
+        0.015,
+        0.01,
+    ]
+    assert {point["model.lambda_coef"] for point in points} == {0.0001}
+    assert {point["mlflow.tags.physical_pruning"] for point in points} == {
+        "disabled"
+    }
+
+
 def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR

@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 
 import pytest
+import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
@@ -153,3 +154,63 @@ def test_ensure_adaptive_baseline_reference_reuses_existing_history_without_reru
     assert baseline_reference.history_path == existing_run_dir / "history.csv"
     assert baseline_reference.accuracy_by_epoch == {1: 0.79, 2: 0.83}
     assert baseline_reference.generated_for_current_run is False
+
+
+def test_ensure_adaptive_baseline_reference_uses_best_checkpoint_accuracy(
+    tmp_path,
+    monkeypatch,
+):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "best.pt"
+    torch.save(
+        {
+            "epoch": 137,
+            "metrics": {
+                "valid_accuracy": 0.9432,
+                "valid_loss": 0.21,
+            },
+        },
+        checkpoint_path,
+    )
+    config = _make_config("")
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
+        checkpoint_dir
+    )
+
+    def _unexpected_run_training(*args, **kwargs):
+        raise AssertionError("checkpoint baseline must not start a baseline run")
+
+    monkeypatch.setattr(engine, "run_training", _unexpected_run_training)
+
+    baseline_reference = engine._ensure_adaptive_baseline_reference(config)
+
+    assert baseline_reference is not None
+    assert baseline_reference.checkpoint_path == checkpoint_path
+    assert baseline_reference.history_path == checkpoint_path
+    assert baseline_reference.metric_name == "valid_accuracy"
+    assert baseline_reference.accuracy_by_epoch == {0: 0.9432}
+    assert baseline_reference.full_train_time_sec == 0.0
+    assert baseline_reference.num_epochs_executed == 0
+    assert baseline_reference.generated_for_current_run is False
+
+    controller = engine._build_adaptive_lambda(
+        config.training_arguments,
+        _LambdaModel(),
+        baseline_accuracy_by_epoch=baseline_reference.accuracy_by_epoch,
+        baseline_reference_source="baseline_checkpoint",
+    )
+    assert controller is not None
+    assert controller.summary_state()["reference_source"] == "baseline_checkpoint"
+
+
+def test_adaptive_baseline_rejects_history_and_checkpoint_at_the_same_time(tmp_path):
+    checkpoint_path = tmp_path / "best.pt"
+    torch.save({"metrics": {"valid_accuracy": 0.9}}, checkpoint_path)
+    config = _make_config(str(tmp_path / "history"))
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
+        checkpoint_path
+    )
+
+    with pytest.raises(ValueError, match="Configure only one"):
+        engine._ensure_adaptive_baseline_reference(config)

@@ -238,6 +238,7 @@ class AdaptiveLambdaController:
         *,
         initial_lambda_coef: float,
         reference_accuracy_by_epoch: Mapping[int, float] | None = None,
+        reference_source: str = "baseline_history",
         warmup_epochs: int = 10,
         update_every_epochs: int = 3,
         acc_window: int = 3,
@@ -317,6 +318,7 @@ class AdaptiveLambdaController:
             if reference_accuracy_by_epoch is not None
             else {}
         )
+        self.reference_source = str(reference_source)
         self.best_val_acc: float | None = None
         self.observed_accuracy_by_epoch: dict[int, float] = {}
         self.observed_zero_prob_by_epoch: dict[int, float] = {}
@@ -528,7 +530,7 @@ class AdaptiveLambdaController:
             "adaptive_lambda_action": self.last_action,
             "adaptive_lambda_reason": self.last_reason,
             "reference_source": (
-                "baseline_history"
+                self.reference_source
                 if self.reference_accuracy_by_epoch
                 else "best_val_acc"
             ),
@@ -1071,7 +1073,7 @@ class AdaptiveLambdaController:
             "reference_epoch": reference_epoch,
             "reference_acc": reference_acc,
             "reference_source": (
-                "baseline_history"
+                self.reference_source
                 if self.reference_accuracy_by_epoch
                 else "best_val_acc"
             ),

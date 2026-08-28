@@ -69,6 +69,7 @@ class BaselineAccuracyReference:
     full_train_time_sec: float = 0.0
     num_epochs_executed: int = 0
     generated_for_current_run: bool = False
+    checkpoint_path: Path | None = None
 
 
 @dataclass
@@ -288,6 +289,23 @@ def _resolve_baseline_history_root(training_arguments: DictConfig) -> Path | Non
     return baseline_root if baseline_root.is_absolute() else REPO_ROOT / baseline_root
 
 
+def _resolve_baseline_checkpoint_path(training_arguments: DictConfig) -> Path | None:
+    adaptive_cfg = getattr(training_arguments, "adaptive_lambda", None)
+    if adaptive_cfg is None or not bool(getattr(adaptive_cfg, "enabled", False)):
+        return None
+
+    configured_path = getattr(adaptive_cfg, "baseline_checkpoint_path", None)
+    if configured_path in {None, ""}:
+        return None
+
+    checkpoint_path = Path(str(configured_path))
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = REPO_ROOT / checkpoint_path
+    if checkpoint_path.is_dir():
+        checkpoint_path = checkpoint_path / "best.pt"
+    return checkpoint_path
+
+
 def _iter_baseline_history_candidates(root_dir: Path) -> list[Path]:
     if not root_dir.exists():
         return []
@@ -378,6 +396,57 @@ def _load_baseline_accuracy_reference(
     )
 
 
+def _load_baseline_checkpoint_accuracy_reference(
+    checkpoint_path: Path,
+) -> BaselineAccuracyReference:
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            "Adaptive lambda baseline checkpoint was not found: "
+            f"{checkpoint_path}"
+        )
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError(
+            f"Baseline checkpoint payload must be a mapping: {checkpoint_path}"
+        )
+    metrics = checkpoint.get("metrics", {})
+    if not isinstance(metrics, Mapping):
+        raise ValueError(
+            f"Baseline checkpoint metrics must be a mapping: {checkpoint_path}"
+        )
+
+    metric_name = next(
+        (candidate for candidate in ACCURACY_METRIC_NAMES if candidate in metrics),
+        None,
+    )
+    if metric_name is None:
+        available_metrics = ", ".join(sorted(str(key) for key in metrics))
+        raise ValueError(
+            f"Baseline checkpoint {checkpoint_path} does not contain a validation "
+            "accuracy metric. "
+            f"Available metrics: {available_metrics}"
+        )
+
+    accuracy = _to_float(metrics[metric_name])
+    if accuracy is None:
+        raise TypeError(
+            f"Baseline checkpoint metric '{metric_name}' must be numeric: "
+            f"{checkpoint_path}"
+        )
+
+    # Epoch zero makes the checkpoint accuracy a constant reference: the
+    # controller resolves the latest reference epoch not greater than the
+    # current epoch when there is no exact match.
+    return BaselineAccuracyReference(
+        root_dir=checkpoint_path.parent,
+        history_path=checkpoint_path,
+        metric_name=metric_name,
+        accuracy_by_epoch={0: accuracy},
+        checkpoint_path=checkpoint_path,
+    )
+
+
 def _build_baseline_training_config(config: DictConfig, baseline_root_dir: Path) -> DictConfig:
     baseline_config = deepcopy(config)
 
@@ -417,6 +486,26 @@ def _ensure_adaptive_baseline_reference(
     progress_context: ProgressContext | None = None,
 ) -> BaselineAccuracyReference | None:
     baseline_root_dir = _resolve_baseline_history_root(config.training_arguments)
+    baseline_checkpoint_path = _resolve_baseline_checkpoint_path(
+        config.training_arguments
+    )
+    if baseline_root_dir is not None and baseline_checkpoint_path is not None:
+        raise ValueError(
+            "Configure only one adaptive lambda baseline source: "
+            "baseline_history_dir or baseline_checkpoint_path."
+        )
+    if baseline_checkpoint_path is not None:
+        baseline_reference = _load_baseline_checkpoint_accuracy_reference(
+            baseline_checkpoint_path
+        )
+        print(
+            "Adaptive lambda baseline"
+            f" | loaded_from={baseline_reference.checkpoint_path}"
+            f" | metric={baseline_reference.metric_name}"
+            f" | accuracy={baseline_reference.accuracy_by_epoch[0]:.6f}"
+            " | reference=constant"
+        )
+        return baseline_reference
     if baseline_root_dir is None:
         return None
 
@@ -1369,6 +1458,7 @@ def _build_adaptive_lambda(
     model: nn.Module,
     *,
     baseline_accuracy_by_epoch: Mapping[int, float] | None = None,
+    baseline_reference_source: str = "baseline_history",
 ) -> AdaptiveLambdaController | None:
     cfg = getattr(training_arguments, "adaptive_lambda", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -1407,6 +1497,7 @@ def _build_adaptive_lambda(
     return AdaptiveLambdaController(
         initial_lambda_coef=initial_lambda_coef,
         reference_accuracy_by_epoch=baseline_accuracy_by_epoch,
+        reference_source=baseline_reference_source,
         warmup_epochs=warmup_epochs,
         update_every_epochs=update_every_epochs,
         acc_window=int(getattr(cfg, "acc_window", 3)),
@@ -1593,6 +1684,12 @@ def train(model: nn.Module,
             if baseline_accuracy_reference is not None
             else None
         ),
+        baseline_reference_source=(
+            "baseline_checkpoint"
+            if baseline_accuracy_reference is not None
+            and baseline_accuracy_reference.checkpoint_path is not None
+            else "baseline_history"
+        ),
     )
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
@@ -1612,6 +1709,11 @@ def train(model: nn.Module,
                 runtime_metadata["adaptive_lambda_baseline"] = {
                     "root_dir": str(baseline_accuracy_reference.root_dir),
                     "history_path": str(baseline_accuracy_reference.history_path),
+                    "checkpoint_path": (
+                        str(baseline_accuracy_reference.checkpoint_path)
+                        if baseline_accuracy_reference.checkpoint_path is not None
+                        else None
+                    ),
                     "metric_name": baseline_accuracy_reference.metric_name,
                     "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
                     "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
@@ -2138,6 +2240,11 @@ def run_training(
         runtime_snapshot["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),
             "history_path": str(baseline_accuracy_reference.history_path),
+            "checkpoint_path": (
+                str(baseline_accuracy_reference.checkpoint_path)
+                if baseline_accuracy_reference.checkpoint_path is not None
+                else None
+            ),
             "metric_name": baseline_accuracy_reference.metric_name,
             "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
             "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
@@ -2193,6 +2300,11 @@ def run_training(
         result["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),
             "history_path": str(baseline_accuracy_reference.history_path),
+            "checkpoint_path": (
+                str(baseline_accuracy_reference.checkpoint_path)
+                if baseline_accuracy_reference.checkpoint_path is not None
+                else None
+            ),
             "metric_name": baseline_accuracy_reference.metric_name,
             "num_epochs": len(baseline_accuracy_reference.accuracy_by_epoch),
             "full_train_time_sec": baseline_accuracy_reference.full_train_time_sec,
