@@ -283,8 +283,10 @@ class AdaptiveLambdaController:
             raise ValueError("adaptive_lambda.log_step_max_boost_level must be >= 0.")
         if adaptive_log_step_max_epoch is not None and adaptive_log_step_max_epoch < 0:
             raise ValueError("adaptive_lambda.adaptive_log_step_max_epoch must be >= 0.")
-        if soft_drop < 0.0 or hard_drop < 0.0:
-            raise ValueError("adaptive_lambda soft/hard drops must be >= 0.")
+        if soft_drop > hard_drop:
+            raise ValueError(
+                "adaptive_lambda.soft_drop must be <= adaptive_lambda.hard_drop."
+            )
 
         self.warmup_epochs = int(warmup_epochs)
         self.update_every_epochs = int(update_every_epochs)

@@ -132,6 +132,61 @@ def test_adaptive_lambda_uses_baseline_epoch_accuracy_instead_of_best_accuracy_s
     assert model.lambda_coef == pytest.approx(20.0)
 
 
+def test_adaptive_lambda_negative_drops_require_improvement_over_baseline():
+    model = _DummyModel(lambda_coef=5.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    controller = AdaptiveLambdaController(
+        initial_lambda_coef=5.0,
+        reference_accuracy_by_epoch={0: 0.90},
+        warmup_epochs=0,
+        update_every_epochs=1,
+        acc_window=1,
+        adaptive_log_step_enabled=False,
+        soft_drop=-0.005,
+        hard_drop=-0.0025,
+    )
+
+    increase_result = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=1,
+        accuracy=0.906,
+        zero_prob=0.3,
+    )
+    hold_result = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=2,
+        accuracy=0.904,
+        zero_prob=0.3,
+    )
+    decrease_result = _run_epoch(
+        controller,
+        model,
+        optimizer,
+        epoch=3,
+        accuracy=0.901,
+        zero_prob=0.3,
+    )
+
+    assert increase_result.action == "increase_lambda"
+    assert increase_result.metrics["min_allowed_acc"] == pytest.approx(0.905)
+    assert increase_result.metrics["hard_min_allowed_acc"] == pytest.approx(0.9025)
+    assert hold_result.action == "hold"
+    assert decrease_result.action == "decrease_lambda"
+
+
+def test_adaptive_lambda_rejects_reversed_accuracy_thresholds():
+    with pytest.raises(ValueError, match="soft_drop must be <="):
+        AdaptiveLambdaController(
+            initial_lambda_coef=5.0,
+            soft_drop=-0.0025,
+            hard_drop=-0.005,
+        )
+
+
 def test_adaptive_lambda_decreases_lambda_on_hard_degradation_without_mutating_runtime_state():
     model = _DummyModel(lambda_coef=5.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)

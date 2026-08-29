@@ -1991,6 +1991,62 @@ def test_resnet50_aig_checkpoint_gap_grid_runs_five_tighter_pairs_for_150_epochs
     }
 
 
+def test_resnet50_aig_checkpoint_negative_gap_grid_requires_baseline_improvement():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_checkpoint_negative_gap_grid_150ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_checkpoint_negative_gap_grid_150ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_"
+                "checkpoint_negative_gap_grid_150ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 150
+    assert tuning_cfg.scheduler.T_max == 150
+    assert adaptive.baseline_history_dir is None
+    assert adaptive.baseline_checkpoint_path == (
+        "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
+    )
+    assert adaptive.lambda_max is None
+    assert tuning_cfg.tuning.n_trials == 2
+    assert tuning_cfg.tuning.repeats_per_trial == 1
+    assert tuning_cfg.tuning.points_in_order is True
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    assert [point["training_arguments.adaptive_lambda.soft_drop"] for point in points] == [
+        -0.005,
+        -0.01,
+    ]
+    assert [point["training_arguments.adaptive_lambda.hard_drop"] for point in points] == [
+        -0.00375,
+        -0.0075,
+    ]
+    assert points[0]["training_arguments.adaptive_lambda.soft_drop"] == (
+        points[1]["training_arguments.adaptive_lambda.soft_drop"] / 2
+    )
+    assert points[0]["training_arguments.adaptive_lambda.hard_drop"] == (
+        points[1]["training_arguments.adaptive_lambda.hard_drop"] / 2
+    )
+    assert all(
+        point["training_arguments.adaptive_lambda.soft_drop"]
+        <= point["training_arguments.adaptive_lambda.hard_drop"]
+        for point in points
+    )
+    assert {point["model.lambda_coef"] for point in points} == {0.0001}
+
+
 def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
