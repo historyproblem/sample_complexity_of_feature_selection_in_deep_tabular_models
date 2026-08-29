@@ -2091,6 +2091,10 @@ def test_resnet50_aig_checkpoint_history_grid_runs_two_positive_and_two_negative
     assert adaptive.baseline_checkpoint_path == (
         "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
     )
+    assert adaptive.baseline_checkpoint_history_path == (
+        "outputs/runs/20260731_041514_best_practice_resnet50_on_cifar10/"
+        "history.csv"
+    )
     assert adaptive.update_every_epochs == 1
     assert adaptive.log_step_init == "auto"
     assert adaptive.lambda_max is None

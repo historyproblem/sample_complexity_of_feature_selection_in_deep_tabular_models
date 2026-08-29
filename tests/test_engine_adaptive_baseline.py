@@ -243,6 +243,36 @@ def test_ensure_adaptive_baseline_reference_uses_checkpoint_run_epoch_history(
     assert controller._resolve_reference_accuracy(2) == (2, 0.83)
 
 
+def test_checkpoint_baseline_accepts_explicit_history_path(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint_alias"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "best.pt"
+    torch.save({"epoch": 2}, checkpoint_path)
+
+    original_run_dir = tmp_path / "original_run"
+    original_run_dir.mkdir()
+    history_path = original_run_dir / "history.csv"
+    history_path.write_text(
+        "epoch,valid_accuracy\n1,0.71\n2,0.83\n",
+        encoding="utf-8",
+    )
+
+    config = _make_config("")
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
+        checkpoint_path
+    )
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_history_path = str(
+        history_path
+    )
+
+    baseline_reference = engine._ensure_adaptive_baseline_reference(config)
+
+    assert baseline_reference is not None
+    assert baseline_reference.checkpoint_path == checkpoint_path
+    assert baseline_reference.history_path == history_path
+    assert baseline_reference.accuracy_by_epoch == {1: 0.71, 2: 0.83}
+
+
 def test_checkpoint_baseline_rejects_constant_best_accuracy_without_history(tmp_path):
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()

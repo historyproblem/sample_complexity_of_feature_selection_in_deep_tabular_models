@@ -9,6 +9,7 @@ training_arguments:
     acc_window: 3
     baseline_history_dir: null
     baseline_checkpoint_path: null
+    baseline_checkpoint_history_path: null
     lambda_min: 1e-8
     lambda_max: 10.0
     log_step_init: auto

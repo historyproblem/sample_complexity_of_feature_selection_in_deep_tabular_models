@@ -305,6 +305,25 @@ def _resolve_baseline_checkpoint_path(training_arguments: DictConfig) -> Path | 
     return checkpoint_path
 
 
+def _resolve_baseline_checkpoint_history_path(
+    training_arguments: DictConfig,
+) -> Path | None:
+    adaptive_cfg = getattr(training_arguments, "adaptive_lambda", None)
+    if adaptive_cfg is None or not bool(getattr(adaptive_cfg, "enabled", False)):
+        return None
+
+    configured_path = getattr(
+        adaptive_cfg,
+        "baseline_checkpoint_history_path",
+        None,
+    )
+    if configured_path in {None, ""}:
+        return None
+
+    history_path = Path(str(configured_path))
+    return history_path if history_path.is_absolute() else REPO_ROOT / history_path
+
+
 def _iter_baseline_history_candidates(root_dir: Path) -> list[Path]:
     if not root_dir.exists():
         return []
@@ -397,6 +416,8 @@ def _load_baseline_accuracy_reference(
 
 def _load_baseline_checkpoint_accuracy_reference(
     checkpoint_path: Path,
+    *,
+    history_path: Path | None = None,
 ) -> BaselineAccuracyReference:
     if not checkpoint_path.is_file():
         raise FileNotFoundError(
@@ -410,15 +431,18 @@ def _load_baseline_checkpoint_accuracy_reference(
             f"Baseline checkpoint payload must be a mapping: {checkpoint_path}"
         )
 
-    history_candidates = []
-    if checkpoint_path.parent.name == "checkpoints":
-        history_candidates.append(checkpoint_path.parent.parent / "history.csv")
-    history_candidates.append(checkpoint_path.parent / "history.csv")
-    history_path = next(
+    history_candidates: list[Path] = []
+    if history_path is not None:
+        history_candidates.append(history_path)
+    else:
+        if checkpoint_path.parent.name == "checkpoints":
+            history_candidates.append(checkpoint_path.parent.parent / "history.csv")
+        history_candidates.append(checkpoint_path.parent / "history.csv")
+    resolved_history_path = next(
         (candidate for candidate in history_candidates if candidate.is_file()),
         None,
     )
-    if history_path is None:
+    if resolved_history_path is None:
         expected_paths = ", ".join(str(path) for path in history_candidates)
         raise FileNotFoundError(
             "Adaptive lambda checkpoint baselines require the checkpoint run's "
@@ -427,10 +451,12 @@ def _load_baseline_checkpoint_accuracy_reference(
             f"{expected_paths}"
         )
 
-    metric_name, accuracy_by_epoch = _load_baseline_accuracy_history(history_path)
+    metric_name, accuracy_by_epoch = _load_baseline_accuracy_history(
+        resolved_history_path
+    )
     full_train_time_sec = 0.0
     num_epochs_executed = 0
-    with history_path.open(newline="", encoding="utf-8") as handle:
+    with resolved_history_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             epoch_time = row.get("epoch_time_sec")
             if epoch_time not in {None, ""}:
@@ -438,8 +464,8 @@ def _load_baseline_checkpoint_accuracy_reference(
             num_epochs_executed += 1
 
     return BaselineAccuracyReference(
-        root_dir=history_path.parent,
-        history_path=history_path,
+        root_dir=resolved_history_path.parent,
+        history_path=resolved_history_path,
         metric_name=metric_name,
         accuracy_by_epoch=accuracy_by_epoch,
         full_train_time_sec=full_train_time_sec,
@@ -490,14 +516,25 @@ def _ensure_adaptive_baseline_reference(
     baseline_checkpoint_path = _resolve_baseline_checkpoint_path(
         config.training_arguments
     )
+    baseline_checkpoint_history_path = _resolve_baseline_checkpoint_history_path(
+        config.training_arguments
+    )
     if baseline_root_dir is not None and baseline_checkpoint_path is not None:
         raise ValueError(
             "Configure only one adaptive lambda baseline source: "
             "baseline_history_dir or baseline_checkpoint_path."
         )
+    if (
+        baseline_checkpoint_history_path is not None
+        and baseline_checkpoint_path is None
+    ):
+        raise ValueError(
+            "baseline_checkpoint_history_path requires baseline_checkpoint_path."
+        )
     if baseline_checkpoint_path is not None:
         baseline_reference = _load_baseline_checkpoint_accuracy_reference(
-            baseline_checkpoint_path
+            baseline_checkpoint_path,
+            history_path=baseline_checkpoint_history_path,
         )
         total_epochs = int(getattr(config.training_arguments, "num_epochs", 0))
         missing_epochs = [
