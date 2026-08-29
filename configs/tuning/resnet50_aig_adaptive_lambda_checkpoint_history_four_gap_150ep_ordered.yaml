@@ -1,0 +1,100 @@
+# @package _global_
+
+# Four sequential 150-epoch AIG adaptive-lambda runs.
+# The selected best.pt identifies the exact dense baseline run, while reference
+# accuracy is read from that run's history.csv at the current epoch. The stored
+# best-checkpoint accuracy is never used as a constant reference.
+# Lambda may be updated after every epoch. Its automatic base step is calibrated
+# from the actual initial lambda so 50 consecutive increases can reach lambda=10.
+
+training_arguments:
+  num_epochs: 150
+  adaptive_lambda:
+    enabled: true
+    baseline_history_dir: null
+    baseline_checkpoint_path: outputs/runs/best_chech_resnet50_on_cifar10/checkpoints
+    lambda_max: null
+    update_every_epochs: 1
+    log_step_init: auto
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 150
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: 0.01
+      training_arguments.adaptive_lambda.hard_drop: 0.02
+      mlflow.run_name: resnet50_aig_checkpoint_history_gap_soft010_hard020_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "0.01"
+      mlflow.tags.hard_drop: "0.02"
+      mlflow.tags.gap_pair_pp: "1.0/2.0"
+      mlflow.tags.gap_sign: "positive"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: 0.0075
+      training_arguments.adaptive_lambda.hard_drop: 0.015
+      mlflow.run_name: resnet50_aig_checkpoint_history_gap_soft0075_hard015_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "0.0075"
+      mlflow.tags.hard_drop: "0.015"
+      mlflow.tags.gap_pair_pp: "0.75/1.5"
+      mlflow.tags.gap_sign: "positive"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: -0.005
+      training_arguments.adaptive_lambda.hard_drop: -0.00375
+      mlflow.run_name: resnet50_aig_checkpoint_history_improve_soft050_hard0375_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "-0.005"
+      mlflow.tags.hard_drop: "-0.00375"
+      mlflow.tags.required_improvement_pp: "0.50/0.375"
+      mlflow.tags.gap_sign: "negative"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: -0.01
+      training_arguments.adaptive_lambda.hard_drop: -0.0075
+      mlflow.run_name: resnet50_aig_checkpoint_history_improve_soft100_hard075_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "-0.01"
+      mlflow.tags.hard_drop: "-0.0075"
+      mlflow.tags.required_improvement_pp: "1.00/0.75"
+      mlflow.tags.gap_sign: "negative"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"

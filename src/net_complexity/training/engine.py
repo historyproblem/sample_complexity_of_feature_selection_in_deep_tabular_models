@@ -33,7 +33,6 @@ EpochEndCallback = Callable[
 ProgressContext = Mapping[str, Any]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
-AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
 AUTO_LOG_STEP_TARGET_LAMBDA = 1e1
 AUTO_LOG_STEP_EPOCH_FRACTION = 1.0 / 3.0
 
@@ -410,39 +409,41 @@ def _load_baseline_checkpoint_accuracy_reference(
         raise ValueError(
             f"Baseline checkpoint payload must be a mapping: {checkpoint_path}"
         )
-    metrics = checkpoint.get("metrics", {})
-    if not isinstance(metrics, Mapping):
-        raise ValueError(
-            f"Baseline checkpoint metrics must be a mapping: {checkpoint_path}"
-        )
 
-    metric_name = next(
-        (candidate for candidate in ACCURACY_METRIC_NAMES if candidate in metrics),
+    history_candidates = []
+    if checkpoint_path.parent.name == "checkpoints":
+        history_candidates.append(checkpoint_path.parent.parent / "history.csv")
+    history_candidates.append(checkpoint_path.parent / "history.csv")
+    history_path = next(
+        (candidate for candidate in history_candidates if candidate.is_file()),
         None,
     )
-    if metric_name is None:
-        available_metrics = ", ".join(sorted(str(key) for key in metrics))
-        raise ValueError(
-            f"Baseline checkpoint {checkpoint_path} does not contain a validation "
-            "accuracy metric. "
-            f"Available metrics: {available_metrics}"
+    if history_path is None:
+        expected_paths = ", ".join(str(path) for path in history_candidates)
+        raise FileNotFoundError(
+            "Adaptive lambda checkpoint baselines require the checkpoint run's "
+            "history.csv for epoch-aligned accuracy; the best checkpoint metric "
+            "is intentionally not used as a constant reference. Expected one of: "
+            f"{expected_paths}"
         )
 
-    accuracy = _to_float(metrics[metric_name])
-    if accuracy is None:
-        raise TypeError(
-            f"Baseline checkpoint metric '{metric_name}' must be numeric: "
-            f"{checkpoint_path}"
-        )
+    metric_name, accuracy_by_epoch = _load_baseline_accuracy_history(history_path)
+    full_train_time_sec = 0.0
+    num_epochs_executed = 0
+    with history_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            epoch_time = row.get("epoch_time_sec")
+            if epoch_time not in {None, ""}:
+                full_train_time_sec += float(epoch_time)
+            num_epochs_executed += 1
 
-    # Epoch zero makes the checkpoint accuracy a constant reference: the
-    # controller resolves the latest reference epoch not greater than the
-    # current epoch when there is no exact match.
     return BaselineAccuracyReference(
-        root_dir=checkpoint_path.parent,
-        history_path=checkpoint_path,
+        root_dir=history_path.parent,
+        history_path=history_path,
         metric_name=metric_name,
-        accuracy_by_epoch={0: accuracy},
+        accuracy_by_epoch=accuracy_by_epoch,
+        full_train_time_sec=full_train_time_sec,
+        num_epochs_executed=num_epochs_executed,
         checkpoint_path=checkpoint_path,
     )
 
@@ -498,12 +499,26 @@ def _ensure_adaptive_baseline_reference(
         baseline_reference = _load_baseline_checkpoint_accuracy_reference(
             baseline_checkpoint_path
         )
+        total_epochs = int(getattr(config.training_arguments, "num_epochs", 0))
+        missing_epochs = [
+            epoch
+            for epoch in range(1, total_epochs + 1)
+            if epoch not in baseline_reference.accuracy_by_epoch
+        ]
+        if missing_epochs:
+            preview = ", ".join(str(epoch) for epoch in missing_epochs[:10])
+            suffix = "..." if len(missing_epochs) > 10 else ""
+            raise ValueError(
+                "Checkpoint baseline history must contain accuracy for every "
+                f"training epoch 1..{total_epochs}; missing epochs: {preview}{suffix}"
+            )
         print(
             "Adaptive lambda baseline"
-            f" | loaded_from={baseline_reference.checkpoint_path}"
+            f" | checkpoint={baseline_reference.checkpoint_path}"
+            f" | history={baseline_reference.history_path}"
             f" | metric={baseline_reference.metric_name}"
-            f" | accuracy={baseline_reference.accuracy_by_epoch[0]:.6f}"
-            " | reference=constant"
+            f" | epochs={len(baseline_reference.accuracy_by_epoch)}"
+            " | reference=epoch_aligned"
         )
         return baseline_reference
     if baseline_root_dir is None:
@@ -1428,6 +1443,7 @@ def _resolve_adaptive_lambda_log_step_init(
     training_arguments: DictConfig,
     adaptive_cfg: DictConfig,
     *,
+    initial_lambda_coef: float,
     warmup_epochs: int,
     update_every_epochs: int,
 ) -> float:
@@ -1440,6 +1456,15 @@ def _resolve_adaptive_lambda_log_step_init(
         raise ValueError("training_arguments.num_epochs must be > 0 for adaptive_lambda.log_step_init=auto.")
     if update_every_epochs <= 0:
         raise ValueError("adaptive_lambda.update_every_epochs must be >= 1.")
+    if not math.isfinite(initial_lambda_coef) or initial_lambda_coef <= 0.0:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef > 0."
+        )
+    if initial_lambda_coef >= AUTO_LOG_STEP_TARGET_LAMBDA:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef "
+            f"< {AUTO_LOG_STEP_TARGET_LAMBDA:g}."
+        )
 
     target_epoch = float(num_epochs) * AUTO_LOG_STEP_EPOCH_FRACTION
     update_window = target_epoch - float(warmup_epochs)
@@ -1450,7 +1475,7 @@ def _resolve_adaptive_lambda_log_step_init(
             "within the first third of training."
         )
 
-    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / AUTO_LOG_STEP_INITIAL_LAMBDA) / float(update_slots)
+    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / initial_lambda_coef) / float(update_slots)
 
 
 def _build_adaptive_lambda(
@@ -1490,6 +1515,7 @@ def _build_adaptive_lambda(
     log_step_init = _resolve_adaptive_lambda_log_step_init(
         training_arguments,
         cfg,
+        initial_lambda_coef=initial_lambda_coef,
         warmup_epochs=warmup_epochs,
         update_every_epochs=update_every_epochs,
     )
@@ -1685,7 +1711,7 @@ def train(model: nn.Module,
             else None
         ),
         baseline_reference_source=(
-            "baseline_checkpoint"
+            "baseline_checkpoint_history"
             if baseline_accuracy_reference is not None
             and baseline_accuracy_reference.checkpoint_path is not None
             else "baseline_history"

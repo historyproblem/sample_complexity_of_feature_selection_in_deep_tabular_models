@@ -1,16 +1,17 @@
 # @package _global_
 
-# One-pass AIG adaptive-lambda experiment against the fixed valid_accuracy in
-# the baseline best.pt. Negative drops turn the accuracy guard into an
-# improvement target: soft_drop=-0.005 means lambda may increase only after the
-# adaptive model exceeds the baseline by at least 0.5 percentage points.
+# One-pass AIG adaptive-lambda experiment against the epoch-aligned
+# valid_accuracy from the dense baseline history. Negative drops turn the
+# accuracy guard into an improvement target: soft_drop=-0.005 means lambda may
+# increase only after the adaptive model exceeds the same-epoch baseline by at
+# least 0.5 percentage points.
 
 training_arguments:
   num_epochs: 150
   adaptive_lambda:
     enabled: true
-    baseline_history_dir: null
-    baseline_checkpoint_path: outputs/runs/best_chech_resnet50_on_cifar10/checkpoints
+    baseline_history_dir: outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
+    baseline_checkpoint_path: null
     lambda_max: null
     update_every_epochs: 2
     log_step_init: 0.23025850929940458
@@ -23,7 +24,7 @@ scheduler:
 tuning:
   enabled: true
   mode: "grid"
-  study_name: "resnet50_aig_adaptive_lambda_checkpoint_negative_gap_grid_150ep_ordered"
+  study_name: "resnet50_aig_adaptive_lambda_epoch_aligned_negative_gap_grid_150ep_ordered"
   direction: "maximize"
   objective_metric: "valid_accuracy"
   n_trials: 2
@@ -43,26 +44,26 @@ tuning:
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: -0.005
       training_arguments.adaptive_lambda.hard_drop: -0.00375
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_improve_soft050_hard0375_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_negative_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_improve_soft050_hard0375_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_negative_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "-0.005"
       mlflow.tags.hard_drop: "-0.00375"
       mlflow.tags.required_improvement_pp: "0.50/0.375"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: -0.01
       training_arguments.adaptive_lambda.hard_drop: -0.0075
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_improve_soft100_hard075_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_negative_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_improve_soft100_hard075_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_negative_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "-0.01"
       mlflow.tags.hard_drop: "-0.0075"
       mlflow.tags.required_improvement_pp: "1.00/0.75"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"

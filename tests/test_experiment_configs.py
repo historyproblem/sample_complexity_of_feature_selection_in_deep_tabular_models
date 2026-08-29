@@ -1931,7 +1931,7 @@ def test_resnet50_aig_adaptive_lambda_no_lambda_max_scaled_step_150ep():
     assert point["mlflow.tags.num_epochs"] == "150"
 
 
-def test_resnet50_aig_checkpoint_gap_grid_runs_five_tighter_pairs_for_150_epochs():
+def test_resnet50_aig_epoch_aligned_gap_grid_runs_five_tighter_pairs_for_150_epochs():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
         / "tuning"
@@ -1956,9 +1956,14 @@ def test_resnet50_aig_checkpoint_gap_grid_runs_five_tighter_pairs_for_150_epochs
     assert tuning_cfg.training_arguments.num_epochs == 150
     assert tuning_cfg.scheduler.T_max == 150
     assert adaptive.enabled is True
-    assert adaptive.baseline_history_dir is None
-    assert adaptive.baseline_checkpoint_path == (
-        "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
+    tuning_raw = OmegaConf.to_container(tuning_cfg, resolve=False)
+    assert tuning_raw["training_arguments"]["adaptive_lambda"]["baseline_history_dir"] == (
+        "outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_"
+        "${model.backbone.resnet_block.temperature}"
+    )
+    assert adaptive.baseline_checkpoint_path is None
+    assert tuning_cfg.tuning.study_name == (
+        "resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep_ordered"
     )
     assert adaptive.lambda_max is None
     assert adaptive.update_every_epochs == 2
@@ -1989,9 +1994,12 @@ def test_resnet50_aig_checkpoint_gap_grid_runs_five_tighter_pairs_for_150_epochs
     assert {point["mlflow.tags.physical_pruning"] for point in points} == {
         "disabled"
     }
+    assert {point["mlflow.tags.baseline_reference"] for point in points} == {
+        "epoch_aligned_baseline_history"
+    }
 
 
-def test_resnet50_aig_checkpoint_negative_gap_grid_requires_baseline_improvement():
+def test_resnet50_aig_epoch_aligned_negative_gap_grid_requires_baseline_improvement():
     tuning_cfg = OmegaConf.load(
         CONFIGS_DIR
         / "tuning"
@@ -2015,9 +2023,14 @@ def test_resnet50_aig_checkpoint_negative_gap_grid_requires_baseline_improvement
     adaptive = tuning_cfg.training_arguments.adaptive_lambda
     assert tuning_cfg.training_arguments.num_epochs == 150
     assert tuning_cfg.scheduler.T_max == 150
-    assert adaptive.baseline_history_dir is None
-    assert adaptive.baseline_checkpoint_path == (
-        "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
+    tuning_raw = OmegaConf.to_container(tuning_cfg, resolve=False)
+    assert tuning_raw["training_arguments"]["adaptive_lambda"]["baseline_history_dir"] == (
+        "outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_"
+        "${model.backbone.resnet_block.temperature}"
+    )
+    assert adaptive.baseline_checkpoint_path is None
+    assert tuning_cfg.tuning.study_name == (
+        "resnet50_aig_adaptive_lambda_epoch_aligned_negative_gap_grid_150ep_ordered"
     )
     assert adaptive.lambda_max is None
     assert tuning_cfg.tuning.n_trials == 2
@@ -2045,6 +2058,77 @@ def test_resnet50_aig_checkpoint_negative_gap_grid_requires_baseline_improvement
         for point in points
     )
     assert {point["model.lambda_coef"] for point in points} == {0.0001}
+    assert {point["mlflow.tags.baseline_reference"] for point in points} == {
+        "epoch_aligned_baseline_history"
+    }
+
+
+def test_resnet50_aig_checkpoint_history_grid_runs_two_positive_and_two_negative_gaps():
+    tuning_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tuning"
+        / "resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep_ordered.yaml"
+    )
+    tune_cfg = OmegaConf.load(
+        CONFIGS_DIR
+        / "tune_resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep.yaml"
+    )
+
+    assert tune_cfg.defaults == [
+        {"experiment": "resnet50_aig_adaptive_lambda_v1"},
+        {
+            "tuning": (
+                "resnet50_aig_adaptive_lambda_"
+                "checkpoint_history_four_gap_150ep_ordered"
+            )
+        },
+        "_self_",
+    ]
+    adaptive = tuning_cfg.training_arguments.adaptive_lambda
+    assert tuning_cfg.training_arguments.num_epochs == 150
+    assert tuning_cfg.scheduler.T_max == 150
+    assert adaptive.baseline_history_dir is None
+    assert adaptive.baseline_checkpoint_path == (
+        "outputs/runs/best_chech_resnet50_on_cifar10/checkpoints"
+    )
+    assert adaptive.update_every_epochs == 1
+    assert adaptive.log_step_init == "auto"
+    assert adaptive.lambda_max is None
+    assert tuning_cfg.tuning.study_name == (
+        "resnet50_aig_adaptive_lambda_checkpoint_history_four_gap_150ep_ordered"
+    )
+    assert tuning_cfg.tuning.n_trials == 4
+    assert tuning_cfg.tuning.repeats_per_trial == 1
+    assert tuning_cfg.tuning.n_jobs == 1
+    assert tuning_cfg.tuning.points_in_order is True
+    assert tuning_cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    points = OmegaConf.to_container(tuning_cfg.tuning.points, resolve=False)
+    gaps = [
+        (
+            point["training_arguments.adaptive_lambda.soft_drop"],
+            point["training_arguments.adaptive_lambda.hard_drop"],
+        )
+        for point in points
+    ]
+    assert gaps == [
+        (0.01, 0.02),
+        (0.0075, 0.015),
+        (-0.005, -0.00375),
+        (-0.01, -0.0075),
+    ]
+    assert (0.02, 0.04) not in gaps
+    assert [point["mlflow.tags.gap_sign"] for point in points] == [
+        "positive",
+        "positive",
+        "negative",
+        "negative",
+    ]
+    assert {point["model.lambda_coef"] for point in points} == {0.0001}
+    assert {point["mlflow.tags.baseline_reference"] for point in points} == {
+        "checkpoint_run_epoch_history"
+    }
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"150"}
 
 
 def test_resnet50_aig_adaptive_lambda_l1_p_vs_g_120ep_repeats7():

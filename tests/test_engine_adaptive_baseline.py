@@ -23,6 +23,7 @@ def _make_config(baseline_history_dir: str) -> object:
             "bypass_on_zero_lambda": False,
         },
         "training_arguments": {
+            "num_epochs": 2,
             "adaptive_lambda": {
                 "enabled": True,
                 "baseline_history_dir": baseline_history_dir,
@@ -85,6 +86,31 @@ def test_adaptive_lambda_auto_log_step_matches_missing_config_value():
     assert missing_controller.step == pytest.approx(expected)
     assert auto_controller.step == pytest.approx(expected)
     assert explicit_controller.step == pytest.approx(0.25)
+
+
+def test_adaptive_lambda_auto_log_step_uses_actual_initial_lambda():
+    training_arguments = OmegaConf.create(
+        {
+            "num_epochs": 150,
+            "adaptive_lambda": {
+                "enabled": True,
+                "warmup_epochs": 0,
+                "update_every_epochs": 1,
+                "lambda_max": None,
+                "log_step_init": "auto",
+            },
+        }
+    )
+
+    controller = engine._build_adaptive_lambda(
+        training_arguments,
+        _LambdaModel(lambda_coef=1e-4),
+    )
+
+    expected = math.log(10.0 / 1e-4) / 50.0
+    assert controller is not None
+    assert controller.step == pytest.approx(expected)
+    assert 1e-4 * math.exp(controller.step * 50) == pytest.approx(10.0)
 
 
 def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(tmp_path, monkeypatch):
@@ -156,7 +182,7 @@ def test_ensure_adaptive_baseline_reference_reuses_existing_history_without_reru
     assert baseline_reference.generated_for_current_run is False
 
 
-def test_ensure_adaptive_baseline_reference_uses_best_checkpoint_accuracy(
+def test_ensure_adaptive_baseline_reference_uses_checkpoint_run_epoch_history(
     tmp_path,
     monkeypatch,
 ):
@@ -173,6 +199,13 @@ def test_ensure_adaptive_baseline_reference_uses_best_checkpoint_accuracy(
         },
         checkpoint_path,
     )
+    (tmp_path / "history.csv").write_text(
+        "epoch,valid_accuracy,epoch_time_sec\n"
+        "1,0.71,2.5\n"
+        "2,0.83,3.5\n"
+        "137,0.9432,4.0\n",
+        encoding="utf-8",
+    )
     config = _make_config("")
     config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
         checkpoint_dir
@@ -187,21 +220,62 @@ def test_ensure_adaptive_baseline_reference_uses_best_checkpoint_accuracy(
 
     assert baseline_reference is not None
     assert baseline_reference.checkpoint_path == checkpoint_path
-    assert baseline_reference.history_path == checkpoint_path
+    assert baseline_reference.root_dir == tmp_path
+    assert baseline_reference.history_path == tmp_path / "history.csv"
     assert baseline_reference.metric_name == "valid_accuracy"
-    assert baseline_reference.accuracy_by_epoch == {0: 0.9432}
-    assert baseline_reference.full_train_time_sec == 0.0
-    assert baseline_reference.num_epochs_executed == 0
+    assert baseline_reference.accuracy_by_epoch == {
+        1: 0.71,
+        2: 0.83,
+        137: 0.9432,
+    }
+    assert baseline_reference.full_train_time_sec == 10.0
+    assert baseline_reference.num_epochs_executed == 3
     assert baseline_reference.generated_for_current_run is False
 
     controller = engine._build_adaptive_lambda(
         config.training_arguments,
         _LambdaModel(),
         baseline_accuracy_by_epoch=baseline_reference.accuracy_by_epoch,
-        baseline_reference_source="baseline_checkpoint",
+        baseline_reference_source="baseline_checkpoint_history",
     )
     assert controller is not None
-    assert controller.summary_state()["reference_source"] == "baseline_checkpoint"
+    assert controller.summary_state()["reference_source"] == "baseline_checkpoint_history"
+    assert controller._resolve_reference_accuracy(2) == (2, 0.83)
+
+
+def test_checkpoint_baseline_rejects_constant_best_accuracy_without_history(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "best.pt"
+    torch.save(
+        {"epoch": 7, "metrics": {"valid_accuracy": 0.95}},
+        checkpoint_path,
+    )
+    config = _make_config("")
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
+        checkpoint_path
+    )
+
+    with pytest.raises(FileNotFoundError, match="history.csv for epoch-aligned accuracy"):
+        engine._ensure_adaptive_baseline_reference(config)
+
+
+def test_checkpoint_baseline_requires_accuracy_for_every_training_epoch(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "best.pt"
+    torch.save({"epoch": 2}, checkpoint_path)
+    (tmp_path / "history.csv").write_text(
+        "epoch,valid_accuracy\n1,0.71\n",
+        encoding="utf-8",
+    )
+    config = _make_config("")
+    config.training_arguments.adaptive_lambda.baseline_checkpoint_path = str(
+        checkpoint_path
+    )
+
+    with pytest.raises(ValueError, match="missing epochs: 2"):
+        engine._ensure_adaptive_baseline_reference(config)
 
 
 def test_adaptive_baseline_rejects_history_and_checkpoint_at_the_same_time(tmp_path):

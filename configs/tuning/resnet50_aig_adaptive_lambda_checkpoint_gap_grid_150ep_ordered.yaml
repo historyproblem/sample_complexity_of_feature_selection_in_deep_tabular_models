@@ -1,16 +1,16 @@
 # @package _global_
 
-# One-pass AIG adaptive-lambda check against the fixed valid_accuracy stored in
-# best.pt under baseline_checkpoint_path. No structural or cyclic pruning is
-# enabled. The first point preserves the current 2/4 pp gaps as a control; the
-# remaining points tighten both thresholds while keeping hard_drop=2*soft_drop.
+# One-pass AIG adaptive-lambda check against the epoch-aligned valid_accuracy
+# from the dense baseline history. At epoch E, the controller compares against
+# the baseline accuracy from epoch E, never against the best checkpoint value.
+# No structural or cyclic pruning is enabled.
 
 training_arguments:
   num_epochs: 150
   adaptive_lambda:
     enabled: true
-    baseline_history_dir: null
-    baseline_checkpoint_path: outputs/runs/best_chech_resnet50_on_cifar10/checkpoints
+    baseline_history_dir: outputs/baselines/resnet50_aig_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
+    baseline_checkpoint_path: null
     lambda_max: null
     update_every_epochs: 2
     log_step_init: 0.23025850929940458
@@ -23,7 +23,7 @@ scheduler:
 tuning:
   enabled: true
   mode: "grid"
-  study_name: "resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep_ordered"
+  study_name: "resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep_ordered"
   direction: "maximize"
   objective_metric: "valid_accuracy"
   n_trials: 5
@@ -43,65 +43,65 @@ tuning:
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: 0.02
       training_arguments.adaptive_lambda.hard_drop: 0.04
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_gap_soft020_hard040_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_gap_soft020_hard040_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "0.02"
       mlflow.tags.hard_drop: "0.04"
       mlflow.tags.gap_pair_pp: "2.0/4.0"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: 0.015
       training_arguments.adaptive_lambda.hard_drop: 0.03
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_gap_soft015_hard030_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_gap_soft015_hard030_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "0.015"
       mlflow.tags.hard_drop: "0.03"
       mlflow.tags.gap_pair_pp: "1.5/3.0"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: 0.01
       training_arguments.adaptive_lambda.hard_drop: 0.02
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_gap_soft010_hard020_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_gap_soft010_hard020_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "0.01"
       mlflow.tags.hard_drop: "0.02"
       mlflow.tags.gap_pair_pp: "1.0/2.0"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: 0.0075
       training_arguments.adaptive_lambda.hard_drop: 0.015
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_gap_soft0075_hard015_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_gap_soft0075_hard015_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "0.0075"
       mlflow.tags.hard_drop: "0.015"
       mlflow.tags.gap_pair_pp: "0.75/1.5"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
     - model.lambda_coef: 0.0001
       training_arguments.adaptive_lambda.soft_drop: 0.005
       training_arguments.adaptive_lambda.hard_drop: 0.01
-      mlflow.run_name: resnet50_aig_adaptive_lambda_checkpoint_gap_soft005_hard010_150ep
-      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_gap_grid_150ep
+      mlflow.run_name: resnet50_aig_adaptive_lambda_epoch_aligned_gap_soft005_hard010_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_epoch_aligned_gap_grid_150ep
       mlflow.tags.optimizer: "AdamW"
       mlflow.tags.initial_lambda: "0.0001"
       mlflow.tags.soft_drop: "0.005"
       mlflow.tags.hard_drop: "0.01"
       mlflow.tags.gap_pair_pp: "0.5/1.0"
-      mlflow.tags.baseline_reference: "best_checkpoint_valid_accuracy"
+      mlflow.tags.baseline_reference: "epoch_aligned_baseline_history"
       mlflow.tags.physical_pruning: "disabled"
       mlflow.tags.num_epochs: "150"
