@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 
@@ -854,6 +855,92 @@ def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_rec
     assert scheduler_cfg.scheduler.eta_min == 0.0
     assert train_cfg.training_arguments.num_epochs == 200
     assert data_cfg.dataloaders.batch_size == 128
+
+
+def test_archived_resnet50_adamw_baseline_extends_cosine_recipe_to_300_epochs():
+    with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
+        cfg = compose(
+            config_name="train",
+            overrides=[
+                "experiment=best_practice_resnet50_adamw_300ep_on_cifar10"
+            ],
+        )
+
+    assert cfg.dataloaders.taskname == "CIFAR10"
+    assert cfg.dataloaders.train_val_ratio == [0.9, 0.1]
+    assert cfg.dataloaders.batch_size == 128
+
+    assert cfg.model.backbone._target_ == "net_complexity.wrappers.ResNet50"
+    assert cfg.model.backbone.num_classes == 10
+    assert cfg.model.backbone.stem_kernel_size == 3
+    assert cfg.model.backbone.stem_stride == 1
+    assert cfg.model.backbone.stem_padding == 1
+    assert cfg.model.backbone.use_maxpool is False
+    assert cfg.model.lambda_coef == 0.0
+
+    assert cfg.optimizer._target_ == "torch.optim.AdamW"
+    assert cfg.optimizer.lr == 0.001
+    assert cfg.optimizer.weight_decay == 0.0005
+    assert cfg.scheduler._target_ == "torch.optim.lr_scheduler.CosineAnnealingLR"
+    assert cfg.scheduler.T_max == 300
+    assert cfg.scheduler.eta_min == 0.0
+    assert cfg.scheduler.interval == "epoch"
+
+    assert cfg.training_arguments.num_epochs == 300
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.enabled is False
+    assert cfg.training_arguments.gradient_norm_logging.enabled is True
+    assert cfg.training_arguments.gradient_norm_logging.log_per_layer is True
+    assert cfg.training_arguments.gradient_norm_logging.every_n_batches == 1
+    assert cfg.mlflow.run_name == "best_practice_resnet50_adamw_300ep_on_cifar10"
+    assert cfg.mlflow.tags.source_recipe == (
+        "20260731_041514_best_practice_resnet50_on_cifar10"
+    )
+
+
+def test_resnet50_aig_300ep_pipeline_uses_dense_epoch_aligned_baseline_and_two_gaps():
+    with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
+        cfg = compose(
+            config_name=(
+                "tune_resnet50_aig_adaptive_lambda_checkpoint_history_"
+                "gap_1_2_2_4_300ep"
+            )
+        )
+
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert cfg.training_arguments.num_epochs == 300
+    assert cfg.scheduler.T_max == 300
+    assert adaptive.enabled is True
+    assert adaptive.baseline_history_dir is None
+    assert adaptive.baseline_checkpoint_path == (
+        "outputs/baselines/resnet50_adamw_cifar10_300ep/checkpoints/best.pt"
+    )
+    assert adaptive.baseline_checkpoint_history_path == (
+        "outputs/baselines/resnet50_adamw_cifar10_300ep/history.csv"
+    )
+    assert adaptive.lambda_max is None
+    assert adaptive.update_every_epochs == 1
+    assert adaptive.log_step_init == "auto"
+
+    assert cfg.tuning.n_trials == 2
+    assert cfg.tuning.repeats_per_trial == 1
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.points_in_order is True
+    assert cfg.tuning.pruner._target_ == "optuna.pruners.NopPruner"
+
+    points = OmegaConf.to_container(cfg.tuning.points, resolve=False)
+    assert [
+        (
+            point["training_arguments.adaptive_lambda.soft_drop"],
+            point["training_arguments.adaptive_lambda.hard_drop"],
+        )
+        for point in points
+    ] == [(0.01, 0.02), (0.02, 0.04)]
+    assert {point["model.lambda_coef"] for point in points} == {0.0001}
+    assert {point["mlflow.tags.num_epochs"] for point in points} == {"300"}
+    assert {point["mlflow.tags.baseline_reference"] for point in points} == {
+        "checkpoint_run_epoch_history"
+    }
 
 
 def test_aig_optuna_profile_tunes_temperature_around_zero_lambda_baseline():

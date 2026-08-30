@@ -1,0 +1,45 @@
+# @package _global_
+
+# Reproduces the training recipe stored in
+# 20260731_041514_best_practice_resnet50_on_cifar10/config_resolved.yaml.
+# Only the training horizon and cosine-scheduler horizon change from 200 to 300.
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: classification
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+training_arguments:
+  num_epochs: 300
+  gradient_norm_logging:
+    enabled: true
+    log_per_layer: true
+    every_n_batches: 1
+
+scheduler:
+  T_max: 300
+
+mlflow:
+  enabled: true
+  experiment_name: "final_experiments"
+  run_name: "best_practice_resnet50_adamw_300ep_on_cifar10"
+  tags:
+    model_type: "ResNet50"
+    method: "plain"
+    dataset: "cifar10"
+    optimizer: "AdamW"
+    recipe: "best_practice_resnet50_adamw_300ep_on_cifar10"
+    source_recipe: "20260731_041514_best_practice_resnet50_on_cifar10"
+    num_epochs: "300"
