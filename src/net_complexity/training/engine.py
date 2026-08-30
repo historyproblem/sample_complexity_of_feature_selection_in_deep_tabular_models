@@ -32,6 +32,7 @@ EpochEndCallback = Callable[
     None,
 ]
 ProgressContext = Mapping[str, Any]
+ModelInitializer = Callable[[nn.Module], None]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
@@ -2160,6 +2161,7 @@ def run_training(
     config: DictConfig,
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
+    model_initializer: ModelInitializer | None = None,
 ) -> dict[str, Any]:
     baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
         config,
@@ -2186,6 +2188,7 @@ def run_training(
         and bool(getattr(channel_pruning_cfg, "enabled", True))
     )
 
+    apply_soft_channel_mask = False
     if depgraph_pruning_enabled:
         # DepGraph baseline: build a torch-pruning-pruned model from a plain
         # trained checkpoint instead of instantiating the full model from config.
@@ -2210,11 +2213,19 @@ def run_training(
         )
         model = build_structurally_pruned_model_from_config(config, channel_pruning_cfg)
     else:
-        # Standard path: instantiate from config, then optionally apply soft mask.
+        # Standard path: instantiate from config. A cyclic weight initializer,
+        # when supplied, must run before the cumulative soft mask is re-applied:
+        # the previous checkpoint contains the previous cycle's channel_mask
+        # buffers and must not be allowed to undo newly committed drops.
         model = instantiate(config.model)
-        if pruning_enabled:
-            from net_complexity.models.channel_pruning import apply_channel_mask_from_config
-            apply_channel_mask_from_config(model, channel_pruning_cfg)
+        apply_soft_channel_mask = pruning_enabled
+
+    if model_initializer is not None:
+        model_initializer(model)
+
+    if apply_soft_channel_mask:
+        from net_complexity.models.channel_pruning import apply_channel_mask_from_config
+        apply_channel_mask_from_config(model, channel_pruning_cfg)
 
     layer_skipping_cfg = getattr(config, "layer_skipping", None)
     if layer_skipping_cfg is not None and bool(getattr(layer_skipping_cfg, "enabled", True)):
@@ -2256,6 +2267,7 @@ def run_training(
         ),
         "parallel_training": False,
     }
+    runtime_snapshot["model_initializer_applied"] = model_initializer is not None
     if baseline_accuracy_reference is not None:
         runtime_snapshot["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),

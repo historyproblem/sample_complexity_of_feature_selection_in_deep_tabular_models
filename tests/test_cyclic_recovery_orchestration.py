@@ -184,3 +184,114 @@ def test_cyclic_channel_pruning_accumulates_disabled_channels_and_prunes_structu
     assert result["final_disabled_channels"] == {"backbone.layer2.0.gumbel_layer": [0]}
     assert result["final_result"] is result["recovery_results"][-1]
     assert (tmp_path / "cyclic_summary.json").exists()
+
+
+def test_cyclic_channel_pruning_hands_recovery_weights_to_next_search(
+    tmp_path, monkeypatch
+):
+    config = _make_channel_config()
+    config.cyclic_channel_pruning.weight_handoff = OmegaConf.create(
+        {
+            "enabled": True,
+            "checkpoint_name": "best.pt",
+            "initial_checkpoint": None,
+            "initial_run_dir": None,
+        }
+    )
+    calls: list[dict] = []
+    initializer_events: list[tuple] = []
+    cycle_metrics = [
+        {
+            "valid_backbone.layer2.0.gumbel_layer.channel_000_zero_prob": 0.9,
+            "valid_backbone.layer2.0.gumbel_layer.channel_001_zero_prob": 0.1,
+        },
+        {
+            "valid_backbone.layer2.0.gumbel_layer.channel_001_zero_prob": 0.1,
+        },
+    ]
+
+    def _search_to_structural(_cfg, checkpoint_path):
+        initializer_events.append(("search_to_structural", checkpoint_path))
+        return lambda _model: None
+
+    def _next_search(
+        _cfg,
+        disabled_channels,
+        previous_search_checkpoint,
+        previous_recovery_checkpoint,
+    ):
+        initializer_events.append(
+            (
+                "next_search",
+                dict(disabled_channels),
+                previous_search_checkpoint,
+                previous_recovery_checkpoint,
+            )
+        )
+        return lambda _model: None
+
+    def _fake_run_training(
+        cfg,
+        epoch_end_callback=None,
+        progress_context=None,
+        model_initializer=None,
+    ):
+        del epoch_end_callback, progress_context
+        is_recovery = float(cfg.model.lambda_coef) == 0.0
+        run_dir = tmp_path / f"fake_run_{len(calls)}"
+        checkpoints_dir = run_dir / "checkpoints"
+        checkpoints_dir.mkdir(parents=True)
+        (checkpoints_dir / "best.pt").write_bytes(b"checkpoint-placeholder")
+        calls.append(
+            {
+                "is_recovery": is_recovery,
+                "has_initializer": model_initializer is not None,
+                "run_dir": run_dir,
+            }
+        )
+        if is_recovery:
+            return {
+                "run_dir": str(run_dir),
+                "full_train_time_sec": 1.0,
+                "num_epochs_executed": int(cfg.training_arguments.num_epochs),
+            }
+        search_step = sum(not call["is_recovery"] for call in calls) - 1
+        return {
+            "run_dir": str(run_dir),
+            "last_valid_metrics": cycle_metrics[min(search_step, 1)],
+            "full_train_time_sec": 1.0,
+            "num_epochs_executed": int(cfg.training_arguments.num_epochs),
+        }
+
+    monkeypatch.setattr(cyclic_channel_pruning, "run_training", _fake_run_training)
+    monkeypatch.setattr(
+        cyclic_channel_pruning,
+        "_search_to_structural_initializer",
+        _search_to_structural,
+    )
+    monkeypatch.setattr(
+        cyclic_channel_pruning,
+        "_next_search_initializer",
+        _next_search,
+    )
+
+    result = cyclic_channel_pruning.run_cyclic_channel_pruning_training(
+        config,
+        output_root=tmp_path / "cyclic",
+    )
+
+    assert [call["has_initializer"] for call in calls] == [False, True, True, True]
+    assert [event[0] for event in initializer_events] == [
+        "search_to_structural",
+        "next_search",
+        "search_to_structural",
+    ]
+    assert initializer_events[1][1] == {
+        "backbone.layer2.0.gumbel_layer": [0]
+    }
+    assert result["weight_handoff"] == {
+        "enabled": True,
+        "checkpoint_name": "best.pt",
+        "initial_checkpoint": None,
+        "optimizer_state_transferred": False,
+    }

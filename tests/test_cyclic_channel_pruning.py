@@ -1,6 +1,7 @@
 from functools import partial
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 from net_complexity.models.feature_selection import (
@@ -14,6 +15,7 @@ from net_complexity.training.cyclic_channel_pruning import (
     _channels_to_drop,
     _channels_to_drop_by_param_budget,
     _extract_channel_probs,
+    _initial_checkpoint_initializer,
     _merge_disabled_channels,
     _read_initial_disabled_channels,
     _set_disabled_channels_soft,
@@ -233,3 +235,41 @@ def test_read_initial_disabled_channels_reads_explicit_mask():
         }
     )
     assert _read_initial_disabled_channels(config) == {"backbone.layer2.0.gumbel_layer": [0, 2]}
+
+
+def test_initial_dense_checkpoint_warm_starts_gated_backbone(tmp_path):
+    dense_model = ClassificationFeatureSelectionWrapper(
+        backbone=ResNet50(
+            num_classes=5,
+            in_channels=3,
+            stem_kernel_size=3,
+            stem_stride=1,
+            stem_padding=1,
+            use_maxpool=False,
+        ),
+        lambda_coef=0.0,
+    )
+    with torch.no_grad():
+        dense_model.backbone.layer2[0].conv2.weight.fill_(0.125)
+        dense_model.backbone.layer2[0].batch_norm2.bias.fill_(0.75)
+    checkpoint_path = tmp_path / "dense.pt"
+    torch.save({"model_state_dict": dense_model.state_dict()}, checkpoint_path)
+
+    gated_model = _make_internal_width_wrapper()
+    gate_logits_before = (
+        gated_model.backbone.layer2[0].mid1_gumbel_layer.logits.detach().clone()
+    )
+    _initial_checkpoint_initializer(checkpoint_path)(gated_model)
+
+    torch.testing.assert_close(
+        gated_model.backbone.layer2[0].conv2.weight,
+        dense_model.backbone.layer2[0].conv2.weight,
+    )
+    torch.testing.assert_close(
+        gated_model.backbone.layer2[0].batch_norm2.bias,
+        dense_model.backbone.layer2[0].batch_norm2.bias,
+    )
+    torch.testing.assert_close(
+        gated_model.backbone.layer2[0].mid1_gumbel_layer.logits,
+        gate_logits_before,
+    )

@@ -45,6 +45,12 @@ Each cycle re-uses the existing ``channel_pruning`` mechanism end to end:
     level in the trajectory gets a clean accuracy/compute reading. The last
     recovery pass uses ``final_epochs`` (falling back to ``recovery_epochs``).
 
+With ``weight_handoff.enabled=true``, each structural recovery is initialized
+by slicing the current gated checkpoint. Its fine-tuned surviving Conv/BN
+tensors are then scattered into the full-width, permanently masked carrier of
+the next search cycle. Gate logits also continue from the preceding search.
+Optimizer state is deliberately rebuilt because parameter shapes differ.
+
 Config section (``cyclic_channel_pruning``)::
 
     cyclic_channel_pruning:
@@ -60,6 +66,11 @@ Config section (``cyclic_channel_pruning``)::
       recovery_epochs: 15           # epochs for each intermediate recovery pass
       final_epochs: 100             # epochs for the *last* recovery pass
       disable_mlflow_for_cycles: false
+      weight_handoff:
+        enabled: true
+        checkpoint_name: best.pt
+        initial_checkpoint: null     # optional dense/plain warm start
+        initial_run_dir: null
 
 Requires ``model.backbone.resnet_block`` to be
 ``net_complexity.wrappers.MaskedGumbelBottleneckLayer`` (see
@@ -73,8 +84,10 @@ import re
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+import torch
+from hydra.utils import instantiate as hydra_instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .cyclic_aig import _configure_run_history, _set_num_epochs, _set_run_name
@@ -363,6 +376,7 @@ def _run_recovery_pass(
     cycle_idx: int,
     is_final: bool,
     progress_context: dict[str, Any] | None,
+    model_initializer: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     cyclic_cfg = base_config.cyclic_channel_pruning
     stage_name = "final" if is_final else f"cycle_{cycle_idx}_recovery"
@@ -392,7 +406,13 @@ def _run_recovery_pass(
     if hasattr(cfg, "mlflow"):
         OmegaConf.update(cfg, "mlflow.enabled", True, merge=False)
 
-    return run_training(cfg, progress_context=progress_context)
+    if model_initializer is None:
+        return run_training(cfg, progress_context=progress_context)
+    return run_training(
+        cfg,
+        progress_context=progress_context,
+        model_initializer=model_initializer,
+    )
 
 
 def _read_initial_disabled_channels(config: DictConfig) -> dict[str, list[int]]:
@@ -406,6 +426,162 @@ def _read_initial_disabled_channels(config: DictConfig) -> dict[str, list[int]]:
     if not isinstance(raw, dict):
         return {}
     return {str(k): sorted(int(ch) for ch in v) for k, v in raw.items()}
+
+
+# ---------------------------------------------------------------------------
+# Cross-cycle model-weight handoff.
+# ---------------------------------------------------------------------------
+
+def _weight_handoff_config(config: DictConfig) -> DictConfig | None:
+    cyclic_cfg = config.cyclic_channel_pruning
+    handoff_cfg = getattr(cyclic_cfg, "weight_handoff", None)
+    if handoff_cfg is None or not bool(getattr(handoff_cfg, "enabled", False)):
+        return None
+    return handoff_cfg
+
+
+def _handoff_checkpoint_name(config: DictConfig) -> str:
+    handoff_cfg = _weight_handoff_config(config)
+    return str(getattr(handoff_cfg, "checkpoint_name", "best.pt")) if handoff_cfg else "best.pt"
+
+
+def _result_checkpoint_path(result: Mapping[str, Any], checkpoint_name: str) -> Path:
+    run_dir = result.get("run_dir")
+    if not run_dir:
+        raise ValueError(
+            "Cyclic channel weight handoff requires run_training() to return run_dir."
+        )
+    checkpoint_path = Path(str(run_dir)) / "checkpoints" / checkpoint_name
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Weight-handoff checkpoint was not created: {checkpoint_path}"
+        )
+    return checkpoint_path
+
+
+def _checkpoint_model_state(checkpoint_path: Path) -> Mapping[str, torch.Tensor]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    state = checkpoint.get("model_state_dict", checkpoint)
+    if not isinstance(state, Mapping):
+        raise TypeError(
+            f"Checkpoint {checkpoint_path} does not contain a model_state_dict mapping."
+        )
+    return state
+
+
+def _load_checkpoint_strict(model, checkpoint_path: Path) -> None:
+    model.load_state_dict(_checkpoint_model_state(checkpoint_path), strict=True)
+
+
+def _resolve_initial_checkpoint(config: DictConfig) -> Path | None:
+    handoff_cfg = _weight_handoff_config(config)
+    if handoff_cfg is None:
+        return None
+    explicit = getattr(handoff_cfg, "initial_checkpoint", None)
+    if explicit:
+        checkpoint_path = Path(str(explicit))
+    else:
+        initial_run_dir = getattr(handoff_cfg, "initial_run_dir", None)
+        if not initial_run_dir:
+            return None
+        checkpoint_path = (
+            Path(str(initial_run_dir))
+            / "checkpoints"
+            / _handoff_checkpoint_name(config)
+        )
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Initial cyclic channel checkpoint not found: {checkpoint_path}"
+        )
+    return checkpoint_path
+
+
+def _initial_checkpoint_initializer(checkpoint_path: Path) -> Callable[[Any], None]:
+    state = _checkpoint_model_state(checkpoint_path)
+
+    def initialize(model) -> None:
+        incompatible = model.load_state_dict(state, strict=False)
+        unexpected = list(incompatible.unexpected_keys)
+        missing_non_gate = [
+            key for key in incompatible.missing_keys if "gumbel_layer" not in key
+        ]
+        if unexpected or missing_non_gate:
+            raise ValueError(
+                "Initial checkpoint is not compatible with the gated ResNet: "
+                f"unexpected={unexpected[:5]}, missing_non_gate={missing_non_gate[:5]}."
+            )
+        print(
+            f"[cyclic_channel_pruning] Warm-started gated search from {checkpoint_path} "
+            f"({len(incompatible.missing_keys)} gate tensor(s) initialized from config)."
+        )
+
+    return initialize
+
+
+def _search_to_structural_initializer(
+    search_config: DictConfig,
+    search_checkpoint: Path,
+) -> Callable[[Any], None]:
+    from net_complexity.models.channel_pruning import transfer_gated_weights_to_structural
+
+    source_model = hydra_instantiate(search_config.model)
+    _load_checkpoint_strict(source_model, search_checkpoint)
+
+    def initialize(structural_model) -> None:
+        transfer_gated_weights_to_structural(source_model, structural_model)
+        print(
+            "[cyclic_channel_pruning] Initialized structural recovery with "
+            f"surviving weights from {search_checkpoint}."
+        )
+
+    return initialize
+
+
+def _structural_model_from_checkpoint(
+    base_config: DictConfig,
+    disabled_channels: dict[str, list[int]],
+    checkpoint_path: Path,
+):
+    from net_complexity.models.channel_pruning import (
+        build_structurally_pruned_model_from_config,
+    )
+
+    structural_cfg = deepcopy(base_config)
+    _set_disabled_channels_structural(structural_cfg, disabled_channels)
+    model = build_structurally_pruned_model_from_config(
+        structural_cfg,
+        structural_cfg.channel_pruning,
+    )
+    _load_checkpoint_strict(model, checkpoint_path)
+    return model
+
+
+def _next_search_initializer(
+    base_config: DictConfig,
+    disabled_channels: dict[str, list[int]],
+    previous_search_checkpoint: Path,
+    previous_recovery_checkpoint: Path,
+) -> Callable[[Any], None]:
+    from net_complexity.models.channel_pruning import transfer_structural_weights_to_gated
+
+    recovered_model = _structural_model_from_checkpoint(
+        base_config,
+        disabled_channels,
+        previous_recovery_checkpoint,
+    )
+    previous_search_state = _checkpoint_model_state(previous_search_checkpoint)
+
+    def initialize(gated_model) -> None:
+        # Restore gate logits and the full-width carrier first, then overwrite
+        # every surviving Conv/BN tensor with its fine-tuned recovery value.
+        gated_model.load_state_dict(previous_search_state, strict=True)
+        transfer_structural_weights_to_gated(recovered_model, gated_model)
+        print(
+            "[cyclic_channel_pruning] Carried recovered surviving weights into "
+            "the next gated search cycle."
+        )
+
+    return initialize
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +621,11 @@ def run_cyclic_channel_pruning_training(
     disabled_channels: dict[str, list[int]] = _read_initial_disabled_channels(config)
     cycle_results: list[dict[str, Any]] = []
     recovery_results: list[dict[str, Any]] = []
+    handoff_enabled = _weight_handoff_config(config) is not None
+    checkpoint_name = _handoff_checkpoint_name(config)
+    initial_checkpoint = _resolve_initial_checkpoint(config)
+    previous_search_checkpoint: Path | None = None
+    previous_recovery_checkpoint: Path | None = None
 
     _banner = "=" * 60
 
@@ -463,8 +644,32 @@ def run_cyclic_channel_pruning_training(
         print(_banner)
 
         cycle_cfg = _build_search_cycle_config(config, cycle, disabled_channels, output_root)
-        result = run_training(cycle_cfg, progress_context=progress_context)
+        search_initializer = None
+        if handoff_enabled:
+            if previous_search_checkpoint is not None and previous_recovery_checkpoint is not None:
+                search_initializer = _next_search_initializer(
+                    config,
+                    disabled_channels,
+                    previous_search_checkpoint,
+                    previous_recovery_checkpoint,
+                )
+            elif initial_checkpoint is not None:
+                search_initializer = _initial_checkpoint_initializer(initial_checkpoint)
+
+        if search_initializer is None:
+            result = run_training(cycle_cfg, progress_context=progress_context)
+        else:
+            result = run_training(
+                cycle_cfg,
+                progress_context=progress_context,
+                model_initializer=search_initializer,
+            )
         cycle_results.append(result)
+        search_checkpoint = (
+            _result_checkpoint_path(result, checkpoint_name)
+            if handoff_enabled
+            else None
+        )
 
         valid_metrics = result.get("last_valid_metrics", {})
         channel_probs = _extract_channel_probs(valid_metrics)
@@ -472,8 +677,6 @@ def run_cyclic_channel_pruning_training(
         if drop_mode == "threshold":
             new_drop = _channels_to_drop(channel_probs, threshold, disabled_channels)
             if threshold_max_param_fraction is not None and new_drop:
-                from hydra.utils import instantiate as hydra_instantiate
-
                 probe_model = hydra_instantiate(cycle_cfg.model)
                 total_params = sum(p.numel() for p in probe_model.parameters())
                 capped = _cap_channels_to_drop_by_param_budget(
@@ -489,8 +692,6 @@ def run_cyclic_channel_pruning_training(
                     )
                 new_drop = capped
         else:
-            from hydra.utils import instantiate as hydra_instantiate
-
             probe_model = hydra_instantiate(cycle_cfg.model)
             total_params = sum(p.numel() for p in probe_model.parameters())
             new_drop = _channels_to_drop_by_param_budget(
@@ -512,6 +713,11 @@ def run_cyclic_channel_pruning_training(
             f" | disabled_channels={total_disabled}"
             f"{' | final' if is_final_recovery else ''}"
         )
+        recovery_initializer = (
+            _search_to_structural_initializer(cycle_cfg, search_checkpoint)
+            if search_checkpoint is not None
+            else None
+        )
         recovery_result = _run_recovery_pass(
             config,
             disabled_channels,
@@ -519,8 +725,15 @@ def run_cyclic_channel_pruning_training(
             cycle_idx=cycle,
             is_final=is_final_recovery,
             progress_context=progress_context,
+            model_initializer=recovery_initializer,
         )
         recovery_results.append(recovery_result)
+        if handoff_enabled:
+            previous_search_checkpoint = search_checkpoint
+            previous_recovery_checkpoint = _result_checkpoint_path(
+                recovery_result,
+                checkpoint_name,
+            )
 
         if converged:
             break
@@ -557,6 +770,12 @@ def run_cyclic_channel_pruning_training(
         "cycle_results": cycle_results,
         "recovery_results": recovery_results,
         "final_result": final_result,
+        "weight_handoff": {
+            "enabled": handoff_enabled,
+            "checkpoint_name": checkpoint_name,
+            "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
+            "optimizer_state_transferred": False,
+        },
         "training_cost": {
             "cycle_train_time_sec": cycle_train_time_sec,
             "recovery_train_time_sec": recovery_train_time_sec,

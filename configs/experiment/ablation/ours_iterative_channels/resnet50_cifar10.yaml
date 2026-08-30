@@ -66,6 +66,12 @@ cyclic_channel_pruning:
   final_epochs: 150
 
   disable_mlflow_for_cycles: false
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+    # Optional dense/plain warm start. Set either path directly or a run dir.
+    initial_checkpoint: null
+    initial_run_dir: null
 
 mlflow:
   enabled: true
