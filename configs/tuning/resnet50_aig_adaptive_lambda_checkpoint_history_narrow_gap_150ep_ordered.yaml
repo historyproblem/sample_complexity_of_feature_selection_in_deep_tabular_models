@@ -1,0 +1,102 @@
+# @package _global_
+
+# Three sequential 150-epoch AIG adaptive-lambda runs against the epoch-aligned
+# validation history of the strongest available baseline over epochs 1..150:
+# 20260731_041514_best_practice_resnet50_on_cifar10.
+#
+# The baseline was trained with AdamW (lr=1e-3, weight_decay=5e-4) and a
+# 200-epoch cosine schedule. Although these AIG runs stop after epoch 150,
+# T_max remains 200 so their learning-rate trajectory matches the baseline over
+# the complete comparison window.
+#
+# soft_drop and hard_drop are fractions, not percentage points. For example,
+# 0.0025 and 0.0050 mean accuracy drops of 0.25 and 0.50 percentage points.
+
+training_arguments:
+  num_epochs: 150
+  adaptive_lambda:
+    enabled: true
+    baseline_history_dir: null
+    baseline_checkpoint_path: outputs/runs/20260731_041514_best_practice_resnet50_on_cifar10/checkpoints/best.pt
+    baseline_checkpoint_history_path: outputs/runs/20260731_041514_best_practice_resnet50_on_cifar10/history.csv
+    lambda_max: null
+    update_every_epochs: 1
+    log_step_init: auto
+  batchnorm_recalibration:
+    enabled: false
+
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0005
+
+scheduler:
+  T_max: 200
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "resnet50_aig_adaptive_lambda_checkpoint_history_narrow_gap_150ep_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 3
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: 0.0025
+      training_arguments.adaptive_lambda.hard_drop: 0.0050
+      mlflow.run_name: resnet50_aig_checkpoint_history_gap_soft0025_hard0050_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_narrow_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "0.0025"
+      mlflow.tags.hard_drop: "0.0050"
+      mlflow.tags.gap_pair_pp: "0.25/0.50"
+      mlflow.tags.gap_sign: "positive"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.baseline_run: "20260731_041514_best_practice_resnet50_on_cifar10"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+      mlflow.tags.scheduler_t_max: "200"
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: 0.0040
+      training_arguments.adaptive_lambda.hard_drop: 0.0060
+      mlflow.run_name: resnet50_aig_checkpoint_history_gap_soft0040_hard0060_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_narrow_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "0.0040"
+      mlflow.tags.hard_drop: "0.0060"
+      mlflow.tags.gap_pair_pp: "0.40/0.60"
+      mlflow.tags.gap_sign: "positive"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.baseline_run: "20260731_041514_best_practice_resnet50_on_cifar10"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+      mlflow.tags.scheduler_t_max: "200"
+    - model.lambda_coef: 0.0001
+      training_arguments.adaptive_lambda.soft_drop: 0.0055
+      training_arguments.adaptive_lambda.hard_drop: 0.0080
+      mlflow.run_name: resnet50_aig_checkpoint_history_gap_soft0055_hard0080_150ep
+      mlflow.tags.recipe: resnet50_aig_adaptive_lambda_checkpoint_history_narrow_gap_150ep
+      mlflow.tags.optimizer: "AdamW"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.soft_drop: "0.0055"
+      mlflow.tags.hard_drop: "0.0080"
+      mlflow.tags.gap_pair_pp: "0.55/0.80"
+      mlflow.tags.gap_sign: "positive"
+      mlflow.tags.baseline_reference: "checkpoint_run_epoch_history"
+      mlflow.tags.baseline_run: "20260731_041514_best_practice_resnet50_on_cifar10"
+      mlflow.tags.physical_pruning: "disabled"
+      mlflow.tags.num_epochs: "150"
+      mlflow.tags.scheduler_t_max: "200"
