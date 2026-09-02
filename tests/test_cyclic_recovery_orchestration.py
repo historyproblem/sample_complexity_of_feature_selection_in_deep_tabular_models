@@ -183,6 +183,8 @@ def test_cyclic_channel_pruning_accumulates_disabled_channels_and_prunes_structu
     assert result["num_cycles_completed"] == 2
     assert result["final_disabled_channels"] == {"backbone.layer2.0.gumbel_layer": [0]}
     assert result["final_result"] is result["recovery_results"][-1]
+    assert result["weight_handoff"]["post_prune_training"] == "fresh_initialization"
+    assert result["training_cost"]["final_finetune_time_sec"] == 0.0
     assert (tmp_path / "cyclic_summary.json").exists()
 
 
@@ -293,5 +295,8 @@ def test_cyclic_channel_pruning_hands_recovery_weights_to_next_search(
         "enabled": True,
         "checkpoint_name": "best.pt",
         "initial_checkpoint": None,
+        "surviving_weights_transferred": True,
         "optimizer_state_transferred": False,
+        "post_prune_training": "fine_tune_surviving_weights",
     }
+    assert result["training_cost"]["final_finetune_time_sec"] == 1.0

@@ -774,11 +774,21 @@ def run_cyclic_channel_pruning_training(
             "enabled": handoff_enabled,
             "checkpoint_name": checkpoint_name,
             "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
+            "surviving_weights_transferred": handoff_enabled,
             "optimizer_state_transferred": False,
+            "post_prune_training": (
+                "fine_tune_surviving_weights"
+                if handoff_enabled
+                else "fresh_initialization"
+            ),
         },
         "training_cost": {
             "cycle_train_time_sec": cycle_train_time_sec,
             "recovery_train_time_sec": recovery_train_time_sec,
+            "final_finetune_time_sec": (
+                final_retrain_time_sec if handoff_enabled else 0.0
+            ),
+            # Kept for consumers of summaries produced before weight handoff.
             "final_retrain_time_sec": final_retrain_time_sec,
             "full_train_time_sec": full_train_time_sec,
             "num_epochs_executed": num_epochs_executed,

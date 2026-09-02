@@ -1,0 +1,66 @@
+# @package _global_
+#
+# Iterative channel pruning with cross-cycle weight handoff and the strict
+# 0.25/0.50 percentage-point adaptive-lambda accuracy band from the narrow-gap
+# ResNet50 AIG experiment. The values below are accuracy fractions:
+# soft_drop=0.0025 means 0.25 pp and hard_drop=0.005 means 0.50 pp.
+#
+# The accuracy thresholds are separate from g_prob_threshold: the former
+# control lambda during each search phase, while the latter commits channels
+# to structural pruning after a search phase.
+#
+# Launch from the repository root:
+#   .venv/bin/python src/net_complexity/cli/cyclic_train.py \
+#       --config-name cyclic_channel_train \
+#       experiment=ablation/ours_iterative_channels/resnet50_cifar10_adaptive_lambda_gap_0_25_0_50
+
+defaults:
+  - ablation/ours_iterative_channels/resnet50_cifar10
+  - _self_
+
+model:
+  # Match the initial lambda of the 0.25/0.50 pp narrow-gap point.
+  lambda_coef: 0.0001
+
+training_arguments:
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: true
+    warmup_epochs: 0
+    update_every_epochs: 1
+    acc_window: 3
+    baseline_history_dir: outputs/baselines/resnet50_gumbel_cifar10_no_pruning_temp_${model.backbone.resnet_block.temperature}
+    lambda_min: 1e-8
+    lambda_max: null
+    log_step_init: auto
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: false
+    soft_drop: 0.0025
+    hard_drop: 0.0050
+    # Cyclic structural recovery already fine-tunes after every pruning step.
+    recovery:
+      enabled: false
+
+cyclic_channel_pruning:
+  # Channel-selection threshold, independent of the accuracy band above.
+  g_prob_threshold: 0.1
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+    initial_checkpoint: null
+    initial_run_dir: null
+
+mlflow:
+  run_name: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_gap_soft0025_hard0050"
+  tags:
+    method: "ours_iterative_channels_adaptive_lambda"
+    recipe: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_lambda_gap_0_25_0_50"
+    adaptive_lambda: "enabled"
+    initial_lambda: "0.0001"
+    soft_drop: "0.0025"
+    hard_drop: "0.0050"
+    gap_pair_pp: "0.25/0.50"
+    channel_prune_threshold: "0.1"
+    weight_handoff: "enabled"
+    post_prune_training: "fine_tune_surviving_weights"
