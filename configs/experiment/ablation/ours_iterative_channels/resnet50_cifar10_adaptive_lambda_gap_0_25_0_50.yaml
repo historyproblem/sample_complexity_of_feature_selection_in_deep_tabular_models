@@ -15,7 +15,7 @@
 #       experiment=ablation/ours_iterative_channels/resnet50_cifar10_adaptive_lambda_gap_0_25_0_50
 
 defaults:
-  - ablation/ours_iterative_channels/resnet50_cifar10
+  - /experiment/ablation/ours_iterative_channels/resnet50_cifar10
   - _self_
 
 model:

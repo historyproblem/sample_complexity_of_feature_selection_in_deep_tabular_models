@@ -56,6 +56,7 @@ Config section (``cyclic_channel_pruning``)::
     cyclic_channel_pruning:
       enabled: true
       max_cycles: 10
+      stop_on_convergence: true    # false to exhaust a fixed epoch budget
 
       drop_mode: threshold          # "threshold" (default) or "param_budget"
       g_prob_threshold: 0.1         # used when drop_mode: threshold
@@ -601,6 +602,9 @@ def run_cyclic_channel_pruning_training(
     """
     cyclic_cfg = config.cyclic_channel_pruning
     max_cycles = int(cyclic_cfg.max_cycles)
+    stop_on_convergence = bool(
+        getattr(cyclic_cfg, "stop_on_convergence", True)
+    )
     drop_mode = str(getattr(cyclic_cfg, "drop_mode", "threshold"))
 
     if drop_mode not in _VALID_DROP_MODES:
@@ -701,12 +705,22 @@ def run_cyclic_channel_pruning_training(
         num_new = sum(len(v) for v in new_drop.values())
         converged = num_new == 0
         if converged:
-            print(f"Cycle {cycle + 1} | no channels selected for pruning — converged.")
+            convergence_action = (
+                "stopping after recovery"
+                if stop_on_convergence
+                else "continuing to exhaust the fixed cycle budget"
+            )
+            print(
+                f"Cycle {cycle + 1} | no channels selected for pruning — "
+                f"converged; {convergence_action}."
+            )
         else:
             print(f"Cycle {cycle + 1} | dropping {num_new} channel(s) across {len(new_drop)} block(s).")
             disabled_channels = _merge_disabled_channels(disabled_channels, new_drop)
 
-        is_final_recovery = converged or cycle == max_cycles - 1
+        is_final_recovery = (
+            converged and stop_on_convergence
+        ) or cycle == max_cycles - 1
         total_disabled = sum(len(v) for v in disabled_channels.values())
         print(
             f"\nCycle {cycle + 1} | recovery pass (structural, no regularization)"
@@ -735,7 +749,7 @@ def run_cyclic_channel_pruning_training(
                 checkpoint_name,
             )
 
-        if converged:
+        if converged and stop_on_convergence:
             break
 
     final_result = recovery_results[-1]
@@ -766,6 +780,7 @@ def run_cyclic_channel_pruning_training(
 
     cyclic_result = {
         "num_cycles_completed": len(cycle_results),
+        "stop_on_convergence": stop_on_convergence,
         "final_disabled_channels": disabled_channels,
         "cycle_results": cycle_results,
         "recovery_results": recovery_results,

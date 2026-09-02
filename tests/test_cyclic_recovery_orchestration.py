@@ -181,11 +181,64 @@ def test_cyclic_channel_pruning_accumulates_disabled_channels_and_prunes_structu
     assert recovery_calls[0]["mask"] == {"backbone.layer2.0.gumbel_layer": [0]}
 
     assert result["num_cycles_completed"] == 2
+    assert result["stop_on_convergence"] is True
     assert result["final_disabled_channels"] == {"backbone.layer2.0.gumbel_layer": [0]}
     assert result["final_result"] is result["recovery_results"][-1]
     assert result["weight_handoff"]["post_prune_training"] == "fresh_initialization"
     assert result["training_cost"]["final_finetune_time_sec"] == 0.0
     assert (tmp_path / "cyclic_summary.json").exists()
+
+
+def test_cyclic_channel_pruning_can_exhaust_fixed_150_epoch_budget(
+    tmp_path, monkeypatch
+):
+    config = _make_channel_config()
+    config.cyclic_channel_pruning.max_cycles = 4
+    config.cyclic_channel_pruning.stop_on_convergence = False
+    config.cyclic_channel_pruning.gumbel_epochs = 20
+    config.cyclic_channel_pruning.recovery_epochs = 10
+    config.cyclic_channel_pruning.final_epochs = 40
+    calls: list[dict] = []
+
+    def _fake_run_training(
+        cfg,
+        epoch_end_callback=None,
+        progress_context=None,
+        model_initializer=None,
+    ):
+        del epoch_end_callback, progress_context, model_initializer
+        is_recovery = float(cfg.model.lambda_coef) == 0.0
+        num_epochs = int(cfg.training_arguments.num_epochs)
+        calls.append({"is_recovery": is_recovery, "num_epochs": num_epochs})
+        if is_recovery:
+            return {
+                "full_train_time_sec": 1.0,
+                "num_epochs_executed": num_epochs,
+            }
+        return {
+            # No candidate is below the pruning threshold in any cycle.
+            "last_valid_metrics": {
+                "valid_backbone.layer2.0.gumbel_layer.channel_000_zero_prob": 0.1,
+            },
+            "full_train_time_sec": 1.0,
+            "num_epochs_executed": num_epochs,
+        }
+
+    monkeypatch.setattr(cyclic_channel_pruning, "run_training", _fake_run_training)
+
+    result = cyclic_channel_pruning.run_cyclic_channel_pruning_training(
+        config,
+        output_root=tmp_path,
+    )
+
+    search_epochs = [call["num_epochs"] for call in calls if not call["is_recovery"]]
+    recovery_epochs = [call["num_epochs"] for call in calls if call["is_recovery"]]
+    assert search_epochs == [20, 20, 20, 20]
+    assert recovery_epochs == [10, 10, 10, 40]
+    assert sum(call["num_epochs"] for call in calls) == 150
+    assert result["num_cycles_completed"] == 4
+    assert result["training_cost"]["num_epochs_executed"] == 150
+    assert result["stop_on_convergence"] is False
 
 
 def test_cyclic_channel_pruning_hands_recovery_weights_to_next_search(
