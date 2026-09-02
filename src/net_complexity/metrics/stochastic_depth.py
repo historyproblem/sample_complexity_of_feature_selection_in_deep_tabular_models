@@ -23,6 +23,13 @@ def _mean(values: list[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 
 
+def _uses_stochastic_eval(blocks: Mapping[str, nn.Module]) -> bool:
+    return any(
+        getattr(block, "eval_mode", "expected") == "stochastic"
+        for block in blocks.values()
+    )
+
+
 @dataclass(frozen=True)
 class _DenseFLOPsProfile:
     """FLOPs measured with every stochastic residual branch enabled."""
@@ -55,6 +62,8 @@ class StochasticDepthActiveBlocksMetric(BaseMetric):
         self.forward_active_blocks.append(active_blocks)
         if self.model.training:
             self.train_active_blocks.append(active_blocks)
+        else:
+            self.inference_active_blocks.append(active_blocks)
 
     def compute(self):
         if self.model is None:
@@ -69,6 +78,9 @@ class StochasticDepthActiveBlocksMetric(BaseMetric):
             float(block.survival_probability)
             for block in blocks.values()
         )
+        expected_inference_active_blocks = (
+            expected_active_blocks if _uses_stochastic_eval(blocks) else float(num_blocks)
+        )
         metrics = {
             "stochastic_depth_num_blocks": float(num_blocks),
             "stochastic_depth_expected_active_train_blocks": float(expected_active_blocks),
@@ -78,6 +90,14 @@ class StochasticDepthActiveBlocksMetric(BaseMetric):
                 else 0.0
             ),
             "stochastic_depth_average_active_blocks": _mean(self.forward_active_blocks),
+            "stochastic_depth_expected_inference_active_blocks": (
+                expected_inference_active_blocks
+            ),
+            "stochastic_depth_expected_inference_active_block_ratio": (
+                float(expected_inference_active_blocks / num_blocks)
+                if num_blocks > 0
+                else 0.0
+            ),
         }
         if self.train_active_blocks:
             metrics["stochastic_depth_actual_active_train_blocks"] = _mean(
@@ -86,21 +106,30 @@ class StochasticDepthActiveBlocksMetric(BaseMetric):
             metrics["stochastic_depth_actual_active_train_block_ratio"] = (
                 metrics["stochastic_depth_actual_active_train_blocks"] / num_blocks
             )
+        if self.inference_active_blocks:
+            metrics["stochastic_depth_actual_inference_active_blocks"] = _mean(
+                self.inference_active_blocks
+            )
+            metrics["stochastic_depth_actual_inference_active_block_ratio"] = (
+                metrics["stochastic_depth_actual_inference_active_blocks"] / num_blocks
+            )
         return metrics
 
     def reset(self):
         self.model = None
         self.forward_active_blocks: list[float] = []
         self.train_active_blocks: list[float] = []
+        self.inference_active_blocks: list[float] = []
 
 
 class StochasticDepthFLOPsMetric(BaseMetric):
-    """Dense inference and stochastic-depth training FLOPs.
+    """Dense reference, stochastic-depth training, and inference FLOPs.
 
     The static reference is measured by running the model once with all survival
-    probabilities set to one.  Huang stochastic depth uses that full graph at
-    inference, whereas a training forward only executes residual branches whose
-    Bernoulli masks are one.
+    probabilities set to one. In ``eval_mode=expected``, Huang stochastic depth
+    uses that full graph at inference. In ``eval_mode=stochastic``, inference
+    executes only residual branches whose Bernoulli masks are one, matching the
+    train-time depth sampling while the surrounding model remains in eval mode.
 
     ``ComputeCollector`` counts Conv/Linear forward FLOPs using ``FLOP = 2 *
     MAC``.  The forward+backward values are therefore explicit estimates:
@@ -137,13 +166,20 @@ class StochasticDepthFLOPsMetric(BaseMetric):
         if self.model is None or not isinstance(input, torch.Tensor) or input.ndim == 0:
             return
 
+        blocks = get_stochastic_depth_blocks(self.model)
+        if not blocks:
+            return
+
         batch_size = int(input.shape[0])
         if not self.model.training:
             self.inference_samples += batch_size
-            return
-
-        blocks = get_stochastic_depth_blocks(self.model)
-        if not blocks:
+            if _uses_stochastic_eval(blocks):
+                for name, block in blocks.items():
+                    gate = float(block.last_survival_mask.detach().float().item())
+                    self.inference_gate_sample_sums[name] = (
+                        self.inference_gate_sample_sums.get(name, 0.0)
+                        + gate * batch_size
+                    )
             return
 
         for name, block in blocks.items():
@@ -175,6 +211,25 @@ class StochasticDepthFLOPsMetric(BaseMetric):
         )
         expected_train_flops = always_computed_flops + expected_active_branch_flops
         expected_train_flops_per_sample = expected_train_flops / batch_size
+        stochastic_eval = _uses_stochastic_eval(blocks)
+        expected_inference_flops_per_sample = (
+            expected_train_flops_per_sample
+            if stochastic_eval
+            else full_inference_flops_per_sample
+        )
+        actual_inference_flops_per_sample = expected_inference_flops_per_sample
+        if self.inference_samples > 0 and stochastic_eval:
+            actual_active_branch_flops_per_sample = sum(
+                (branch_flops_by_name.get(name, 0.0) / batch_size)
+                * (
+                    self.inference_gate_sample_sums.get(name, 0.0)
+                    / self.inference_samples
+                )
+                for name in blocks
+            )
+            actual_inference_flops_per_sample = (
+                always_computed_flops / batch_size
+            ) + actual_active_branch_flops_per_sample
         train_forward_backward_multiplier = 1.0 + self.backward_flops_multiplier
 
         metrics = {
@@ -197,7 +252,10 @@ class StochasticDepthFLOPsMetric(BaseMetric):
                 full_inference_flops_per_sample
             ),
             "stochastic_depth_inference_forward_flops_per_sample": (
-                full_inference_flops_per_sample
+                actual_inference_flops_per_sample
+            ),
+            "stochastic_depth_expected_inference_forward_flops_per_sample": (
+                expected_inference_flops_per_sample
             ),
             "stochastic_depth_expected_train_forward_flops_per_sample": (
                 expected_train_flops_per_sample
@@ -219,8 +277,20 @@ class StochasticDepthFLOPsMetric(BaseMetric):
         if self.inference_samples > 0:
             metrics.update({
                 "stochastic_depth_inference_samples": float(self.inference_samples),
+                "stochastic_depth_actual_inference_forward_flops_per_sample": (
+                    actual_inference_flops_per_sample
+                ),
+                "stochastic_depth_actual_inference_flops_skip_ratio": (
+                    (
+                        full_inference_flops_per_sample
+                        - actual_inference_flops_per_sample
+                    )
+                    / full_inference_flops_per_sample
+                    if full_inference_flops_per_sample > 0.0
+                    else 0.0
+                ),
                 "stochastic_depth_inference_forward_flops_total": (
-                    full_inference_flops_per_sample * self.inference_samples
+                    actual_inference_flops_per_sample * self.inference_samples
                 ),
             })
 
@@ -288,6 +358,7 @@ class StochasticDepthFLOPsMetric(BaseMetric):
         self.model = None
         self.input_sample = None
         self.train_gate_sample_sums: dict[str, float] = {}
+        self.inference_gate_sample_sums: dict[str, float] = {}
         self.train_samples = 0
         self.inference_samples = 0
 

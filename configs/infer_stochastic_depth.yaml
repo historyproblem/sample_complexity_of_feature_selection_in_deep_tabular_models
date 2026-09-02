@@ -1,0 +1,28 @@
+defaults:
+  - data: cifar10_best_practice
+  - metrics: stochastic_depth
+  - _self_
+
+device: "cuda:0"
+
+inference:
+  # Each source can be a study directory, its runs directory, or one run.
+  sources:
+    - outputs/studies/20260819_221331_stochastic_depth_resnet50_pL_flops_grid_dense_10_09_08_07_05_03_ordered
+  checkpoint_name: best.pt
+  eval_mode: stochastic
+
+  # One repeat is one complete pass over the test set. Increase this to report
+  # mean/std over several independent stochastic-depth mask sequences.
+  num_repeats: 1
+  seed_base: 42
+
+  strict_checkpoint_loading: true
+  output_dir: outputs/analysis/${now:%Y%m%d_%H%M%S}_stochastic_depth_stochastic_inference
+
+hydra:
+  run:
+    dir: ${inference.output_dir}
+  output_subdir: .hydra
+  job:
+    chdir: false

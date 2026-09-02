@@ -9,6 +9,9 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
+from net_complexity.cli.infer_stochastic_depth import (
+    _set_stochastic_depth_inference_mode,
+)
 from net_complexity.metrics.stochastic_depth import StochasticDepthFLOPsMetric
 from net_complexity.models.stochastic_depth import (
     HuangStochasticDepthBottleneck,
@@ -138,6 +141,37 @@ def test_inference_flops_count_all_samples_on_the_dense_graph():
         "stochastic_depth_inference_forward_flops_total"
     ] == pytest.approx(3.0 * dense_forward)
     assert "stochastic_depth_actual_train_forward_flops_per_sample" not in computed
+
+
+def test_stochastic_inference_flops_count_only_sampled_residual_branches():
+    model = _TinyStochasticDepthNet().eval()
+    _set_stochastic_depth_inference_mode(model, "stochastic")
+    _force_all_train_masks(model, 0.0)
+
+    batch = torch.randn(3, 3, 8, 8)
+    metric = StochasticDepthFLOPsMetric(sample_size=1)
+    metric.update(batch, model(batch), torch.zeros(3), model)
+    computed = metric.compute()
+
+    dense_forward = computed[
+        "stochastic_depth_dense_reference_forward_flops_per_sample"
+    ]
+    always_forward = computed[
+        "stochastic_depth_always_computed_forward_flops_per_sample"
+    ]
+    assert computed[
+        "stochastic_depth_expected_inference_forward_flops_per_sample"
+    ] < dense_forward
+    assert computed[
+        "stochastic_depth_actual_inference_forward_flops_per_sample"
+    ] == pytest.approx(always_forward)
+    assert computed[
+        "stochastic_depth_inference_forward_flops_per_sample"
+    ] == pytest.approx(always_forward)
+    assert computed[
+        "stochastic_depth_inference_forward_flops_total"
+    ] == pytest.approx(3.0 * always_forward)
+    assert computed["stochastic_depth_actual_inference_flops_skip_ratio"] > 0.0
 
 
 def test_flops_sweep_has_dense_reference_then_five_stochastic_depth_runs():
