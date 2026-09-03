@@ -44,7 +44,7 @@ training_arguments:
 
 cyclic_channel_pruning:
   # Channel-selection threshold, independent of the accuracy band above.
-  g_prob_threshold: 0.1
+  g_prob_threshold: 0.7
   weight_handoff:
     enabled: true
     checkpoint_name: best.pt
@@ -61,6 +61,6 @@ mlflow:
     soft_drop: "0.0025"
     hard_drop: "0.0050"
     gap_pair_pp: "0.25/0.50"
-    channel_prune_threshold: "0.1"
+    channel_prune_threshold: "0.7"
     weight_handoff: "enabled"
     post_prune_training: "fine_tune_surviving_weights"

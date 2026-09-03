@@ -1,0 +1,34 @@
+# Four ordered Hydra jobs for the ResNet-50/CIFAR-10 iterative channel-pruning
+# epoch-allocation ablation. Every job uses p_open < 0.7, four pruning cycles,
+# weight handoff, and the same total budget of 150 epochs.
+#
+# Launch from the repository root:
+#   .venv/bin/python src/net_complexity/cli/cyclic_train.py \
+#       --config-name cyclic_channel_nightly
+
+defaults:
+  - experiment: ablation/ours_iterative_channels/resnet50_cifar10_adaptive_lambda_gap_0_25_0_50
+  - cyclic_schedule: four_cycles_150ep_search25_recovery5
+  - _self_
+
+mlflow:
+  run_name: "nightly_ours_iterative_channels_resnet50_cifar10_thr07_s${cyclic_channel_pruning.gumbel_epochs}_r${cyclic_channel_pruning.recovery_epochs}_f${cyclic_channel_pruning.final_epochs}_${cyclic_channel_pruning.max_cycles}cycles"
+  tags:
+    recipe: "nightly_ours_iterative_channels_resnet50_cifar10_thr07_epoch_allocation_150ep"
+    sweep: "search_recovery_epoch_allocation"
+    epoch_budget: "150"
+    max_cycles: "${cyclic_channel_pruning.max_cycles}"
+    stop_on_convergence: "${cyclic_channel_pruning.stop_on_convergence}"
+    search_epochs_per_cycle: "${cyclic_channel_pruning.gumbel_epochs}"
+    intermediate_recovery_epochs: "${cyclic_channel_pruning.recovery_epochs}"
+    final_recovery_epochs: "${cyclic_channel_pruning.final_epochs}"
+    channel_prune_threshold: "${cyclic_channel_pruning.g_prob_threshold}"
+
+hydra:
+  mode: MULTIRUN
+  sweep:
+    dir: ${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_nightly_ours_iterative_channels_resnet50_cifar10_thr07_150ep
+    subdir: ${hydra.job.num}_${mlflow.run_name}
+  sweeper:
+    params:
+      cyclic_schedule: four_cycles_150ep_search25_recovery5,four_cycles_150ep_search20_recovery10,four_cycles_150ep_search15_recovery15,four_cycles_150ep_search10_recovery20

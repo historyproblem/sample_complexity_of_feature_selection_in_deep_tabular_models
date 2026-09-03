@@ -2267,6 +2267,10 @@ def run_training(
         ),
         "parallel_training": False,
     }
+    runtime_snapshot["model_parameters"] = {
+        "total": int(total_params),
+        "trainable": int(trainable_params),
+    }
     runtime_snapshot["model_initializer_applied"] = model_initializer is not None
     if baseline_accuracy_reference is not None:
         runtime_snapshot["adaptive_lambda_baseline"] = {
@@ -2322,6 +2326,10 @@ def run_training(
         "best_metric_value": run_history.best_metric_value,
         "best_epoch": run_history.best_epoch,
         "seed": resolved_seed,
+        "model_parameters": {
+            "total": int(total_params),
+            "trainable": int(trainable_params),
+        },
     })
     if baseline_accuracy_reference is not None:
         result["adaptive_lambda_baseline"] = {

@@ -1,8 +1,8 @@
 # @package _global_
 #
 # Fixed 150-epoch, four-cycle variant of the 0.25/0.50 pp adaptive-lambda
-# iterative channel-pruning experiment. Each cycle always runs, even when an
-# intermediate search selects no new channels:
+# iterative channel-pruning experiment with p_open < 0.7 pruning. Each cycle
+# always runs, even when an intermediate search selects no new channels:
 #
 #   4 * 20 search + 3 * 10 intermediate recovery + 40 final recovery = 150
 #
@@ -26,9 +26,10 @@ cyclic_channel_pruning:
   final_epochs: 40
 
 mlflow:
-  run_name: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_gap_soft0025_hard0050_150ep_4cycles"
+  run_name: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_gap_soft0025_hard0050_thr07_s20_r10_f40_150ep_4cycles"
   tags:
-    recipe: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_lambda_gap_0_25_0_50_150ep_4cycles"
+    recipe: "ablation_ours_iterative_channels_resnet50_cifar10_adaptive_lambda_gap_0_25_0_50_thr07_s20_r10_f40_150ep_4cycles"
+    channel_prune_threshold: "0.7"
     epoch_budget: "150"
     max_cycles: "4"
     stop_on_convergence: "false"

@@ -52,7 +52,7 @@ cyclic_channel_pruning:
   enabled: true
   max_cycles: 10
   drop_mode: threshold
-  g_prob_threshold: 0.1
+  g_prob_threshold: 0.7
   threshold_max_param_fraction: 0.10
 
   # Epochs per intermediate Gumbel (search) cycle.
@@ -83,6 +83,7 @@ mlflow:
     dataset: "cifar10"
     recipe: "ablation_ours_iterative_channels_resnet50_cifar10"
     entropy_regularization: "plus_negative_entropy"
+    channel_prune_threshold: "${cyclic_channel_pruning.g_prob_threshold}"
 
 run_history:
   log_gate_history: true
