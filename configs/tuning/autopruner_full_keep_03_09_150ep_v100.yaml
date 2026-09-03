@@ -1,0 +1,92 @@
+# @package _global_
+
+# Full 150-epoch AutoPruner restart on one V100 32 GB.
+# Six keep ratios x one seed = 6 sequential runs. Extrapolating from the
+# 62-epoch archive gives roughly 14 hours; use an external allocation of at
+# least 16 hours. The timeout is a soft boundary checked between ratio points.
+dataloaders:
+  batch_size: 256
+  num_workers: 8
+  pin_memory: true
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "autopruner_full_resnet50_cifar10_keep_03_09_150ep"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 6
+  repeats_per_trial: 1
+  timeout: 54000
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 8
+    threshold: 0.0
+    max_attempts_per_repeat: 1
+  storage: null
+  load_if_exists: false
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.backbone.target_keep_ratio: 0.3
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_03_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_03"
+      mlflow.tags.target_keep_ratio: "0.3"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "true"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.5
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_05_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_05"
+      mlflow.tags.target_keep_ratio: "0.5"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "true"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.6
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_06_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_06"
+      mlflow.tags.target_keep_ratio: "0.6"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.7
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_07_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_07"
+      mlflow.tags.target_keep_ratio: "0.7"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.8
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_08_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_08"
+      mlflow.tags.target_keep_ratio: "0.8"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.9
+      mlflow.run_name: "autopruner_resnet50_cifar10_keep_09_150ep"
+      mlflow.tags.recipe: "autopruner_full_150ep_keep_09"
+      mlflow.tags.target_keep_ratio: "0.9"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"

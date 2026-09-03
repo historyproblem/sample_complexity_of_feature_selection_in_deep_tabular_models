@@ -697,6 +697,53 @@ def test_v100_extended_series_uses_exploratory_ratios_and_three_seeds():
     )
 
 
+def test_v100_full_restart_runs_all_ratios_for_exactly_150_epochs():
+    cfg = OmegaConf.load(
+        REPO_ROOT
+        / "configs/tuning/autopruner_full_keep_03_09_150ep_v100.yaml"
+    )
+    entry_cfg = OmegaConf.to_container(
+        OmegaConf.load(
+            REPO_ROOT
+            / "configs/tune_autopruner_resnet50_cifar10_full_150ep.yaml"
+        ),
+        resolve=False,
+    )
+
+    assert cfg.dataloaders.batch_size == 256
+    assert cfg.dataloaders.num_workers == 8
+    assert cfg.dataloaders.pin_memory is True
+    assert cfg.tuning.mode == "grid"
+    assert cfg.tuning.n_trials == 6
+    assert cfg.tuning.n_jobs == 1
+    assert cfg.tuning.repeats_per_trial == 1
+    assert cfg.tuning.seed_base == 42
+    assert cfg.tuning.seed_stride == 1
+    assert cfg.tuning.timeout == 54000
+    assert cfg.tuning.load_if_exists is False
+    assert cfg.tuning.points_in_order is True
+    assert [
+        point["model.backbone.target_keep_ratio"]
+        for point in cfg.tuning.points
+    ] == [0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
+    assert all(
+        point["mlflow.tags.training_epochs"] == "150"
+        and point["mlflow.tags.full_restart"] == "true"
+        for point in cfg.tuning.points
+    )
+    assert all(
+        point["mlflow.tags.author_training_hyperparameters"] == "false"
+        for point in cfg.tuning.points
+    )
+    assert entry_cfg["training_arguments"]["num_epochs"] == 150
+    assert entry_cfg["model"]["final_fine_tune_epochs"] == 118
+    assert 4 * AUTHOR_PRUNING_EPOCHS_PER_STAGE + 118 == 150
+    assert entry_cfg["model"]["pretrained_checkpoint"].endswith(
+        "outputs/runs/20260821_032217_762051_best_practice_resnet50_on_cifar10/"
+        "checkpoints/best.pt"
+    )
+
+
 def test_autopruner_experiment_enables_mlflow_tracking():
     cfg = OmegaConf.load(
         REPO_ROOT / "configs/experiment/autopruner_resnet50_cifar10.yaml"
