@@ -109,7 +109,8 @@ def test_runner_reuses_existing_baseline_without_retraining(tmp_path, monkeypatc
     ]
 
 
-def test_detached_child_receives_reused_baseline_checkpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize("full_recipe", [False, True])
+def test_detached_child_receives_reused_baseline_checkpoint(tmp_path, monkeypatch, full_recipe):
     runner = _load_runner_module()
     monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
     checkpoint = tmp_path / "existing" / "checkpoints" / "best.pt"
@@ -126,6 +127,7 @@ def test_detached_child_receives_reused_baseline_checkpoint(tmp_path, monkeypatc
     monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
     log_path = tmp_path / "outputs" / "logs" / "detached.log"
     status_path = log_path.with_suffix(".status.json")
+    tuning_config = runner.FULL_TUNING_CONFIG if full_recipe else runner.DEFAULT_TUNING_CONFIG
 
     runner._start_detached(
         repeats_per_ratio=3,
@@ -133,8 +135,11 @@ def test_detached_child_receives_reused_baseline_checkpoint(tmp_path, monkeypatc
         log_path=log_path,
         status_path=status_path,
         baseline_checkpoint=checkpoint,
+        tuning_config=tuning_config,
     )
 
+    config_option = observed["command"].index("--tuning-config")
+    assert observed["command"][config_option + 1] == tuning_config
     assert observed["command"][-2:] == [
         "--baseline-checkpoint",
         str(checkpoint),
@@ -178,3 +183,96 @@ def test_runner_records_failed_tuning_command_in_status_and_log(tmp_path, monkey
     log = log_path.read_text(encoding="utf-8")
     assert "synthetic tuning traceback" in log
     assert "AutoPruner series failed: CalledProcessError" in log
+
+
+@pytest.mark.parametrize("full_recipe, expected_repeats", [(False, 3), (True, 1)])
+def test_runner_recipe_defaults_preserve_repeat_count(monkeypatch, full_recipe, expected_repeats):
+    runner = _load_runner_module()
+    arguments = [str(RUNNER_PATH)]
+    if full_recipe:
+        arguments.extend(["--tuning-config", runner.FULL_TUNING_CONFIG])
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    assert runner._parse_args().repeats_per_ratio == expected_repeats
+
+    monkeypatch.setattr(sys, "argv", arguments + ["--repeats-per-ratio", "2"])
+    assert runner._parse_args().repeats_per_ratio == 2
+
+
+def test_full_series_trains_baseline_and_passes_checkpoint_to_six_run_grid(tmp_path, monkeypatch):
+    from hydra import compose, initialize_config_dir
+
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    commands = []
+    checkpoint = tmp_path / "outputs/runs/full_best_practice_resnet50_on_cifar10/checkpoints/best.pt"
+
+    def run_command(command, reporter):
+        commands.append(command)
+        if "src/net_complexity/train.py" in command:
+            assert f"hydra.run.dir={checkpoint.parent.parent}" in command
+            with initialize_config_dir(config_dir=str(REPO_ROOT / "configs"), version_base=None):
+                config = compose(config_name="train", overrides=command[3:])
+            assert config.training_arguments.num_epochs == 200
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"baseline checkpoint")
+        else:
+            assert checkpoint.is_file()
+            assert f"--config-name={runner.FULL_TUNING_CONFIG}" in command
+            with initialize_config_dir(config_dir=str(REPO_ROOT / "configs"), version_base=None):
+                config = compose(config_name=runner.FULL_TUNING_CONFIG, overrides=command[4:])
+            assert config.model.pretrained_checkpoint == str(checkpoint)
+            assert config.training_arguments.num_epochs == 150
+            assert config.model.final_fine_tune_epochs == 118
+            assert config.tuning.repeats_per_trial == 1
+            assert [p["model.backbone.target_keep_ratio"] for p in config.tuning.points] == [
+                0.3, 0.5, 0.6, 0.7, 0.8, 0.9,
+            ]
+
+    monkeypatch.setattr(runner, "_run", run_command)
+    log_path = tmp_path / "full.log"
+    status_path = log_path.with_suffix(".status.json")
+    runner._run_series(
+        repeats_per_ratio=1,
+        run_id="full",
+        log_path=log_path,
+        status_path=status_path,
+        mirror_to_console=False,
+        tuning_config=runner.FULL_TUNING_CONFIG,
+    )
+
+    assert len(commands) == 2
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "completed"
+    assert status["completed_steps"] == ["baseline_training", "autopruner_tuning"]
+    assert status["tuning_config"] == runner.FULL_TUNING_CONFIG
+
+
+@pytest.mark.parametrize("empty_checkpoint", [False, True])
+def test_full_series_does_not_start_pruning_without_baseline_output(tmp_path, monkeypatch, empty_checkpoint):
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    commands = []
+
+    def run_without_checkpoint(command, reporter):
+        commands.append(command)
+        if empty_checkpoint:
+            checkpoint = tmp_path / "outputs/runs/missing_best_practice_resnet50_on_cifar10/checkpoints/best.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.touch()
+
+    monkeypatch.setattr(runner, "_run", run_without_checkpoint)
+    status_path = tmp_path / "missing.status.json"
+    with pytest.raises(RuntimeError, match="without a non-empty best checkpoint"):
+        runner._run_series(
+            repeats_per_ratio=1,
+            run_id="missing",
+            log_path=tmp_path / "missing.log",
+            status_path=status_path,
+            mirror_to_console=False,
+            tuning_config=runner.FULL_TUNING_CONFIG,
+        )
+
+    assert len(commands) == 1
+    assert "src/net_complexity/train.py" in commands[0]
+    assert json.loads(status_path.read_text())["status"] == "failed"

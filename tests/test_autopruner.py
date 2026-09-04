@@ -738,10 +738,7 @@ def test_v100_full_restart_runs_all_ratios_for_exactly_150_epochs():
     assert entry_cfg["training_arguments"]["num_epochs"] == 150
     assert entry_cfg["model"]["final_fine_tune_epochs"] == 118
     assert 4 * AUTHOR_PRUNING_EPOCHS_PER_STAGE + 118 == 150
-    assert entry_cfg["model"]["pretrained_checkpoint"].endswith(
-        "outputs/runs/20260821_032217_762051_best_practice_resnet50_on_cifar10/"
-        "checkpoints/best.pt"
-    )
+    assert entry_cfg["model"]["pretrained_checkpoint"] is None
 
 
 def test_autopruner_experiment_enables_mlflow_tracking():

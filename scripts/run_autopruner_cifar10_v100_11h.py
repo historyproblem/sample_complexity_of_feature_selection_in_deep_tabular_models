@@ -11,6 +11,8 @@ from typing import Any, TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TUNING_CONFIG = "tune_autopruner_resnet50_cifar10_v100_11h"
+FULL_TUNING_CONFIG = "tune_autopruner_resnet50_cifar10_full_150ep"
 
 
 class RunReporter:
@@ -149,12 +151,18 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--tuning-config",
+        choices=(DEFAULT_TUNING_CONFIG, FULL_TUNING_CONFIG),
+        default=DEFAULT_TUNING_CONFIG,
+        help="Tuning recipe to run after the baseline checkpoint is ready.",
+    )
+    parser.add_argument(
         "--repeats-per-ratio",
         type=int,
-        default=3,
+        default=None,
         help=(
-            "Repeats for each author-reported keep ratio. The default of 3 "
-            "leaves room for baseline training in one 11-hour V100 job."
+            "Repeats for each keep ratio: defaults to 3 for the 11-hour recipe "
+            "and 1 for the six-ratio 150-epoch recipe."
         ),
     )
     parser.add_argument(
@@ -189,7 +197,10 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.repeats_per_ratio is None:
+        args.repeats_per_ratio = 1 if args.tuning_config == FULL_TUNING_CONFIG else 3
+    return args
 
 
 def _start_detached(
@@ -199,12 +210,15 @@ def _start_detached(
     log_path: Path,
     status_path: Path,
     baseline_checkpoint: Path | None,
+    tuning_config: str = DEFAULT_TUNING_CONFIG,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-u",
         str(Path(__file__).resolve()),
+        "--tuning-config",
+        tuning_config,
         "--repeats-per-ratio",
         str(repeats_per_ratio),
         "--run-id",
@@ -276,6 +290,7 @@ def _run_series(
     status_path: Path,
     mirror_to_console: bool,
     baseline_checkpoint: Path | None = None,
+    tuning_config: str = DEFAULT_TUNING_CONFIG,
 ) -> None:
     started_at = _timestamp()
 
@@ -308,6 +323,7 @@ def _run_series(
         "baseline_dir": str(baseline_dir),
         "checkpoint": str(checkpoint),
         "baseline_reused": baseline_reused,
+        "tuning_config": tuning_config,
         "log_file": str(log_path),
         "status_file": str(status_path),
         "mlflow_tracking_uri": f"sqlite:///{(REPO_ROOT / 'mlflow.db').resolve()}",
@@ -349,7 +365,7 @@ def _run_series(
                 sys.executable,
                 "-u",
                 "src/net_complexity/tune.py",
-                "--config-name=tune_autopruner_resnet50_cifar10_v100_11h",
+                f"--config-name={tuning_config}",
                 f"model.pretrained_checkpoint={checkpoint}",
                 f"tuning.repeats_per_trial={repeats_per_ratio}",
             ],
@@ -390,7 +406,7 @@ def main() -> None:
     log_path = (
         args.log_file
         if args.log_file is not None
-        else REPO_ROOT / "outputs" / "logs" / f"{run_id}_autopruner_v100_11h.log"
+        else REPO_ROOT / "outputs" / "logs" / f"{run_id}_{args.tuning_config}.log"
     )
     if not log_path.is_absolute():
         log_path = (REPO_ROOT / log_path).resolve()
@@ -412,6 +428,7 @@ def main() -> None:
             log_path=log_path,
             status_path=status_path,
             baseline_checkpoint=baseline_checkpoint,
+            tuning_config=args.tuning_config,
         )
         return
 
@@ -424,6 +441,7 @@ def main() -> None:
             status_path=status_path,
             mirror_to_console=not args.no_console_mirror,
             baseline_checkpoint=baseline_checkpoint,
+            tuning_config=args.tuning_config,
         )
     finally:
         _release_active_run(run_id=run_id)

@@ -155,6 +155,26 @@ same 11-hour allocation, this combined runner uses three repeats per published
 keep ratio (six pruning runs). The standalone tuning config above remains the
 eight-run series for machines where the baseline already exists.
 
+For the six-ratio restart (0.3, 0.5, 0.6, 0.7, 0.8, 0.9; one seed; 150 epochs
+per run), use the same runner with the full recipe:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt && \
+.venv/bin/python -u scripts/run_autopruner_cifar10_v100_11h.py \
+  --tuning-config=tune_autopruner_resnet50_cifar10_full_150ep
+```
+
+With no `--baseline-checkpoint`, this trains the 200-epoch baseline first and
+passes its actual `best.pt` path to the grid. Add `--baseline-checkpoint=PATH`
+to reuse an existing baseline instead. The full recipe defaults to one repeat
+per ratio, including in `--detach` mode. Its 150-epoch pruning sweep alone is
+estimated at about 14 hours on a V100; a fresh baseline takes additional time.
+The script's historical `11h` name does not impose a wall-clock limit.
+
+Directly invoking `tune.py` with the full recipe requires an explicit
+`model.pretrained_checkpoint=PATH`; the recipe no longer assumes that an
+archived run's checkpoint is present on another machine.
+
 To export a trained model programmatically:
 
 ```python
