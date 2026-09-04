@@ -81,7 +81,7 @@ setting above, but necessarily changes the paper's data/model interface:
 Supply a trained project ResNet-50 checkpoint:
 
 ```bash
-python3 src/net_complexity/train.py \
+.venv/bin/python src/net_complexity/train.py \
   experiment=autopruner_resnet50_cifar10 \
   model.pretrained_checkpoint=/absolute/path/to/checkpoints/best.pt
 ```
@@ -94,7 +94,7 @@ ResNet bottlenecks.
 Run the two author-reported keep ratios as a grid:
 
 ```bash
-python3 src/net_complexity/tune.py \
+.venv/bin/python src/net_complexity/tune.py \
   experiment=autopruner_resnet50_cifar10 \
   tuning=autopruner_keep_ratio_grid \
   model.pretrained_checkpoint=/absolute/path/to/checkpoints/best.pt
@@ -103,7 +103,7 @@ python3 src/net_complexity/tune.py \
 For an overnight series on one V100 32 GB, use the dedicated 11-hour config:
 
 ```bash
-python3 src/net_complexity/tune.py \
+.venv/bin/python src/net_complexity/tune.py \
   --config-name=tune_autopruner_resnet50_cifar10_v100_11h \
   model.pretrained_checkpoint=/absolute/path/to/checkpoints/best.pt
 ```
@@ -119,7 +119,7 @@ If a compatible CIFAR-10 checkpoint has not been trained yet, use the
 end-to-end V100 runner instead:
 
 ```bash
-python3 scripts/run_autopruner_cifar10_v100_11h.py
+.venv/bin/python scripts/run_autopruner_cifar10_v100_11h.py
 ```
 
 The runner always mirrors baseline and pruning stdout/stderr to a timestamped
@@ -128,7 +128,7 @@ the PID, current step, checkpoint path, and terminal success or failure. For a
 launch that survives an SSH disconnect, use its detached mode:
 
 ```bash
-python3 scripts/run_autopruner_cifar10_v100_11h.py --detach
+.venv/bin/python scripts/run_autopruner_cifar10_v100_11h.py --detach
 ```
 
 The command prints the exact log and status paths before returning. Follow the
@@ -139,7 +139,7 @@ runs are also recorded in the repository-local `mlflow.db`.
 To reuse an already trained baseline and skip the 200 baseline epochs:
 
 ```bash
-python3 scripts/run_autopruner_cifar10_v100_11h.py \
+.venv/bin/python scripts/run_autopruner_cifar10_v100_11h.py \
   --detach \
   --baseline-checkpoint=/absolute/path/to/checkpoints/best.pt
 ```

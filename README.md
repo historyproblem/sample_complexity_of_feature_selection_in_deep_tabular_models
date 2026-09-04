@@ -42,33 +42,33 @@ In learning theory, sample complexity determines how much data is required for g
 ```bash
     git clone (TODO)
     cd sample_complexity_of_feature_selection_in_deep_tabular_models
-    pip install -e .
+    .venv/bin/python -m pip install -e .
 ```
 
 2. Run a training example:
 ```bash
-    python3 src/net_complexity/train.py
+    .venv/bin/python src/net_complexity/train.py
 ```
 
 Pick a different recipe through Hydra defaults instead of maintaining a separate long CLI:
 ```bash
-    python3 src/net_complexity/train.py experiment=stg_cifar10_default_valid_accuracy seed=3
+    .venv/bin/python src/net_complexity/train.py experiment=stg_cifar10_default_valid_accuracy seed=3
 ```
 
 3. Run Optuna hyperparameter search:
 ```bash
-    python3 src/net_complexity/tune.py
+    .venv/bin/python src/net_complexity/tune.py
 ```
 
 The tuning entrypoint uses the same experiment recipes:
 ```bash
-    python3 src/net_complexity/tune.py experiment=stg_cifar10_default_valid_accuracy tuning=stg_cifar10_optuna120
+    .venv/bin/python src/net_complexity/tune.py experiment=stg_cifar10_default_valid_accuracy tuning=stg_cifar10_optuna120
 ```
 
 Tune search settings through Hydra overrides instead of a separate tuning CLI:
 
 ```bash
-    python3 src/net_complexity/tune.py \
+    .venv/bin/python src/net_complexity/tune.py \
       experiment=stg_cifar10_default_valid_accuracy \
       tuning=stg_cifar10_optuna120 \
       tuning.study_name=stg_quick_check \
@@ -79,7 +79,7 @@ Tune search settings through Hydra overrides instead of a separate tuning CLI:
 Grid search is configured the same way:
 
 ```bash
-    python3 src/net_complexity/tune.py \
+    .venv/bin/python src/net_complexity/tune.py \
       experiment=stg_cifar10_default_valid_accuracy \
       tuning=stg_lambda_initmu_grid_sigma05 \
       tuning.repeats_per_trial=3 \
