@@ -738,7 +738,9 @@ def test_v100_full_restart_runs_all_ratios_for_exactly_150_epochs():
     assert entry_cfg["training_arguments"]["num_epochs"] == 150
     assert entry_cfg["model"]["final_fine_tune_epochs"] == 118
     assert 4 * AUTHOR_PRUNING_EPOCHS_PER_STAGE + 118 == 150
-    assert entry_cfg["model"]["pretrained_checkpoint"] is None
+    assert entry_cfg["model"]["pretrained_checkpoint"] == (
+        "${hydra:runtime.cwd}/outputs/pretrained/resnet50_cifar10_150ep/best.pt"
+    )
 
 
 def test_autopruner_experiment_enables_mlflow_tracking():

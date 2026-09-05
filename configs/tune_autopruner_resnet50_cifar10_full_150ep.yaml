@@ -7,12 +7,13 @@ reporting:
   run_label_fields:
     keep_ratio: model.backbone.target_keep_ratio
 
-# Supply model.pretrained_checkpoint explicitly, or use the end-to-end runner
-# with --tuning-config=tune_autopruner_resnet50_cifar10_full_150ep.
+# Import checkpoints/best.pt from checkpoints.zip to the path below.
+# Baseline run: 20260822_142918_resnet_baseline_cifar10 (150 training epochs).
+# The best checkpoint is epoch 136, recorded valid_accuracy=0.941796875.
 # Four author-style pruning stages take 32 epochs; extending the
 # final fine-tuning phase to 118 epochs makes every run exactly 150 epochs.
 model:
-  pretrained_checkpoint: null
+  pretrained_checkpoint: ${hydra:runtime.cwd}/outputs/pretrained/resnet50_cifar10_150ep/best.pt
   final_fine_tune_epochs: 118
 
 training_arguments:

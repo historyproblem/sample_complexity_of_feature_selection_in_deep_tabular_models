@@ -156,7 +156,28 @@ keep ratio (six pruning runs). The standalone tuning config above remains the
 eight-run series for machines where the baseline already exists.
 
 For the six-ratio restart (0.3, 0.5, 0.6, 0.7, 0.8, 0.9; one seed; 150 epochs
-per run), use the same runner with the full recipe:
+per run), the full recipe uses the imported 150-epoch baseline by default.
+Copy `checkpoints/best.pt` from `checkpoints.zip` to this path relative to the
+server repository root:
+
+```text
+outputs/pretrained/resnet50_cifar10_150ep/best.pt
+```
+
+This is run `20260822_142918_resnet_baseline_cifar10`: the best checkpoint is
+epoch 136 with recorded validation accuracy 94.1796875%; `last.pt` is epoch
+150 with recorded validation accuracy 94.04296875%. Use `best.pt` for the
+pruning sweep. These numbers come from checkpoint metadata, not a new
+evaluation. Only `best.pt` needs to be uploaded.
+
+After uploading it, start the pruning grid without training another baseline:
+
+```bash
+.venv/bin/python -u src/net_complexity/tune.py \
+  --config-name=tune_autopruner_resnet50_cifar10_full_150ep
+```
+
+To intentionally train a new baseline instead, use the end-to-end runner:
 
 ```bash
 .venv/bin/python -m pip install -r requirements.txt && \
@@ -171,9 +192,9 @@ per ratio, including in `--detach` mode. Its 150-epoch pruning sweep alone is
 estimated at about 14 hours on a V100; a fresh baseline takes additional time.
 The script's historical `11h` name does not impose a wall-clock limit.
 
-Directly invoking `tune.py` with the full recipe requires an explicit
-`model.pretrained_checkpoint=PATH`; the recipe no longer assumes that an
-archived run's checkpoint is present on another machine.
+To use a different baseline with `tune.py`, override
+`model.pretrained_checkpoint=PATH`. A missing imported checkpoint is an error;
+direct tuning never silently trains a replacement baseline.
 
 To export a trained model programmatically:
 
