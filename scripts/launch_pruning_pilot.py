@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 
 from net_complexity.training.pruning_audit import run_fixed_pruning_pilot, validate_config
 from net_complexity.training.pruning_measurement import write_json
+from net_complexity.training.pruning_resume import load_completed_search, validate_reused_dense
 
 JOBS = ["J1_dense_control", "J2_output_fixed", "J3_internal_fixed"]
 DAYTIME_JOBS = ["D1_dense_control", "D2_internal_fixed"]
@@ -48,6 +49,9 @@ def write_comparison(output, completed_jobs, profile):
             "job": job,
             "epochs_consumed": result["global_epochs_completed"],
             "optimizer_steps": result["optimizer_steps_total"],
+            "reused_from": result.get("reused_from"),
+            "epochs_reused": (result["global_epochs_completed"] if result.get("reused_from")
+                              else result.get("resume", {}).get("epochs_reused", 0)),
             "validation": result["validation"],
             "accuracy_delta_vs_dense_pp": 100 * (result["validation"]["accuracy"] - dense["validation"]["accuracy"]),
             "physical_parameters": cost["physical_total_parameters"],
@@ -63,6 +67,7 @@ def write_comparison(output, completed_jobs, profile):
                 "candidate_committed_valid": d["candidate_committed_valid"],
                 "recovered_valid": d.get("recovered_valid"),
                 "decision_checkpoint_epoch": d["decision_checkpoint_epoch"],
+                "equivalence": d.get("equivalence"),
             } for d in result["decisions"]],
         })
     report = {
@@ -132,12 +137,20 @@ def main():
     parser.add_argument("--hours", type=float, help="Overall cap; default: nightly 11.75h, daytime 2h")
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--with-random-control", action="store_true")
+    parser.add_argument("--resume-from", type=Path,
+                        help="Stopped daytime parent directory: reuse completed D1 and D2's full first search")
     parser.add_argument("--job", choices=JOBS + DAYTIME_JOBS + list(RANDOM_JOBS.values()), help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.hours = PROFILE_HOURS[args.profile] if args.hours is None else args.hours
     jobs = list(PROFILE_JOBS[args.profile])
     if args.with_random_control:
         jobs.append(RANDOM_JOBS[args.profile])
+    if args.resume_from is not None:
+        args.resume_from = args.resume_from.resolve()
+        if args.profile != "daytime" or args.with_random_control or args.preflight_only:
+            parser.error("--resume-from supports only the two-job daytime profile, not preflight-only.")
+        if args.job is not None and args.job != "D2_internal_fixed":
+            parser.error("Only D2_internal_fixed resumes from the completed first search.")
     if sys.version_info < (3, 10):
         parser.error("Server runtime requires Python >=3.10; local compatibility smoke is separate.")
     if not torch.cuda.is_available():
@@ -149,12 +162,16 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     output, data = args.output.resolve(), args.data.resolve()
+    initializer = ((args.resume_from if args.resume_from is not None else output) / "shared_random_seed42.pt")
     if args.job:
         if args.job not in PROFILE_JOBS[args.profile] + [RANDOM_JOBS[args.profile]]:
             parser.error("--job does not belong to the requested profile.")
+        if args.resume_from is not None:
+            os.environ["AUDIT_INIT_CHECKPOINT"] = str(initializer)
         cfg = config_for(args.job)
         cfg.dataloaders.path_to_data = str(data)
-        run_fixed_pruning_pilot(cfg, output)
+        resume_search = args.resume_from / args.job if args.resume_from is not None else None
+        run_fixed_pruning_pilot(cfg, output, resume_search_from=resume_search)
         return
 
     output.mkdir(parents=True, exist_ok=False)
@@ -167,16 +184,32 @@ def main():
               "wall_budget_hours": args.hours, "test_evaluated": False}
     try:
         write_json(output / "provenance.json", provenance())
-        os.environ["AUDIT_INIT_CHECKPOINT"] = str(output / "shared_random_seed42.pt")
+        os.environ["AUDIT_INIT_CHECKPOINT"] = str(initializer)
         configurations = {job: config_for(job) for job in jobs}
         for job, cfg in configurations.items():
             validate_config(cfg)
             cfg.dataloaders.path_to_data = str(data)
             OmegaConf.save(cfg, output / f"{job}_resolved.yaml", resolve=True)
+        reused_dense = None
+        if args.resume_from is not None:
+            reused_dense = validate_reused_dense(configurations[jobs[0]], args.resume_from / jobs[0])
+            steps, remainder = divmod(reused_dense["optimizer_steps_total"], 25)
+            if remainder or steps <= 0:
+                raise ValueError("Dense optimizer step count is not a complete 25-epoch control.")
+            resumed = load_completed_search(
+                configurations[jobs[1]], args.resume_from / jobs[1],
+                common_hash=reused_dense["common_init_hash"], split_hash=reused_dense["split_indices_hash"],
+                steps_per_epoch=steps)
+            write_json(output / "resume_provenance.json", {
+                "source_parent": str(args.resume_from), "dense_source": reused_dense["reused_from"],
+                "search": resumed["metadata"],
+                "source_provenance": json.loads((args.resume_from / "provenance.json").read_text()),
+            })
         tests = [
             "tests/test_pruning_audit.py", "tests/test_pruning_pilot_launcher.py", "tests/test_pruned_bottleneck.py",
             "tests/test_cyclic_channel_weight_handoff.py", "tests/test_best_checkpoint_evaluation.py",
             "tests/test_optimizer_groups.py", "tests/test_dataloaders.py",
+            "tests/test_pruning_resume.py",
         ]
         run_child([sys.executable, "-m", "pytest", "-q", *[str(ROOT / t) for t in tests]],
                   output / "preflight_tests.log", deadline)
@@ -187,9 +220,19 @@ def main():
         if args.preflight_only:
             status["status"] = "preflight_passed_no_nightly_training"
             return
-        make_initializer(configurations[jobs[0]], output / "shared_random_seed42.pt")
+        if reused_dense is None:
+            make_initializer(configurations[jobs[0]], initializer)
+        else:
+            write_json(output / jobs[0] / "pilot_state.json", reused_dense)
+            status["completed_jobs"].append(jobs[0])
+            status["reused_jobs"] = [jobs[0]]
+            write_comparison(output, status["completed_jobs"], args.profile)
+            print(f"[resume] Reusing D1: valid={reused_dense['validation']['accuracy']:.2%}; "
+                  "no dense retraining.", flush=True)
         prior_seconds = None
         for job in jobs:
+            if job in status["completed_jobs"]:
+                continue
             remaining = deadline - time.monotonic()
             if prior_seconds is not None and remaining < prior_seconds * 1.20:
                 status["skipped_jobs"].extend(jobs[jobs.index(job):])
@@ -198,8 +241,11 @@ def main():
             status["status"] = f"running_{job}"
             write_json(output / "nightly_status.json", status)
             started = time.monotonic()
-            run_child([sys.executable, str(Path(__file__).resolve()), "--job", job,
-                       "--profile", args.profile, "--output", str(output / job), "--data", str(data)],
+            command = [sys.executable, str(Path(__file__).resolve()), "--job", job,
+                       "--profile", args.profile, "--output", str(output / job), "--data", str(data)]
+            if args.resume_from is not None:
+                command.extend(["--resume-from", str(args.resume_from)])
+            run_child(command,
                       output / f"{job}.log", deadline)
             prior_seconds = time.monotonic() - started
             result = json.loads((output / job / "pilot_state.json").read_text())

@@ -7,6 +7,7 @@ epoch allowance on the previous accepted topology.
 from __future__ import annotations
 
 import csv
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -116,22 +117,71 @@ def selected_model(config, result):
     return model, payload, path
 
 
-def committed_equivalence(carrier, structural, mask, sample, device):
+def _equivalence_stats(actual, expected, *, rtol, atol):
+    if not torch.isfinite(actual).all() or not torch.isfinite(expected).all():
+        raise FloatingPointError("Non-finite logits in committed equivalence check.")
+    if actual.shape != expected.shape:
+        raise AssertionError("Committed equivalence logit shapes differ.")
+    error = (actual - expected).abs()
+    return {"max_abs_error": float(error.max()), "logit_count": actual.numel(),
+            "mismatched_logits": int((error > atol + rtol * expected.abs()).sum()),
+            "prediction_disagreements": int((actual.argmax(-1) != expected.argmax(-1)).sum()),
+            "rtol": rtol, "atol": atol}
+
+
+@torch.no_grad()
+def committed_equivalence(carrier, structural, mask, sample, device, *, report_path=None):
+    """Allow small FP32 roundoff only if an independent FP64 check also passes.
+
+    Narrow convolutions can use different accumulation orders. The fallback
+    checks the SAME entire validation batch on CPU in double precision;
+    small FP32 differences alone are not sufficient to accept the transfer.
+    """
     validate_mask(carrier, mask)
     clone = deepcopy(carrier).to(device).eval()
     for gate in gates(clone).values():
         gate.channel_mask.fill_(1)
         gate.set_bypass(True)
     apply_channel_mask(clone, mask)
-    structural.to(device).eval()
-    x, y = (t.to(device) for t in sample)
-    with torch.no_grad():
-        torch.testing.assert_close(clone(x, y).logits, structural(x, y).logits,
-                                   rtol=1e-4, atol=1e-5)
-    structural.cpu()
+    report = {"status": "failed", "device": str(device), "policy": "fp32_then_bounded_fp64_v1"}
+    try:
+        structural.to(device).eval()
+        x, y = (t.to(device) for t in sample)
+        actual, expected = clone(x, y).logits, structural(x, y).logits
+        report["fp32"] = _equivalence_stats(actual, expected, rtol=1e-4, atol=1e-5)
+        if report["fp32"]["mismatched_logits"] == 0:
+            report["status"] = "passed_fp32"
+            return report
+        # Large FP32 discrepancies are not explained away by a second backend.
+        report["fp32_ceiling"] = _equivalence_stats(actual, expected, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+        print(f"[equivalence] FP32 max error={report['fp32']['max_abs_error']:.3g}; "
+              "checking the full batch in CPU float64.", flush=True)
+        clone.cpu().double()
+        reference = deepcopy(structural).cpu().double().eval()
+        x64, y64 = sample[0].cpu().double(), sample[1].cpu()
+        double_actual, double_expected = [], []
+        for start in range(0, len(x64), 8):
+            check_stop()
+            batch = x64[start:start + 8], y64[start:start + 8]
+            double_actual.append(clone(*batch).logits)
+            double_expected.append(reference(*batch).logits)
+        actual64, expected64 = torch.cat(double_actual), torch.cat(double_expected)
+        report["fp64"] = _equivalence_stats(actual64, expected64, rtol=1e-8, atol=1e-9)
+        torch.testing.assert_close(actual64, expected64, rtol=1e-8, atol=1e-9)
+        report["status"] = "passed_fp64_fallback"
+        print(f"[equivalence] FP64 passed; max error={report['fp64']['max_abs_error']:.3g}.", flush=True)
+        return report
+    except Exception as exc:
+        report["error"] = str(exc)
+        raise
+    finally:
+        structural.cpu()
+        if report_path is not None:
+            write_json(Path(report_path), report)
 
 
-def _run(config, output_root):
+def _run(config, output_root, *, resume_search_from=None):
     total_epochs = validate_config(config)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -142,6 +192,10 @@ def _run(config, output_root):
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable; refusing silent CPU overnight run.")
     seed = int(config.seed)
+    # The shared initializer contains only backbone weights, not gate logits.
+    # Seed BEFORE creating the carrier; engine seeding happens too late for it.
+    from .randomness import set_random_seed
+    set_random_seed(seed)
     init_path = Path(str(c.weight_handoff.initial_checkpoint))
     initial = torch.load(init_path, map_location="cpu", weights_only=True)
     if initial.get("trained_epochs") != 0 or initial.get("seed") != seed:
@@ -175,6 +229,16 @@ def _run(config, output_root):
              "total_epochs_allocated": total_epochs, "common_init_hash": common_hash,
              "split_indices_hash": split_hash, "seed": seed, "test_evaluated": False,
              "initial_cost": initial_cost, "stages": stages, "decisions": decisions}
+    if resume_search_from is not None:
+        from .pruning_resume import load_completed_search
+        resumed = load_completed_search(config, resume_search_from, common_hash=common_hash,
+                                        split_hash=split_hash, steps_per_epoch=len(data.train_dataloader))
+        stages.append(resumed["stage"])
+        global_epoch = int(resumed["metadata"]["epochs_reused"])
+        state["resume"] = resumed["metadata"]
+        shutil.copyfile(resumed["history_path"], output_root / "global_history.csv")
+        print(f"[resume] Reusing {global_epoch} completed search epochs from {resume_search_from}; "
+              "continuing at the pruning decision, not retraining search.", flush=True)
     OmegaConf.save(config, output_root / "resolved_config.yaml", resolve=True)
 
     def persist():
@@ -245,9 +309,16 @@ def _run(config, output_root):
     persist()
     try:
         for cycle in range(c.max_cycles):
-            search, search_result = stage(f"cycle_{cycle}_search", c.gumbel_epochs, carrier, mask, False)
+            if resume_search_from is not None:
+                search_result = {"run_dir": stages[0]["run_dir"], "best_epoch": stages[0]["best_epoch"]}
+            else:
+                search, search_result = stage(f"cycle_{cycle}_search", c.gumbel_epochs, carrier, mask, False)
             # Re-read best.pt and verify selection epoch; ignore last_valid_metrics.
             search, search_payload, search_path = selected_model(config, search_result)
+            if (resume_search_from is not None
+                    and state_hash(search_payload["model_state_dict"])
+                    != state["resume"]["selected_checkpoint_state_hash"]):
+                raise ValueError("Reused search checkpoint changed after resume validation.")
             for name, gate in gates(search).items():
                 expected = torch.ones_like(gate.channel_mask)
                 expected[mask.get(name, [])] = 0
@@ -260,7 +331,9 @@ def _run(config, output_root):
             )
             old = build_structural(config, search, mask)
             candidate = build_structural(config, search, candidate_mask)
-            committed_equivalence(search, candidate, candidate_mask, sample, device)
+            equivalence = committed_equivalence(
+                search, candidate, candidate_mask, sample, device,
+                report_path=output_root / f"cycle_{cycle}_equivalence.json")
             if sum(p.numel() for p in candidate.parameters()) != budget["params_after"]:
                 raise AssertionError("Physical count differs from exact budget.")
             if sum(p.numel() for p in old.parameters()) != budget["params_before"]:
@@ -279,7 +352,7 @@ def _run(config, output_root):
                         "decision_checkpoint_epoch": search_payload["epoch"],
                         "decision_checkpoint_hash": decision_hash,
                         "candidate_mask": candidate_mask, "candidate_mask_hash": mask_hash(candidate_mask),
-                        "budget": budget, "old_committed_valid": old_metrics,
+                        "budget": budget, "equivalence": equivalence, "old_committed_valid": old_metrics,
                         "candidate_committed_valid": candidate_metrics}
             decisions.append(decision)
             rejected = candidate_metrics["accuracy"] < old_metrics["accuracy"] - c.commit_guard.max_immediate_accuracy_drop
@@ -334,6 +407,6 @@ def _run(config, output_root):
         raise
 
 
-def run_fixed_pruning_pilot(config, output_root):
+def run_fixed_pruning_pilot(config, output_root, *, resume_search_from=None):
     with cooperative_signals():
-        return _run(config, output_root)
+        return _run(config, output_root, resume_search_from=resume_search_from)
