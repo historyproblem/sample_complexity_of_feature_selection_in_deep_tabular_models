@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -10,7 +11,9 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -95,12 +98,57 @@ def write_comparison(output, completed_jobs, profile):
     return report
 
 
+@contextmanager
+def _mirror_child_log(log_path):
+    """Echo the file without letting a slow/closed terminal block the trainer."""
+    stopped = threading.Event()
+    terminal = sys.stdout
+
+    def mirror():
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+        def echo(text):
+            if text:
+                terminal.write(text)
+                terminal.flush()
+
+        try:
+            with log_path.open("rb") as source:
+                final_offset = None
+                while True:
+                    if stopped.is_set() and final_offset is None:
+                        # Drain the completed child's output, but not endless
+                        # output from a descendant retaining the descriptor.
+                        final_offset = os.fstat(source.fileno()).st_size
+                    size = 65536 if final_offset is None else min(65536, max(0, final_offset - source.tell()))
+                    chunk = source.read(size)
+                    if chunk:
+                        echo(decoder.decode(chunk))
+                    elif final_offset is not None:
+                        echo(decoder.decode(b"", final=True))
+                        return
+                    else:
+                        stopped.wait(0.1)
+        except (OSError, ValueError):
+            # Logging to disk remains authoritative if the terminal disappears.
+            return
+
+    worker = threading.Thread(target=mirror, name="pilot-live-log", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        # Terminal backpressure must not suspend deadline/interrupt handling.
+        worker.join(timeout=1.0)
+
+
 def run_child(command, log_path, deadline):
     """Bound the entire process group; allow checkpoint flush before SIGKILL."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("Overall wall-clock allowance exhausted.")
-    with log_path.open("w") as log:
+    with log_path.open("wb") as log, _mirror_child_log(log_path):
         print("Running:", " ".join(map(str, command)), flush=True)
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True, env={**os.environ, "PYTHONUNBUFFERED": "1"})

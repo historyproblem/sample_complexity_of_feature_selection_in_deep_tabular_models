@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import signal
+import io
 import json
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -52,6 +54,138 @@ def test_launcher_timeout_terms_trainer_then_kills_group_if_needed(tmp_path, mon
     assert len(received) == (2 if needs_kill else 1)
     if needs_kill:
         assert received[1] == ("group", 12345, signal.SIGKILL)
+
+
+def test_launcher_streams_before_child_finishes_and_keeps_full_log(tmp_path, monkeypatch):
+    release, finished = tmp_path / "release", tmp_path / "finished"
+    seen_before_completion = []
+
+    class Terminal(io.StringIO):
+        def write(self, text):
+            if text.startswith("epoch 1\n"):
+                seen_before_completion.append(not finished.exists())
+                release.touch()
+            return super().write(text)
+
+    terminal = Terminal()
+    monkeypatch.setattr(launcher.sys, "stdout", terminal)
+    program = (
+        "import sys, time\nfrom pathlib import Path\n"
+        "print('epoch 1')\n"
+        "end = time.monotonic() + 5\n"
+        "while not Path(sys.argv[1]).exists() and time.monotonic() < end:\n"
+        "    time.sleep(0.01)\n"
+        "assert Path(sys.argv[1]).exists(), 'live output was not delivered'\n"
+        "print('warning', file=sys.stderr)\n"
+        "sys.stdout.write('final partial line')\n"
+        "Path(sys.argv[2]).touch()\n"
+    )
+    log = tmp_path / "child.log"
+    launcher.run_child([sys.executable, "-c", program, str(release), str(finished)], log, time.monotonic() + 10)
+    expected = "epoch 1\nwarning\nfinal partial line"
+    assert seen_before_completion == [True]
+    assert finished.is_file()
+    assert log.read_text() == expected
+    assert terminal.getvalue().endswith(expected)
+    assert terminal.getvalue().count("epoch 1\n") == 1
+
+
+def test_log_mirror_decodes_split_utf8_and_preserves_carriage_returns(tmp_path, monkeypatch):
+    # A UTF-8 character straddles the mirror's 64 KiB chunk boundary.
+    expected = "x" * 65535 + "я\rследующая эпоха\nlast line"
+    log = tmp_path / "utf8.log"
+    log.write_bytes(expected.encode("utf-8"))
+    terminal = io.StringIO()
+    monkeypatch.setattr(launcher.sys, "stdout", terminal)
+    with launcher._mirror_child_log(log):
+        pass
+    assert terminal.getvalue() == expected
+    assert log.read_bytes() == expected.encode("utf-8")
+
+
+def test_slow_terminal_cannot_hold_up_child_completion(tmp_path, monkeypatch):
+    blocked, release, flushed = threading.Event(), threading.Event(), threading.Event()
+    mirror_threads = []
+
+    class Terminal(io.StringIO):
+        def write(self, text):
+            if text.startswith("child output"):
+                mirror_threads.append(threading.current_thread())
+                blocked.set()
+                release.wait(5)
+            return super().write(text)
+
+        def flush(self):
+            if blocked.is_set():
+                flushed.set()
+
+    monkeypatch.setattr(launcher.sys, "stdout", Terminal())
+    log = tmp_path / "slow-terminal.log"
+    started = time.monotonic()
+    try:
+        launcher.run_child([sys.executable, "-c", "print('child output')"], log, time.monotonic() + 10)
+        assert blocked.is_set()
+        assert not flushed.is_set()
+        assert time.monotonic() - started < 3
+        assert log.read_text() == "child output\n"
+    finally:
+        release.set()
+        for worker in mirror_threads:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_broken_terminal_does_not_interrupt_child_or_file_log(tmp_path, monkeypatch, failure):
+    class Terminal(io.StringIO):
+        def write(self, text):
+            if failure == "write" and text.startswith("child output"):
+                raise BrokenPipeError("closed terminal")
+            return super().write(text)
+
+        def flush(self):
+            if failure == "flush" and self.getvalue().endswith("child output\n"):
+                raise OSError("closed terminal")
+
+    monkeypatch.setattr(launcher.sys, "stdout", Terminal())
+    log = tmp_path / "broken-terminal.log"
+    launcher.run_child([sys.executable, "-c", "print('child output')"], log, time.monotonic() + 10)
+    assert log.read_text() == "child output\n"
+
+
+def test_failed_child_still_reports_error_and_mirrors_final_output(tmp_path, capsys):
+    log = tmp_path / "failed.log"
+    with pytest.raises(RuntimeError, match="Child failed \\(exit 7\\)"):
+        launcher.run_child([sys.executable, "-c", "import sys; print('failure details'); sys.exit(7)"],
+                           log, time.monotonic() + 10)
+    assert log.read_text() == "failure details\n"
+    assert capsys.readouterr().out.endswith("failure details\n")
+
+
+def test_keyboard_interrupt_still_stops_trainer_and_drains_log(tmp_path, monkeypatch, capsys):
+    received = []
+
+    class Process:
+        pid = 12345
+        count = 0
+
+        def wait(self, timeout=None):
+            self.count += 1
+            if self.count == 1:
+                raise KeyboardInterrupt
+            return -15
+
+    def start(*args, **kwargs):
+        kwargs["stdout"].write(b"checkpoint saved\n")
+        kwargs["stdout"].flush()
+        return Process()
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", start)
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: received.append((pid, sig)))
+    with pytest.raises(TimeoutError, match="Stopped incomplete process"):
+        launcher.run_child(["unused"], tmp_path / "interrupt.log", time.monotonic() + 10)
+    assert received == [(12345, signal.SIGTERM)]
+    assert capsys.readouterr().out.endswith("checkpoint saved\n")
 
 
 @pytest.mark.parametrize("job", launcher.JOBS + ["J4_internal_random"])
