@@ -1,0 +1,9 @@
+# @package _global_
+# Optional diagnostic: same learning and budget as J3; random channel ranking.
+defaults:
+  - /experiment/audit/J3_internal_fixed
+  - _self_
+cyclic_channel_pruning:
+  ranking: random
+mlflow:
+  run_name: J4_internal_random

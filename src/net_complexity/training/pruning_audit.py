@@ -1,0 +1,339 @@
+"""Fixed-lambda pruning pilot. Deliberately NOT the full adaptive Pro contract.
+
+All decisions come from the selected checkpoint. Transactions are evaluated on
+validation only; rejecting one stops further pruning and spends only the remaining
+epoch allowance on the previous accepted topology.
+"""
+from __future__ import annotations
+
+import csv
+from copy import deepcopy
+from pathlib import Path
+
+import torch
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
+
+from net_complexity.models.channel_pruning import (
+    apply_channel_mask, build_structurally_pruned_model_from_config,
+    transfer_gated_weights_to_structural, transfer_structural_weights_to_gated,
+)
+from net_complexity.models.pruning_budget import gates, select_by_budget, validate_mask
+from .cyclic_aig import _configure_run_history, _set_num_epochs
+from .engine import run_training
+from .interruption import TrainingInterrupted, check_stop, cooperative_signals
+from .pruning_measurement import (
+    calibrate_bn, deployment_cost, evaluate_deployment, mask_hash, state_hash, write_json,
+)
+
+FIXED_PRUNING_PILOT_VERSION = 1
+
+
+def validate_config(config):
+    c = config.cyclic_channel_pruning
+    supported = {
+        "enabled", "audit_protocol", "max_cycles", "stop_on_convergence",
+        "gumbel_epochs", "recovery_epochs", "final_epochs", "drop_mode",
+        "max_param_fraction", "min_keep_ratio", "weight_handoff", "commit_guard",
+        "ranking",
+    }
+    unknown = set(c) - supported
+    if unknown:
+        raise ValueError(f"Unsupported pilot options: {sorted(unknown)}")
+    required = {
+        "training_arguments.evaluate_test": False,
+        "training_arguments.adaptive_lambda.enabled": False,
+        "training_arguments.lambda_warmup.enabled": False,
+        "training_arguments.batchnorm_recalibration.enabled": False,
+        "model.entropy_regularization_coef": 0.0,
+        "model.entropy_regularization": "plus_negative_entropy",
+        "optimizer.gate_weight_decay_scale": 0.0,
+        "cyclic_channel_pruning.stop_on_convergence": False,
+        "cyclic_channel_pruning.drop_mode": "param_budget",
+        "cyclic_channel_pruning.weight_handoff.enabled": True,
+        "cyclic_channel_pruning.weight_handoff.checkpoint_name": "best.pt",
+        "cyclic_channel_pruning.commit_guard.enabled": True,
+        "model.backbone.resnet_block.train_gate_mode": "ste_hard",
+        "model.backbone.resnet_block.eval_gate_mode": "deterministic_hard",
+    }
+    for key, expected in required.items():
+        if OmegaConf.select(config, key) != expected:
+            raise ValueError(f"Fixed pilot requires {key}={expected!r}.")
+    if float(config.model.lambda_coef) not in (0.0, 0.001):
+        raise ValueError("Fixed pilot supports lambda=0 or 0.001 only.")
+    if float(config.model.lambda_coef) == 0 and float(c.max_param_fraction) != 0:
+        raise ValueError("Dense control must have zero pruning budget.")
+    if str(getattr(c, "ranking", "learned")) not in ("learned", "random"):
+        raise ValueError("Unsupported channel ranking.")
+    if set(c.weight_handoff) != {"enabled", "checkpoint_name", "initial_checkpoint"}:
+        raise ValueError("Unsupported/incomplete weight_handoff.")
+    if OmegaConf.select(config, "run_history.monitor") != "valid_accuracy":
+        raise ValueError("Checkpoint selection must use validation accuracy.")
+    if OmegaConf.select(config, "run_history.secondary_monitor") != "valid_ce_loss":
+        raise ValueError("Checkpoint ties must use weighted validation CE.")
+    if OmegaConf.select(config, "training_arguments.collapse_guard.enabled", default=False):
+        raise ValueError("Use the transactional guard, not legacy early collapse stopping.")
+    if not 0 <= float(c.max_param_fraction) < 1 or not 0 < float(c.min_keep_ratio) <= 1:
+        raise ValueError("Invalid budget/floor.")
+    for name in ("max_cycles", "gumbel_epochs", "recovery_epochs", "final_epochs"):
+        if type(c[name]) is not int or c[name] < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    if OmegaConf.select(config, "training_arguments.early_stopping.enabled", default=False):
+        raise ValueError("Fixed budget pilot does not support early stopping.")
+    if OmegaConf.select(config, "training_arguments.gate_mode_schedule.enabled", default=False):
+        raise ValueError("Fixed gate modes required.")
+    guard = c.commit_guard
+    if set(guard) != {"enabled", "train_bn_calibration_batches",
+                      "max_immediate_accuracy_drop", "max_recovered_accuracy_drop", "on_reject"}:
+        raise ValueError("Unsupported/incomplete commit_guard.")
+    if guard.on_reject != "continue_previous_graph_within_budget":
+        raise ValueError("Unsupported rollback policy.")
+    for name in ("max_immediate_accuracy_drop", "max_recovered_accuracy_drop"):
+        if not 0 <= guard[name] <= 1:
+            raise ValueError(f"Invalid {name}.")
+    if guard.train_bn_calibration_batches < 0:
+        raise ValueError("Negative calibration budget.")
+    return c.max_cycles * c.gumbel_epochs + (c.max_cycles - 1) * c.recovery_epochs + c.final_epochs
+
+
+def build_structural(config, carrier, mask):
+    validate_mask(carrier, mask)
+    cfg = deepcopy(config)
+    cfg.model.lambda_coef = 0.0
+    pruning = OmegaConf.create({"enabled": True, "mode": "explicit", "structural": True, "mask": mask})
+    model = build_structurally_pruned_model_from_config(cfg, pruning)
+    transfer_gated_weights_to_structural(carrier, model)
+    return model
+
+
+def selected_model(config, result):
+    path = Path(result["run_dir"]) / "checkpoints" / "best.pt"
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if int(payload["epoch"]) != int(result["best_epoch"]):
+        raise ValueError("Decision epoch differs from selected checkpoint epoch.")
+    model = instantiate(config.model)
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    return model, payload, path
+
+
+def committed_equivalence(carrier, structural, mask, sample, device):
+    validate_mask(carrier, mask)
+    clone = deepcopy(carrier).to(device).eval()
+    for gate in gates(clone).values():
+        gate.channel_mask.fill_(1)
+        gate.set_bypass(True)
+    apply_channel_mask(clone, mask)
+    structural.to(device).eval()
+    x, y = (t.to(device) for t in sample)
+    with torch.no_grad():
+        torch.testing.assert_close(clone(x, y).logits, structural(x, y).logits,
+                                   rtol=1e-4, atol=1e-5)
+    structural.cpu()
+
+
+def _run(config, output_root):
+    total_epochs = validate_config(config)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    if (output_root / "pilot_state.json").exists():
+        raise FileExistsError("Refusing reuse of an existing pilot run.")
+    c = config.cyclic_channel_pruning
+    device = str(config.device)
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable; refusing silent CPU overnight run.")
+    seed = int(config.seed)
+    init_path = Path(str(c.weight_handoff.initial_checkpoint))
+    initial = torch.load(init_path, map_location="cpu", weights_only=True)
+    if initial.get("trained_epochs") != 0 or initial.get("seed") != seed:
+        raise ValueError("Pilot requires the shared zero-trained-epoch initializer with matching seed.")
+    common_hash = state_hash(initial["model_state_dict"])
+    carrier = instantiate(config.model)
+    incompatible = carrier.load_state_dict(initial["model_state_dict"], strict=False)
+    if incompatible.unexpected_keys or any("gumbel_layer" not in k for k in incompatible.missing_keys):
+        raise ValueError(f"Incompatible shared initializer: {incompatible}")
+    data = instantiate(config.dataloaders, include_test=False, loader_seed=seed)
+    if str(config.dataloaders._target_).endswith("ClassicCVDataloaders"):
+        if (len(data.train_dataloader.dataset), len(data.valid_dataloader.dataset)) != (45000, 5000):
+            raise ValueError("CIFAR10 pilot requires the matched 45000/5000 train/valid split.")
+    if (device.startswith("cuda") and data.train_dataloader.num_workers == 0
+            and str(config.dataloaders._target_).endswith("ClassicCVDataloaders")):
+        raise ValueError("GPU pilot requires data workers to isolate augmentation RNG from gate RNG.")
+    # Validation is the only holdout constructed by this runner.
+    sample = next(iter(data.valid_dataloader))
+    image_shape = tuple(sample[0].shape[1:])
+    mask = {}
+    accepted = build_structural(config, carrier, mask)
+    initial_cost = deployment_cost(accepted, image_shape=image_shape)
+    current_metrics = None
+    global_epoch = 0
+    stages, decisions = [], []
+    split_hash = mask_hash({
+        split: list(getattr(loader.dataset, "indices", range(len(loader.dataset))))
+        for split, loader in (("train", data.train_dataloader), ("valid", data.valid_dataloader))
+    })
+    state = {"status": "running", "pilot_version": FIXED_PRUNING_PILOT_VERSION,
+             "total_epochs_allocated": total_epochs, "common_init_hash": common_hash,
+             "split_indices_hash": split_hash, "seed": seed, "test_evaluated": False,
+             "initial_cost": initial_cost, "stages": stages, "decisions": decisions}
+    OmegaConf.save(config, output_root / "resolved_config.yaml", resolve=True)
+
+    def persist():
+        state.update(global_epochs_completed=global_epoch, accepted_mask=mask,
+                     accepted_mask_hash=mask_hash(mask))
+        write_json(output_root / "pilot_state.json", state)
+
+    def stage(name, epochs, source, current_mask, structural):
+        nonlocal global_epoch
+        check_stop()
+        cfg = deepcopy(config)
+        _set_num_epochs(cfg, epochs)
+        cfg.training_arguments.global_epoch_offset = global_epoch
+        cfg.training_arguments.audit_data_seed = seed
+        cfg.dataloaders.loader_seed = seed
+        cfg.model.lambda_coef = 0.0 if structural else config.model.lambda_coef
+        OmegaConf.update(cfg, "channel_pruning", {
+            "enabled": True, "mode": "explicit", "structural": structural, "mask": current_mask,
+        }, merge=False, force_add=True)
+        _configure_run_history(cfg, output_root / name)
+        cfg.mlflow.enabled = False
+        cfg.run_history.run_name = name
+        source_state = {k: v.detach().cpu().clone() for k, v in source.state_dict().items()}
+        offset = global_epoch
+
+        def initialize(model):
+            model.load_state_dict(source_state, strict=True)
+
+        def record(epoch, train, valid, model, optimizer, history):
+            nonlocal global_epoch
+            global_epoch = offset + epoch
+            row = {"global_epoch": global_epoch, "local_epoch": epoch, "stage": name,
+                   "valid_accuracy": valid["valid_accuracy"], "valid_ce_loss": valid["valid_ce_loss"],
+                   "lambda_used": float(cfg.model.lambda_coef), "lambda_next": float(cfg.model.lambda_coef),
+                   "lr": train["lr"], "mask_hash": mask_hash(current_mask),
+                   "optimizer_steps_total": global_epoch * len(data.train_dataloader)}
+            path = output_root / "global_history.csv"
+            exists = path.exists()
+            with path.open("a", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=row.keys())
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(row)
+            persist()
+
+        result = run_training(cfg, model_initializer=initialize, epoch_end_callback=record)
+        if result.get("test_metrics") or not result.get("test_evaluation_disabled"):
+            raise RuntimeError("Unexpected test access in training result.")
+        if result["num_epochs_executed"] != epochs:
+            raise RuntimeError("Incomplete stage; refusing to claim full epoch budget.")
+        stages.append({"name": name, "epochs": epochs, "run_dir": result["run_dir"],
+                       "best_epoch": result["best_epoch"], "best_metric": result["best_metric_value"]})
+        checkpoint = torch.load(Path(result["run_dir"]) / "checkpoints" / "best.pt",
+                                map_location="cpu", weights_only=True)
+        model = deepcopy(source).cpu()
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        return model, result
+
+    def save_accepted(model, metrics, provenance):
+        payload = {"model_state_dict": model.cpu().state_dict(), "pruning_mask": mask,
+                   "mask_hash": mask_hash(mask), "model_state_hash": state_hash(model.state_dict()),
+                   "validation": metrics, "provenance": provenance,
+                   "global_epochs_consumed": global_epoch, "common_init_hash": common_hash}
+        temporary = output_root / "deployment.pt.tmp"
+        torch.save(payload, temporary)
+        temporary.replace(output_root / "deployment.pt")
+
+    persist()
+    try:
+        for cycle in range(c.max_cycles):
+            search, search_result = stage(f"cycle_{cycle}_search", c.gumbel_epochs, carrier, mask, False)
+            # Re-read best.pt and verify selection epoch; ignore last_valid_metrics.
+            search, search_payload, search_path = selected_model(config, search_result)
+            for name, gate in gates(search).items():
+                expected = torch.ones_like(gate.channel_mask)
+                expected[mask.get(name, [])] = 0
+                if not torch.equal(expected, gate.channel_mask):
+                    raise ValueError(f"Selected checkpoint has a different permanent mask: {name}")
+            decision_hash = state_hash(search_payload["model_state_dict"])
+            candidate_mask, budget = select_by_budget(
+                search, mask, float(c.max_param_fraction), float(c.min_keep_ratio),
+                ranking=str(getattr(c, "ranking", "learned")), seed=seed + cycle,
+            )
+            old = build_structural(config, search, mask)
+            candidate = build_structural(config, search, candidate_mask)
+            committed_equivalence(search, candidate, candidate_mask, sample, device)
+            if sum(p.numel() for p in candidate.parameters()) != budget["params_after"]:
+                raise AssertionError("Physical count differs from exact budget.")
+            if sum(p.numel() for p in old.parameters()) != budget["params_before"]:
+                raise AssertionError("Budget denominator differs from current physical count.")
+            for model in (old, candidate):
+                calibrate_bn(model, data.train_dataloader, device,
+                             c.commit_guard.train_bn_calibration_batches, seed + cycle)
+            old_metrics = evaluate_deployment(old, data.valid_dataloader, device)
+            candidate_metrics = evaluate_deployment(candidate, data.valid_dataloader, device)
+            old.cpu()
+            candidate.cpu()
+            if current_metrics is None:
+                accepted, current_metrics = old, old_metrics
+                save_accepted(accepted, current_metrics, {"stage": "first_search_open_mask"})
+            decision = {"cycle": cycle, "decision_checkpoint": str(search_path),
+                        "decision_checkpoint_epoch": search_payload["epoch"],
+                        "decision_checkpoint_hash": decision_hash,
+                        "candidate_mask": candidate_mask, "candidate_mask_hash": mask_hash(candidate_mask),
+                        "budget": budget, "old_committed_valid": old_metrics,
+                        "candidate_committed_valid": candidate_metrics}
+            decisions.append(decision)
+            rejected = candidate_metrics["accuracy"] < old_metrics["accuracy"] - c.commit_guard.max_immediate_accuracy_drop
+            if rejected:
+                decision["status"] = "rejected_before_recovery"
+            else:
+                recovery_epochs = c.final_epochs if cycle == c.max_cycles - 1 else c.recovery_epochs
+                recovered, recovery_result = stage(f"cycle_{cycle}_recovery", recovery_epochs,
+                                                   candidate, candidate_mask, True)
+                recovered_metrics = evaluate_deployment(recovered, data.valid_dataloader, device)
+                recovered.cpu()
+                decision["recovered_valid"] = recovered_metrics
+                rejected = recovered_metrics["accuracy"] < current_metrics["accuracy"] - c.commit_guard.max_recovered_accuracy_drop
+                if rejected:
+                    decision["status"] = "rejected_after_recovery"
+                else:
+                    decision["status"] = "accepted"
+                    mask, accepted, current_metrics = candidate_mask, recovered, recovered_metrics
+                    save_accepted(accepted, current_metrics, stages[-1])
+                    carrier = search
+                    transfer_structural_weights_to_gated(accepted, carrier)
+                    apply_channel_mask(carrier, mask)
+            persist()
+            if rejected:
+                # Roll back both topology AND weights. Used search/recovery epochs
+                # are still charged; no hidden retries or extra training.
+                remaining = total_epochs - global_epoch
+                if remaining:
+                    fallback, fallback_result = stage("rollback_finetune", remaining, accepted, mask, True)
+                    fallback_metrics = evaluate_deployment(fallback, data.valid_dataloader, device)
+                    if (fallback_metrics["accuracy"], -fallback_metrics["ce_loss"]) >= (
+                            current_metrics["accuracy"], -current_metrics["ce_loss"]):
+                        accepted, current_metrics = fallback.cpu(), fallback_metrics
+                        save_accepted(accepted, current_metrics, stages[-1])
+                break
+        assert global_epoch == total_epochs
+        final_cost = deployment_cost(accepted, image_shape=image_shape, device=device,
+                                     latency=device.startswith("cuda"))
+        # A missed budget is explicit even if rollback preserves high accuracy.
+        ideal_params = initial_cost["physical_total_parameters"] * (1 - c.max_param_fraction) ** c.max_cycles
+        state.update(status="completed", validation=current_metrics, final_cost=final_cost,
+                     all_pruning_decisions_accepted=all(d["status"] == "accepted" for d in decisions),
+                     ideal_parameter_target=ideal_params,
+                     parameter_target_met=final_cost["physical_total_parameters"] <= ideal_params * 1.01,
+                     optimizer_steps_total=global_epoch * len(data.train_dataloader))
+        persist()
+        return state
+    except Exception as exc:
+        state.update(status="interrupted" if isinstance(exc, TrainingInterrupted) else "failed",
+                     error=str(exc), partial_epoch_not_counted=True)
+        persist()
+        raise
+
+
+def run_fixed_pruning_pilot(config, output_root):
+    with cooperative_signals():
+        return _run(config, output_root)

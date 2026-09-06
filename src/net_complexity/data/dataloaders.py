@@ -182,12 +182,16 @@ class ClassicCVDataloaders(Dataloaders):
         seed: int = 42,
         num_classes: int | None = None,
         image_size: int | None = None,
+        include_test: bool = True,
+        loader_seed: int | None = None,
     ):
         resolved_num_workers = _resolve_num_workers(num_workers)
         resolved_pin_memory = _resolve_pin_memory(pin_memory)
 
         normalized_taskname = _normalize_taskname(taskname)
         if normalized_taskname in {"TINYIMAGENET200", "TINYIMAGENET"}:
+            if not include_test:
+                raise ValueError("include_test=False is currently supported for classic CV only.")
             self._init_tinyimagenet200(
                 path_to_data=path_to_data,
                 batch_size=batch_size,
@@ -228,7 +232,7 @@ class ClassicCVDataloaders(Dataloaders):
                 train=False,
                 transform=test_transform,
                 download=True
-            )
+            ) if include_test else None
 
         train_size = int(len(full_train_dataset))
         val_size = int(train_val_ratio[1]*train_size)
@@ -258,7 +262,9 @@ class ClassicCVDataloaders(Dataloaders):
             shuffle=True,
             num_workers=resolved_num_workers,
             pin_memory=resolved_pin_memory,
-            drop_last=True
+            drop_last=True,
+            generator=(torch.Generator().manual_seed(loader_seed)
+                       if loader_seed is not None else None),
         )
 
         self.valid_dataloader = DataLoader(
@@ -277,7 +283,7 @@ class ClassicCVDataloaders(Dataloaders):
             num_workers=resolved_num_workers,
             pin_memory=resolved_pin_memory,
             drop_last=False
-        )
+        ) if include_test else None
 
     def _init_tinyimagenet200(
         self,

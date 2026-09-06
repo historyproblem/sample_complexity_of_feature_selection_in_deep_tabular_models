@@ -12,7 +12,7 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
@@ -22,13 +22,14 @@ from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, Adapt
 from net_complexity.training.gradient_norms import GradientNormLogger
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
+from net_complexity.training.interruption import TrainingInterrupted
 from net_complexity.training.run_history import RunHistory, _filter_channel_metrics
 from net_complexity.training.tracking import MLflowLogger
 from net_complexity.tuning.restart_guard import CollapseDetected, CollapseGuard
 
 
 EpochEndCallback = Callable[
-    [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, RunHistory | None],
+    [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, Optional[RunHistory]],
     None,
 ]
 ProgressContext = Mapping[str, Any]
@@ -1541,6 +1542,8 @@ def evaluate(model: nn.Module,
     for X, y in dataloader:
         X, y = X.to(device), y.to(device)
         output = model(X, y)
+        if not torch.isfinite(output.logits).all() or not torch.isfinite(output.loss).all():
+            raise FloatingPointError("Non-finite validation output/loss.")
         metric.update(X, output, y, model)
 
 
@@ -1593,9 +1596,13 @@ def train_epoch(model,
     num_batches = 0
 
     for batch_index, (X, y) in enumerate(dataloaders.train_dataloader):
+        from .interruption import check_stop
+        check_stop(epoch=epoch, batches=batch_index)
         X, y = X.to(device), y.to(device)
         output = model(X, y)
 
+        if not torch.isfinite(output.loss).all():
+            raise FloatingPointError("Non-finite training loss; refusing optimizer update.")
         metrics.train_metrics.update(X, output, y, model)
 
         collect_gradient_norms = (
@@ -1609,6 +1616,8 @@ def train_epoch(model,
         output.loss.backward()
 
         for key, value in _compute_block_gradient_norms(model).items():
+            if not math.isfinite(value):
+                raise FloatingPointError("Non-finite gradient; refusing optimizer update.")
             grad_norm_sums[key] = grad_norm_sums.get(key, 0.0) + value
         num_batches += 1
 
@@ -1619,6 +1628,7 @@ def train_epoch(model,
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
             scheduler_state.step(batch_metrics)
         optimizer.zero_grad()
+        check_stop(epoch=epoch, batches=batch_index + 1)
 
     if num_batches == 0:
         return {}
@@ -1687,6 +1697,13 @@ def train(model: nn.Module,
 
     epoch_num = 1
     while epoch_num <= total_epochs:
+        audit_seed = getattr(training_arguments, "audit_data_seed", None)
+        if audit_seed is not None:
+            # Independent DataLoader RNG: gate draws and model construction must
+            # not change shuffling / worker augmentation seeds between jobs.
+            data_epoch = int(getattr(training_arguments, "global_epoch_offset", 0)) + epoch_num
+            dataloaders.train_dataloader.generator.manual_seed(int(audit_seed) + data_epoch)
+            set_random_seed(int(audit_seed) + data_epoch)
         if lambda_warmup is not None:
             lambda_warmup.step(epoch_num, model)
         if gate_mode_schedule is not None:
@@ -1739,7 +1756,7 @@ def train(model: nn.Module,
             train_metrics.update(gradient_norm_logger.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
-        train_metrics.update({f"train_{key}": value for key, value in epoch_grad_norms.items()})
+        train_metrics.update({f"train_{key}": value for key, value in (epoch_grad_norms or {}).items()})
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
         observed_epoch_metrics = {
@@ -1787,6 +1804,8 @@ def train(model: nn.Module,
                 run_history.set_runtime_metadata(runtime_metadata)
 
         post_epoch_extra_metrics = {
+            "lambda_used": best_checkpoint_extra_state["model_lambda_coef"],
+            "lambda_next": _resolve_model_lambda_coef(model),
             "train_time_sec": float(train_time),
             "valid_time_sec": float(valid_time),
             "epoch_time_sec": float(perf_counter() - epoch_started_at),
@@ -1991,6 +2010,26 @@ def train(model: nn.Module,
                         **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
                     },
                 )
+
+    if not bool(getattr(training_arguments, "evaluate_test", True)):
+        if run_history is not None:
+            run_history.save_summary(
+                final_train_metrics=last_train_metrics,
+                final_valid_metrics=last_valid_metrics,
+                test_metrics={},
+                stop_info=stop_info,
+            )
+        return {
+            "last_train_metrics": last_train_metrics,
+            "last_valid_metrics": last_valid_metrics,
+            "test_metrics": {},
+            "test_evaluation_disabled": True,
+            "num_epochs_executed": completed_epochs,
+            "full_train_time_sec": sum(
+                float(row.get("epoch_time_sec", 0.0) or 0.0)
+                for row in (run_history.history_records if run_history else [])
+            ),
+        }
 
     test_checkpoint_epoch = final_epoch
     if run_history is not None:
@@ -2245,12 +2284,17 @@ def run_training(
     gate_mode_schedule = _build_gate_mode_schedule(config.training_arguments)
     if gate_mode_schedule is not None:
         gate_mode_schedule.apply_initial_state(model)
-    dataloaders = instantiate(config.dataloaders)
+    if not bool(getattr(config.training_arguments, "evaluate_test", True)):
+        # Fail closed for unsupported factories, rather than silently build test.
+        dataloaders = instantiate(config.dataloaders, include_test=False)
+    else:
+        dataloaders = instantiate(config.dataloaders)
     optimizer, optimizer_build_info = _build_optimizer(config, model)
     scheduler_state = _build_scheduler(config, optimizer)
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if _is_mlflow_enabled(config) else None
     run_history = RunHistory(config)
+    run_history.train_dataloader_generator = getattr(dataloaders.train_dataloader, "generator", None)
     runtime_snapshot = _assert_runtime_lambda_consistency(
         config,
         model,
@@ -2314,6 +2358,14 @@ def run_training(
             epoch_end_callback=epoch_end_callback,
             progress_context=progress_context,
         )
+    except TrainingInterrupted as exc:
+        run_history.save_checkpoint(
+            "interrupted.pt", model=model, optimizer=optimizer,
+            epoch=exc.epoch, metrics={}, scheduler_state=scheduler_state,
+            extra_state={"status": "interrupted", "completed_epochs": exc.epoch - 1,
+                         "batches_in_partial_epoch": exc.batches},
+        )
+        raise
     finally:
         log_run_artifacts(config, run_history, mlflow_logger)
         if mlflow_logger is not None:

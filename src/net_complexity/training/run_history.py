@@ -333,6 +333,10 @@ class RunHistory:
         else:
             improved = float(current_value) > self.best_metric_value
 
+        secondary = OmegaConf.select(self.config, "run_history.secondary_monitor")
+        if secondary and self.best_metric_value is not None and float(current_value) == self.best_metric_value:
+            # Pilot selects accuracy first, then smaller sample-weighted CE.
+            improved = float(filtered_valid_metrics[secondary]) < float(self.best_valid_metrics[secondary])
         if improved:
             self.best_metric_name = monitor
             self.best_metric_value = float(current_value)
@@ -431,7 +435,36 @@ class RunHistory:
             payload["scaler_state_dict"] = self._to_cpu(deepcopy(scaler.state_dict()))
         if extra_state:
             payload["extra_state"] = self._to_cpu(deepcopy(dict(extra_state)))
-        torch.save(payload, checkpoint_path)
+        # Primitive/tensor RNG representation is compatible with weights_only=True.
+        import random
+        import numpy as np
+        numpy_state = np.random.get_state()
+        payload["rng_state"] = {
+            "python": random.getstate(),
+            "numpy": [numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]],
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        }
+        generator = getattr(self, "train_dataloader_generator", None)
+        if generator is not None:
+            payload["rng_state"]["train_dataloader"] = generator.get_state()
+        payload["global_epoch"] = int(OmegaConf.select(
+            self.config, "training_arguments.global_epoch_offset", default=0)) + int(epoch)
+        payload["pruning_mask"] = OmegaConf.to_container(
+            OmegaConf.select(self.config, "channel_pruning.mask", default=OmegaConf.create({})),
+            resolve=True,
+        )
+        if OmegaConf.select(self.config, "cyclic_channel_pruning.audit_protocol", default=False):
+            from .pruning_measurement import mask_hash, state_hash
+            payload["model_state_hash"] = state_hash(payload["model_state_dict"])
+            payload["mask_hash"] = mask_hash(payload["pruning_mask"])
+            payload["controller_state"] = {"enabled": False, "mode": "fixed_lambda_pilot"}
+            payload["global_epochs_completed"] = int(OmegaConf.select(
+                self.config, "training_arguments.global_epoch_offset", default=0)) + int(
+                    (extra_state or {}).get("completed_epochs", epoch))
+        temporary = checkpoint_path.with_suffix(".pt.tmp")
+        torch.save(payload, temporary)
+        temporary.replace(checkpoint_path)
         return checkpoint_path
 
     def save_summary(

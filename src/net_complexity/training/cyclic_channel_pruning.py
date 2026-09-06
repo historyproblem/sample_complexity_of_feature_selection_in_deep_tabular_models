@@ -601,6 +601,9 @@ def run_cyclic_channel_pruning_training(
     ``recovery_results``, ``final_result``, ``training_cost``.
     """
     cyclic_cfg = config.cyclic_channel_pruning
+    if bool(getattr(cyclic_cfg, "audit_protocol", False)):
+        from .pruning_audit import run_fixed_pruning_pilot
+        return run_fixed_pruning_pilot(config, output_root)
     max_cycles = int(cyclic_cfg.max_cycles)
     stop_on_convergence = bool(
         getattr(cyclic_cfg, "stop_on_convergence", True)

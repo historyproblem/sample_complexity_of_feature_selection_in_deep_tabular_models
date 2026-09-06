@@ -66,6 +66,14 @@ class PrunedGumbelBottleneck(nn.Module):
     ):
         super().__init__()
         full_channels = out_channels * self.expansion
+        for label, indices, width in (
+            ("output", disabled_channels or [], full_channels),
+            ("mid1", disabled_mid1_channels or [], out_channels),
+            ("mid2", disabled_mid2_channels or [], out_channels),
+        ):
+            if len(indices) != len(set(indices)) or any(
+                    type(i) is not int or not 0 <= i < width for i in indices):
+                raise ValueError(f"Invalid/duplicate {label} original channel indices.")
         disabled = set(disabled_channels or [])
         active = [ch for ch in range(full_channels) if ch not in disabled]
         if not active:
@@ -112,15 +120,25 @@ class PrunedGumbelBottleneck(nn.Module):
         self.stride = stride
         self.relu = nn.ReLU()
 
-        # active_selection[ch, j] = 1 iff active[j] == ch — scatters the
-        # narrowed [B, n_active, H, W] residual back to [B, full_channels, H, W].
-        active_sel = torch.zeros(full_channels, n_active)
-        for j, ch in enumerate(active):
-            active_sel[ch, j] = 1.0
-        self.register_buffer("active_selection", active_sel)
+        # Residual width stays fixed; no dense one-hot matrix is needed.
+        self._full_channels = int(full_channels)
         self.register_buffer("active_indices", torch.tensor(active, dtype=torch.long))
         self.register_buffer("mid1_active_indices", torch.tensor(mid1_active, dtype=torch.long))
         self.register_buffer("mid2_active_indices", torch.tensor(mid2_active, dtype=torch.long))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Legacy snapshots stored a redundant dense one-hot matrix. Active
+        # channel indices are the authoritative mapping in both formats.
+        state_dict.pop(prefix + "active_selection", None)
+        for key in ("active_indices", "mid1_active_indices", "mid2_active_indices"):
+            saved = state_dict.get(prefix + key)
+            if saved is not None and not torch.equal(saved.cpu(), getattr(self, key).cpu()):
+                error_msgs.append(f"{prefix}{key} disagrees with the constructed pruning topology.")
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
@@ -129,7 +147,13 @@ class PrunedGumbelBottleneck(nn.Module):
         out = self.relu(self.batch_norm2(self.conv2(out)))     # [B, w2, H, W]
         out = self.batch_norm3(self.conv3(out))                 # [B, n_active, H, W]
 
-        full_out = torch.einsum("pn,bnhw->bphw", self.active_selection, out)
+        if self.active_indices.numel() == self._full_channels:
+            # The constructor enumerates surviving original channels in order.
+            full_out = out
+        else:
+            full_out = out.new_zeros(
+                (out.shape[0], self._full_channels, *out.shape[2:])
+            ).index_copy(1, self.active_indices, out)
 
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)

@@ -1,0 +1,89 @@
+# @package _global_
+# Fixed-lambda pilot v1. This is NOT Pro's full adaptive-controller contract.
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: gumbel_masked_bottleneck
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /run_history: valid_accuracy_max
+  - _self_
+
+seed: 42
+device: cuda:0
+model:
+  lambda_coef: 0.001
+  gumbel_init_mode: paper_resnet50
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.0
+  backbone:
+    resnet_block:
+      gate_output: true
+      gate_internal_width: false
+      train_gate_mode: ste_hard
+      eval_gate_mode: deterministic_hard
+      gate_threshold: 0.5
+      temperature: 1.0
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0005
+  gate_weight_decay_scale: 0.0
+dataloaders:
+  path_to_data: data
+  seed: 42
+  loader_seed: 42
+  include_test: false
+  batch_size: 128
+  num_workers: 2
+training_arguments:
+  evaluate_test: false
+  global_epoch_offset: 0
+  audit_data_seed: 42
+  adaptive_lambda:
+    enabled: false
+  lambda_warmup:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+      return_counts: true
+  test_metrics: []
+cyclic_channel_pruning:
+  enabled: true
+  audit_protocol: true
+  max_cycles: 3
+  stop_on_convergence: false
+  gumbel_epochs: 20
+  recovery_epochs: 15
+  final_epochs: 60
+  drop_mode: param_budget
+  max_param_fraction: 0.05
+  min_keep_ratio: 0.25
+  ranking: learned
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+    initial_checkpoint: ${oc.env:AUDIT_INIT_CHECKPOINT}
+  commit_guard:
+    enabled: true
+    train_bn_calibration_batches: 20
+    max_immediate_accuracy_drop: 0.08
+    max_recovered_accuracy_drop: 0.01
+    on_reject: continue_previous_graph_within_budget
+mlflow:
+  enabled: false
+  run_name: pruning_pilot
+run_history:
+  root_dir: outputs/pruning_pilot
+  run_name: pruning_pilot
+  log_channel_history: true
+  secondary_monitor: valid_ce_loss
+  log_gate_history: false

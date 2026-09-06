@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import re
 from functools import partial
@@ -781,10 +783,14 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
         gate_internal_width: bool = False,
+        gate_output: bool = True,
         disabled_mid1_channels: list[int] | None = None,
         disabled_mid2_channels: list[int] | None = None,
     ):
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.gate_output = bool(gate_output)
+        if not self.gate_output and disabled_channels:
+            raise ValueError("Cannot disable output channels with gate_output=False.")
         self.gumbel_layer = MaskedGumbelLayer(
             input_dim=out_channels * self.expansion,
             temperature=temperature,
@@ -796,7 +802,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
             disabled_channels=disabled_channels,
-        )
+        ) if self.gate_output else nn.Identity()
 
         self.gate_internal_width = bool(gate_internal_width)
         self.mid1_gumbel_layer = None
