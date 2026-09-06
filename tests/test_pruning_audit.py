@@ -99,6 +99,57 @@ def test_internal_only_has_no_output_selector_or_regularizer_parameters():
     assert isinstance(model.block.gumbel_layer, nn.Identity)
 
 
+@pytest.mark.parametrize("job,selector_names", [
+    ("D1_dense_control", {"gumbel_layer"}),
+    ("J2_output_fixed", {"gumbel_layer"}),
+    ("D2_internal_fixed", {"mid1_gumbel_layer", "mid2_gumbel_layer"}),
+])
+def test_resnet50_channel_history_logs_real_gates(tmp_path, monkeypatch, job, selector_names):
+    import csv
+    import gzip
+    import sys
+    from pathlib import Path
+    from hydra.utils import instantiate
+    from net_complexity.training.pruning_audit import build_structural
+    from net_complexity.training.run_history import RunHistory
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from pruning_pilot_common import config_for
+
+    monkeypatch.setenv("AUDIT_INIT_CHECKPOINT", "unused")
+    cfg = config_for(job)
+    cfg.run_history.root_dir = str(tmp_path)
+    cfg.run_history.use_hydra_output_dir = False
+    assert cfg.run_history.log_channel_history
+    history = RunHistory(cfg)
+    model = instantiate(cfg.model)
+    selectors = gates(model)
+    first_name = next(iter(selectors))
+    # Permanent masks must be represented in probabilities, with original indices.
+    selectors[first_name].channel_mask[0] = 0
+    count = history.log_channel_history(3, model)
+    assert count == sum(gate.logits.shape[0] for gate in selectors.values())
+    with gzip.open(history.channel_history_path, "rt", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == count
+    assert {row["layer_name"] for row in rows} == set(selectors)
+    assert {name.rsplit(".", 1)[-1] for name in selectors} == selector_names
+    assert {int(row["stage_index"]) for row in rows} == {1, 2, 3, 4}
+    probabilities = {name: gate.get_selection_probs().detach().tolist() for name, gate in selectors.items()}
+    logits = {name: gate.logits.detach().tolist() for name, gate in selectors.items()}
+    for row in rows:
+        name = row["layer_name"]
+        channel = int(row["channel_index"])
+        assert int(row["epoch"]) == 3
+        assert float(row["selection_prob"]) == pytest.approx(probabilities[name][channel])
+        assert float(row["logit_off"]) == pytest.approx(logits[name][channel][0])
+        assert float(row["logit_on"]) == pytest.approx(logits[name][channel][1])
+    masked_row = next(row for row in rows if row["layer_name"] == first_name and row["channel_index"] == "0")
+    assert float(masked_row["selection_prob"]) == 0
+    # Recovery uses the same history config, but structural models have no gates.
+    structural = build_structural(cfg, model, {first_name: [0]})
+    assert history.log_channel_history(4, structural) == 0
+
+
 def test_joint_internal_cost_recomputed_and_physically_exact():
     model = tiny_carrier()
     for gate in gates(model).values():
@@ -322,7 +373,6 @@ def test_real_engine_saves_partial_checkpoint_on_stop(tmp_path, monkeypatch):
     cfg.dataloaders = {"_target_": "smoke_pruning_pilot.SmokeDataloaders", "loader_seed": 42}
     cfg.run_history.root_dir = str(tmp_path)
     cfg.run_history.use_hydra_output_dir = False
-    cfg.run_history.log_channel_history = False
     original_step = torch.optim.AdamW.step
     def step(self, *args, **kwargs):
         result = original_step(self, *args, **kwargs)

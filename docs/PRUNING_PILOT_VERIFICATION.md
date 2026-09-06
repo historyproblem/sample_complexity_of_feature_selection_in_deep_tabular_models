@@ -1,5 +1,30 @@
 # Проверки от 5 сентября 2026
 
+## Исправление старта ResNet50 с channel history, 6 сентября
+
+Серверный D1 остановился до первой эпохи: конфиги включали
+`run_history.log_channel_history`, но пара ResNet50 / MaskedGumbelBottleneckLayer
+не была зарегистрирована в channel-history collector. Прежний synthetic smoke
+отключал эту настройку и поэтому не покрывал реальный путь запуска логирования.
+
+- Зарегистрирован существующий совместимый Gumbel collector для этой пары.
+  Он сохраняет выходные и mid1/mid2 каналы, включая исходные индексы и маски.
+  На структурном recovery без gates остаётся только заголовок CSV.
+- Все семь pilot-конфигов теперь проверяются через настоящий RunHistory
+  с включённым channel history. До исправления все семь проверок воспроизвели
+  серверный ValueError; после исправления прошли.
+- Smoke больше не отключает channel history и проверяет содержимое CSV.gz
+  после каждой стадии. CPU smoke обоих профилей прошёл: D1/D2 по две маленькие
+  эпохи, J1/J2/J3 по четыре; test-sentinel сохранён. Это синтетические данные,
+  не измерение качества на CIFAR10 или проверка CUDA.
+- Полный набор серверного preflight: 64 passed. Дополнительные regression tests
+  проверяют реальные ResNet50 output/internal gates, значения probabilities/logits,
+  маски и отсутствие выдуманных gates на recovery.
+- Расширенный локальный набор: 115 passed, 1 deselected. Исключён только прежний
+  `test_run_history_logs_gumbel_gate_history_as_jsonl_without_duplicates`:
+  он падает на `zip(strict=False)` в локальном Python 3.9. Этот отдельный JSONL
+  путь отключён в pilot, не изменялся и не входит в серверный preflight.
+
 ## Дополнение: дневной режим, 6 сентября
 
 - Добавлен `--profile daytime`: D1 dense / D2 internal-only, по 25 эпох

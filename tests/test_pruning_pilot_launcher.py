@@ -13,6 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import launch_pruning_pilot as launcher
 from pruning_pilot_common import config_for
 from net_complexity.training.pruning_audit import validate_config
+from net_complexity.training.run_history import RunHistory
+
+
+def _assert_production_channel_history_initializes(cfg, tmp_path):
+    assert cfg.run_history.log_channel_history
+    cfg.run_history.root_dir = str(tmp_path)
+    cfg.run_history.use_hydra_output_dir = False
+    history = RunHistory(cfg)
+    assert history.channel_history_enabled
+    assert history.channel_history_collector is not None
+    assert history.channel_history_path.is_file()
 
 
 def test_launcher_does_not_start_after_deadline(tmp_path, monkeypatch):
@@ -44,13 +55,14 @@ def test_launcher_timeout_terms_trainer_then_kills_group_if_needed(tmp_path, mon
 
 
 @pytest.mark.parametrize("job", launcher.JOBS + ["J4_internal_random"])
-def test_all_pilot_configs_resolve_and_validate(monkeypatch, job):
+def test_all_pilot_configs_resolve_and_validate(monkeypatch, tmp_path, job):
     monkeypatch.setenv("AUDIT_INIT_CHECKPOINT", "/placeholder/not_loaded.pt")
     cfg = config_for(job)
     assert validate_config(cfg) == 150
     assert not cfg.training_arguments.evaluate_test
     assert not cfg.dataloaders.include_test
     assert not cfg.training_arguments.adaptive_lambda.enabled
+    _assert_production_channel_history_initializes(cfg, tmp_path)
 
 
 def test_unsupported_adaptive_and_typo_fail_closed(monkeypatch):
@@ -67,7 +79,7 @@ def test_unsupported_adaptive_and_typo_fail_closed(monkeypatch):
 
 
 @pytest.mark.parametrize("job", launcher.DAYTIME_JOBS + ["D3_internal_random"])
-def test_daytime_is_one_cycle_and_one_seed(monkeypatch, job):
+def test_daytime_is_one_cycle_and_one_seed(monkeypatch, tmp_path, job):
     monkeypatch.setenv("AUDIT_INIT_CHECKPOINT", "/placeholder/not_loaded.pt")
     cfg = config_for(job)
     assert validate_config(cfg) == 25
@@ -76,6 +88,7 @@ def test_daytime_is_one_cycle_and_one_seed(monkeypatch, job):
     assert cfg.cyclic_channel_pruning.gumbel_epochs == 15
     assert cfg.cyclic_channel_pruning.final_epochs == 10
     assert not cfg.training_arguments.evaluate_test
+    _assert_production_channel_history_initializes(cfg, tmp_path)
     if job != "D1_dense_control":
         assert cfg.cyclic_channel_pruning.max_param_fraction == 0.10
         assert cfg.cyclic_channel_pruning.min_keep_ratio == 0.50

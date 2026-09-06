@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import gzip
 import os
 import tempfile
 from pathlib import Path
@@ -46,7 +48,8 @@ def run_smoke(destination, device="cpu", profile="nightly"):
         config = config_for(job)
         config.device = device
         config.dataloaders = {"_target_": "smoke_pruning_pilot.SmokeDataloaders", "loader_seed": 42}
-        config.run_history.log_channel_history = False
+        # Keep production logging enabled: disabling it hid a ResNet50 startup failure.
+        assert config.run_history.log_channel_history
         config.cyclic_channel_pruning.max_cycles = 1 if profile == "daytime" else 2
         config.cyclic_channel_pruning.gumbel_epochs = 1
         config.cyclic_channel_pruning.recovery_epochs = 1
@@ -62,6 +65,19 @@ def run_smoke(destination, device="cpu", profile="nightly"):
         assert result["optimizer_steps_total"] == expected_epochs * 2
         assert all(d["status"] == "accepted" for d in result["decisions"])
         assert result["validation"]["example_count"] == 5
+        for stage in result["stages"]:
+            history_path = Path(stage["run_dir"]) / "channel_history.csv.gz"
+            with gzip.open(history_path, "rt", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            if stage["name"].endswith("_search"):
+                expected_selectors = ({"mid1_gumbel_layer", "mid2_gumbel_layer"}
+                                      if config.model.backbone.resnet_block.gate_internal_width
+                                      else {"gumbel_layer"})
+                assert rows, f"Missing search channel history for {job}"
+                assert {row["layer_name"].rsplit(".", 1)[-1] for row in rows} == expected_selectors
+                assert {int(row["epoch"]) for row in rows} == {1}
+            else:
+                assert not rows, "Structural recovery must not invent gate probabilities."
         if job == jobs[0]:
             assert result["accepted_mask"] == {}
             assert result["final_cost"]["physical_total_parameters"] == 23547338
