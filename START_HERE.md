@@ -3,7 +3,7 @@
 Исправления подготовлены в ветке `fix/resnet50-pruning-audit-20260905`
 на базе `22c5866`. Основной способ получения кода — GitHub; архив не нужен.
 
-## Запустить на сервере
+## Запустить на сервере через YAML
 
 Все команды ниже выполняются из корня серверного репозитория.
 Нужны Python >=3.10, CUDA, зависимости проекта и pytest,
@@ -15,28 +15,44 @@
 git status --short
 git fetch origin
 git switch --track origin/fix/resnet50-pruning-audit-20260905
-.venv/bin/python scripts/launch_pruning_pilot.py \
-  --output outputs/pruning_night_fixed_20260906 --data data
+.venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_nightly
 ```
 
 Если `git status --short` показывает незакоммиченные изменения, сначала
 сохраните их; не используйте force/reset для переключения. Если локальная
 ветка уже существует, вместо `git switch --track ...` выполните
 `git switch fix/resnet50-pruning-audit-20260905`, затем `git pull --ff-only`.
-Папка результата должна быть новой — повторное использование запрещено.
+План ночи находится в `configs/pruning_nightly.yaml`: очередь J1 → J2 → J3 → J4,
+по 150 эпох, лимит 12.5 часа, данные `data`. Состав/порядок заданий, лимит и
+`run_history.root_dir` редактируются в этом YAML. Dense должен оставаться первым.
+Это НЕ старый `cyclic_channel_nightly.yaml` с threshold=0.7.
+
+Папка автоматически создаётся в `outputs/runs/<дата_время>_pruning_nightly`
+и печатается как `Results: ...`. Время включает микросекунды; существующие
+каталоги по-прежнему запрещено переиспользовать. Явный `--output` больше не нужен,
+но остаётся доступен для переопределения пути. Итоговые настройки очереди
+сохраняются в `launcher_config.yaml` вместе с прежними конфигами каждого job.
+
+Показать план, не создавая папок и не запуская GPU/обучение:
+
+```bash
+.venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_nightly --cfg job
+```
+
+Это YAML-интерфейс launcher, не Hydra multirun: для одноразовых переопределений
+используйте `--hours 12`, `--data ...`, `--output ...`, а не `hours=12`.
 Если pytest отсутствует:
 `.venv/bin/python -m pip install pytest`.
 
 Чтобы пережить закрытие SSH, вместо команды запуска Python:
 
 ```bash
-nohup .venv/bin/python scripts/launch_pruning_pilot.py \
-  --output outputs/pruning_night_fixed_20260906 --data data \
-  > pruning_night_fixed_20260906.log 2>&1 &
+nohup .venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_nightly \
+  > pruning_nightly.log 2>&1 < /dev/null &
 ```
 
 Не запускайте оба варианта одновременно. Для отдельной предварительной
-проверки добавьте `--preflight-only` и укажите другую новую папку результата.
+проверки добавьте `--preflight-only`; для неё также создастся новая папка результата.
 Обычный запуск уже включает эту проверку.
 
 ## Короткий дневной пилот
@@ -117,7 +133,7 @@ NaN/Inf или неуспешная FP64 проверка останавлива
 `D2_internal_fixed/cycle_0_equivalence.json`. Это проверка переноса весов,
 а не доказательство сохранения accuracy после удаления каналов.
 
-## Что будет запущено ночью (профиль по умолчанию)
+## Что будет запущено ночью через pruning_nightly.yaml
 
 Последовательно, на одной GPU, без test:
 
@@ -126,18 +142,25 @@ NaN/Inf или неуспешная FP64 проверка останавлива
 | J1_dense_control | bypass, без удаления | 0 | 0% | — |
 | J2_output_fixed | выход Bottleneck | 0.001 | 5% физических params | 25% |
 | J3_internal_fixed | только mid1 и mid2 | 0.001 | 18% физических params | 50% |
+| J4_internal_random | mid1/mid2, случайное ранжирование | 0.001 | 18% физических params | 50% |
 
 В каждом job: 3×20 search + 2×15 recovery + 60 final = 150 эпох.
 У всех один случайный initializer (ноль обученных эпох), seed/split 42,
 AdamW, batch 128, одинаковый протокол перезапуска optimizer/scheduler.
 J1 — dense-контроль этого стадийного протокола, не непрерывное dense обучение.
-Общий лимит по умолчанию 11ч45м, включая preflight; ещё до 60 секунд даётся
-на сохранение при остановке. Это ограничение, не обещание, что все jobs успеют.
+В YAML задан общий лимит 12ч30м, включая preflight; ещё до 60 секунд даётся
+на сохранение при остановке. Оценка по дневной скорости — около 11–12 часов,
+не гарантия. Это ограничение, не обещание, что все jobs успеют.
 
-Четвёртый job со случайным ranking внутренних каналов — необязательный:
-`--with-random-control`. Он проверяет, лучше ли learned ranking случайного
+Четвёртый job со случайным ranking внутренних каналов включён в YAML.
+Он проверяет, лучше ли learned ranking случайного
 при одинаковом номинальном бюджете; фактический compute нужно сравнить отдельно.
 Новый adaptive-controller отложен: это НЕ весь P0/P1 contract из AUDIT.md.
+
+Прежний CLI без `--config-name` сохранён: `--profile nightly` означает J1/J2/J3
+с лимитом 11.75 часа; `--with-random-control` добавляет J4. С YAML этот флаг
+не нужен — очередь уже перечисляет J4. В обоих интерфейсах действуют прежние
+preflight, общий initializer, дедлайн, проверки сопоставимости и comparison.
 
 ## Защиты и критерии
 

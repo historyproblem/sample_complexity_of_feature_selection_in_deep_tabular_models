@@ -5,16 +5,19 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from pruning_pilot_common import ROOT, config_for, make_initializer
 
 import torch
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from net_complexity.training.pruning_audit import run_fixed_pruning_pilot, validate_config
@@ -129,28 +132,91 @@ def provenance():
             "protocol": "fixed_lambda_pilot_v1_not_full_adaptive_contract"}
 
 
-def main():
+def resolve_launcher_plan(args):
+    """Compose YAML without starting Hydra jobs or precreating output folders.
+
+    Keeping composition scoped here allows config_for() to compose each model
+    independently, while the existing launcher retains all orchestration guards.
+    """
+    plan = {}
+    if args.config_name is not None:
+        name = args.config_name.removesuffix(".yaml")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", name) is None:
+            raise ValueError("--config-name must name a root YAML config, not a path.")
+        with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
+            plan = OmegaConf.to_container(compose(config_name=name), resolve=True)
+        if not isinstance(plan, dict) or set(plan) != {"name", "profile", "jobs", "hours", "data", "run_history"}:
+            raise ValueError("Launcher YAML requires name, profile, jobs, hours, data and run_history only.")
+        if not isinstance(plan["run_history"], dict) or set(plan["run_history"]) != {"root_dir"}:
+            raise ValueError("Launcher run_history supports root_dir only.")
+        if args.profile is not None and args.profile != plan["profile"]:
+            raise ValueError("Do not override a YAML profile independently of its jobs; use another config.")
+    args.profile = args.profile or plan.get("profile", "nightly")
+    if not isinstance(args.profile, str) or args.profile not in PROFILE_JOBS:
+        raise ValueError("Unknown launcher profile.")
+    jobs = plan.get("jobs", list(PROFILE_JOBS[args.profile]))
+    if not isinstance(jobs, list) or not jobs or not all(isinstance(job, str) for job in jobs):
+        raise ValueError("jobs must be a nonempty list of job names.")
+    jobs = list(jobs)
+    if args.with_random_control and RANDOM_JOBS[args.profile] not in jobs:
+        jobs.append(RANDOM_JOBS[args.profile])
+    allowed = PROFILE_JOBS[args.profile] + [RANDOM_JOBS[args.profile]]
+    if len(set(jobs)) != len(jobs) or any(job not in allowed for job in jobs):
+        raise ValueError("jobs must be unique and belong to the requested profile.")
+    if jobs[0] != PROFILE_JOBS[args.profile][0]:
+        raise ValueError("The dense control must be first for matched comparisons.")
+    if args.hours is None:
+        args.hours = plan.get("hours", PROFILE_HOURS[args.profile])
+    if type(args.hours) not in (int, float) or not 0 < args.hours <= 24:
+        raise ValueError("hours must be a number in (0, 24].")
+    data = args.data if args.data is not None else plan.get("data", "data")
+    root_dir = plan.get("run_history", {}).get("root_dir", "outputs/runs")
+    run_name = plan.get("name", f"pruning_{args.profile}")
+    if not isinstance(run_name, str) or re.fullmatch(r"[A-Za-z0-9_-]+", run_name) is None:
+        raise ValueError("name must contain only letters, digits, underscores or hyphens.")
+    if not isinstance(root_dir, str) or not root_dir.strip():
+        raise ValueError("run_history.root_dir must be a nonempty path.")
+    if not isinstance(data, (str, Path)) or not str(data).strip():
+        raise ValueError("data must be a nonempty path.")
+    args.data = Path(data)
+    if args.output is None:
+        if args.job:
+            raise ValueError("Internal --job invocations require an explicit --output.")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        args.output = Path(root_dir) / f"{stamp}_{run_name}"
+    return jobs, {"config_name": args.config_name, "name": run_name, "profile": args.profile,
+                  "jobs": jobs, "hours": args.hours, "data": str(args.data.resolve()),
+                  "output": str(args.output.resolve()), "preflight_only": args.preflight_only,
+                  "resume_from": str(args.resume_from.resolve()) if args.resume_from else None}
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True, help="NEW output directory (never reused)")
-    parser.add_argument("--data", type=Path, default=Path("data"))
-    parser.add_argument("--profile", choices=list(PROFILE_JOBS), default="nightly")
+    parser.add_argument("--config-name", help="Launcher YAML in configs, e.g. pruning_nightly")
+    parser.add_argument("--cfg", choices=["job"], help="Print the resolved launcher plan without running anything")
+    parser.add_argument("--output", type=Path, help="Override automatic outputs/runs/<timestamp>_<name>; must be NEW")
+    parser.add_argument("--data", type=Path)
+    parser.add_argument("--profile", choices=list(PROFILE_JOBS))
     parser.add_argument("--hours", type=float, help="Overall cap; default: nightly 11.75h, daytime 2h")
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--with-random-control", action="store_true")
     parser.add_argument("--resume-from", type=Path,
                         help="Stopped daytime parent directory: reuse completed D1 and D2's full first search")
     parser.add_argument("--job", choices=JOBS + DAYTIME_JOBS + list(RANDOM_JOBS.values()), help=argparse.SUPPRESS)
-    args = parser.parse_args()
-    args.hours = PROFILE_HOURS[args.profile] if args.hours is None else args.hours
-    jobs = list(PROFILE_JOBS[args.profile])
-    if args.with_random_control:
-        jobs.append(RANDOM_JOBS[args.profile])
+    args = parser.parse_args(argv)
+    try:
+        jobs, launcher_plan = resolve_launcher_plan(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.resume_from is not None:
         args.resume_from = args.resume_from.resolve()
-        if args.profile != "daytime" or args.with_random_control or args.preflight_only:
+        if args.profile != "daytime" or jobs != DAYTIME_JOBS or args.preflight_only:
             parser.error("--resume-from supports only the two-job daytime profile, not preflight-only.")
         if args.job is not None and args.job != "D2_internal_fixed":
             parser.error("Only D2_internal_fixed resumes from the completed first search.")
+    if args.cfg is not None:
+        print(OmegaConf.to_yaml(OmegaConf.create(launcher_plan)), end="")
+        return
     if sys.version_info < (3, 10):
         parser.error("Server runtime requires Python >=3.10; local compatibility smoke is separate.")
     if not torch.cuda.is_available():
@@ -175,14 +241,16 @@ def main():
         return
 
     output.mkdir(parents=True, exist_ok=False)
+    print(f"Results: {output}", flush=True)
     if shutil.disk_usage(output).free < 30 * 1024 ** 3:
         parser.error("Need at least 30 GiB free for checkpoints and preflight artifacts.")
     deadline = time.monotonic() + args.hours * 3600
     # Also cooperatively stop children when the launcher itself receives TERM.
     previous_term = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     status = {"status": "preflight", "profile": args.profile, "completed_jobs": [], "skipped_jobs": [],
-              "wall_budget_hours": args.hours, "test_evaluated": False}
+              "planned_jobs": jobs, "wall_budget_hours": args.hours, "test_evaluated": False}
     try:
+        OmegaConf.save(OmegaConf.create(launcher_plan), output / "launcher_config.yaml", resolve=True)
         write_json(output / "provenance.json", provenance())
         os.environ["AUDIT_INIT_CHECKPOINT"] = str(initializer)
         configurations = {job: config_for(job) for job in jobs}
@@ -210,6 +278,7 @@ def main():
             "tests/test_cyclic_channel_weight_handoff.py", "tests/test_best_checkpoint_evaluation.py",
             "tests/test_optimizer_groups.py", "tests/test_dataloaders.py",
             "tests/test_pruning_resume.py",
+            "tests/test_pruning_launcher_config.py",
         ]
         run_child([sys.executable, "-m", "pytest", "-q", *[str(ROOT / t) for t in tests]],
                   output / "preflight_tests.log", deadline)
