@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiment/audit/_daytime
+  - _self_
+model:
+  backbone:
+    resnet_block:
+      gate_output: false
+      gate_internal_width: true
+mlflow:
+  run_name: D2_internal_fixed

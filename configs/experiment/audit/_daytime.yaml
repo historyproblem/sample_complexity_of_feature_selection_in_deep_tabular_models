@@ -1,0 +1,12 @@
+# @package _global_
+# Diagnostic horizon, NOT an estimate of converged CIFAR10 accuracy.
+defaults:
+  - /experiment/audit/_base
+  - _self_
+cyclic_channel_pruning:
+  max_cycles: 1
+  gumbel_epochs: 15
+  recovery_epochs: 10
+  final_epochs: 10
+  max_param_fraction: 0.10
+  min_keep_ratio: 0.50

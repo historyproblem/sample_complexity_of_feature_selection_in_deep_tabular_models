@@ -1,0 +1,9 @@
+# @package _global_
+# Optional follow-up control; not enabled by the default daytime profile.
+defaults:
+  - /experiment/audit/D2_internal_fixed
+  - _self_
+cyclic_channel_pruning:
+  ranking: random
+mlflow:
+  run_name: D3_internal_random
