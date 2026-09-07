@@ -138,25 +138,26 @@ def test_resume_rejects_unsafe_sources(stopped_search_files, mutation):
         _load(cfg, source)
 
 
+@pytest.mark.parametrize("job,epochs", [("D1_dense_control", 25), ("J1_dense_control", 150)])
 @pytest.mark.parametrize("mutation", [None, "partial", "weights", "initializer", "config"])
-def test_reused_dense_validates_original_weights_and_config(tmp_path, monkeypatch, mutation):
+def test_reused_dense_validates_original_weights_and_config(tmp_path, monkeypatch, mutation, job, epochs):
     initial_path = tmp_path / "shared.pt"
     monkeypatch.setenv("AUDIT_INIT_CHECKPOINT", str(initial_path))
-    cfg = config_for("D1_dense_control")
+    cfg = config_for(job)
     initial = {"weight": torch.tensor([1.0])}
     weights = {"weight": torch.tensor([2.0])}
     torch.save({"trained_epochs": 0, "seed": 42, "model_state_dict": initial}, initial_path)
     source = tmp_path / "dense"
     source.mkdir()
     OmegaConf.save(cfg, source / "resolved_config.yaml", resolve=True)
-    state = {"status": "completed", "global_epochs_completed": 25, "test_evaluated": False,
+    state = {"status": "completed", "global_epochs_completed": epochs, "test_evaluated": False,
              "accepted_mask": {}, "seed": 42, "common_init_hash": state_hash(initial),
              "validation": {"accuracy": 0.9198}}
     checkpoint = {"model_state_dict": weights, "model_state_hash": state_hash(weights),
-                  "common_init_hash": state["common_init_hash"], "global_epochs_consumed": 25,
+                  "common_init_hash": state["common_init_hash"], "global_epochs_consumed": epochs,
                   "validation": state["validation"], "pruning_mask": {}}
     if mutation == "partial":
-        state["global_epochs_completed"] = 24
+        state["global_epochs_completed"] = epochs - 1
     elif mutation == "weights":
         weights["weight"].add_(1)
     elif mutation == "initializer":
@@ -167,9 +168,9 @@ def test_reused_dense_validates_original_weights_and_config(tmp_path, monkeypatc
     torch.save(checkpoint, source / "deployment.pt")
     if mutation:
         with pytest.raises(ValueError, match="Unsafe pruning resume"):
-            validate_reused_dense(cfg, source)
+            validate_reused_dense(cfg, source, expected_epochs=epochs)
     else:
-        assert validate_reused_dense(cfg, source)["reused_from"] == str(source.resolve())
+        assert validate_reused_dense(cfg, source, expected_epochs=epochs)["reused_from"] == str(source.resolve())
 
 
 @pytest.mark.parametrize("extra", [
@@ -250,7 +251,7 @@ def test_launcher_resume_reuses_dense_and_runs_only_d2(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3))
     from test_pruning_pilot_launcher import _completed_result
     dense = {**_completed_result(), "reused_from": str(source / "D1_dense_control")}
-    monkeypatch.setattr(launcher, "validate_reused_dense", lambda *a: dense)
+    monkeypatch.setattr(launcher, "validate_reused_dense", lambda *a, **k: dense)
     monkeypatch.setattr(launcher, "load_completed_search", lambda *a, **k: {"metadata": {"epochs_reused": 15}})
     monkeypatch.setattr(launcher, "make_initializer", lambda *a: pytest.fail("initializer recreated"))
     calls = []

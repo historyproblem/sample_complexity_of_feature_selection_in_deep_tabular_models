@@ -42,6 +42,22 @@ smoke. После J1 launcher завершится; J2/J3/J4 автоматич�
 `shared_random_seed42.pt`, для сопоставимых следующих экспериментов.
 Для первого анализа нужны `comparison.json` и `J1_dense_control/global_history.csv`.
 
+Если этот J1 завершился успешно, оставшуюся ночную очередь можно запустить без
+повторного dense-обучения:
+
+```bash
+.venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_nightly \
+  --reuse-dense-from outputs/runs/20260907_134446_507828_pruning_dense_control
+```
+
+Launcher до обучения проверяет, что J1 действительно завершил 150 эпох без
+pruning/test access, его сохранённый конфиг совпадает, deployment checkpoint не
+повреждён, а `shared_random_seed42.pt` является тем самым нулевым initializer.
+Затем выполняет обычные preflight tests/GPU smoke, переносит J1 в новую таблицу
+с provenance и последовательно запускает только J2 → J3 → J4. Все они начинают
+не с обученной модели J1, а с одного проверенного случайного initializer — это
+нужно для честного matched-control сравнения. Исходная папка J1 не изменяется.
+
 ## Запустить на сервере через YAML
 
 Все команды ниже выполняются из корня серверного репозитория.

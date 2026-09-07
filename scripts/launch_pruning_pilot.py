@@ -235,7 +235,9 @@ def resolve_launcher_plan(args):
     return jobs, {"config_name": args.config_name, "name": run_name, "profile": args.profile,
                   "jobs": jobs, "hours": args.hours, "data": str(args.data.resolve()),
                   "output": str(args.output.resolve()), "preflight_only": args.preflight_only,
-                  "resume_from": str(args.resume_from.resolve()) if args.resume_from else None}
+                  "resume_from": str(args.resume_from.resolve()) if args.resume_from else None,
+                  "reuse_dense_from": (str(args.reuse_dense_from.resolve())
+                                       if args.reuse_dense_from else None)}
 
 
 def main(argv=None):
@@ -250,6 +252,8 @@ def main(argv=None):
     parser.add_argument("--with-random-control", action="store_true")
     parser.add_argument("--resume-from", type=Path,
                         help="Stopped daytime parent directory: reuse completed D1 and D2's full first search")
+    parser.add_argument("--reuse-dense-from", type=Path,
+                        help="Completed parent directory: reuse its matched dense control and initializer")
     parser.add_argument("--job", choices=JOBS + DAYTIME_JOBS + list(RANDOM_JOBS.values()), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
@@ -262,6 +266,11 @@ def main(argv=None):
             parser.error("--resume-from supports only the two-job daytime profile, not preflight-only.")
         if args.job is not None and args.job != "D2_internal_fixed":
             parser.error("Only D2_internal_fixed resumes from the completed first search.")
+    if args.reuse_dense_from is not None:
+        args.reuse_dense_from = args.reuse_dense_from.resolve()
+        if (args.resume_from is not None or args.profile != "nightly" or jobs[0] != JOBS[0]
+                or len(jobs) < 2 or args.preflight_only or args.job is not None):
+            parser.error("--reuse-dense-from supports only a multi-job nightly parent launch.")
     if args.cfg is not None:
         print(OmegaConf.to_yaml(OmegaConf.create(launcher_plan)), end="")
         return
@@ -276,7 +285,8 @@ def main(argv=None):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     output, data = args.output.resolve(), args.data.resolve()
-    initializer = ((args.resume_from if args.resume_from is not None else output) / "shared_random_seed42.pt")
+    source_parent = args.reuse_dense_from or args.resume_from
+    initializer = ((source_parent if source_parent is not None else output) / "shared_random_seed42.pt")
     if args.job:
         if args.job not in PROFILE_JOBS[args.profile] + [RANDOM_JOBS[args.profile]]:
             parser.error("--job does not belong to the requested profile.")
@@ -308,7 +318,9 @@ def main(argv=None):
             OmegaConf.save(cfg, output / f"{job}_resolved.yaml", resolve=True)
         reused_dense = None
         if args.resume_from is not None:
-            reused_dense = validate_reused_dense(configurations[jobs[0]], args.resume_from / jobs[0])
+            reused_dense = validate_reused_dense(
+                configurations[jobs[0]], args.resume_from / jobs[0],
+                expected_epochs=validate_config(configurations[jobs[0]]))
             steps, remainder = divmod(reused_dense["optimizer_steps_total"], 25)
             if remainder or steps <= 0:
                 raise ValueError("Dense optimizer step count is not a complete 25-epoch control.")
@@ -320,6 +332,16 @@ def main(argv=None):
                 "source_parent": str(args.resume_from), "dense_source": reused_dense["reused_from"],
                 "search": resumed["metadata"],
                 "source_provenance": json.loads((args.resume_from / "provenance.json").read_text()),
+            })
+        elif args.reuse_dense_from is not None:
+            reused_dense = validate_reused_dense(
+                configurations[jobs[0]], args.reuse_dense_from / jobs[0],
+                expected_epochs=validate_config(configurations[jobs[0]]))
+            write_json(output / "reuse_dense_provenance.json", {
+                "source_parent": str(args.reuse_dense_from),
+                "dense_source": reused_dense["reused_from"],
+                "source_provenance": json.loads(
+                    (args.reuse_dense_from / "provenance.json").read_text()),
             })
         tests = [
             "tests/test_pruning_audit.py", "tests/test_pruning_pilot_launcher.py", "tests/test_pruned_bottleneck.py",
@@ -344,7 +366,8 @@ def main(argv=None):
             status["completed_jobs"].append(jobs[0])
             status["reused_jobs"] = [jobs[0]]
             write_comparison(output, status["completed_jobs"], args.profile)
-            print(f"[resume] Reusing D1: valid={reused_dense['validation']['accuracy']:.2%}; "
+            mode = "resume" if args.resume_from is not None else "reuse"
+            print(f"[{mode}] Reusing {jobs[0]}: valid={reused_dense['validation']['accuracy']:.2%}; "
                   "no dense retraining.", flush=True)
         prior_seconds = None
         for job in jobs:

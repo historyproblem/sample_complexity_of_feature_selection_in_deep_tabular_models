@@ -31,12 +31,12 @@ def _same_config(config, source):
     _require(saved == current, "saved and requested configurations differ")
 
 
-def validate_reused_dense(config, source):
+def validate_reused_dense(config, source, *, expected_epochs):
     source = Path(source).resolve()
     _same_config(config, source)
     state = _read_json(source / "pilot_state.json")
-    _require(state["status"] == "completed" and state["global_epochs_completed"] == 25,
-             "dense control is not a completed 25-epoch run")
+    _require(state["status"] == "completed" and state["global_epochs_completed"] == expected_epochs,
+             f"dense control is not a completed {expected_epochs}-epoch run")
     _require(not state["test_evaluated"] and not state["accepted_mask"],
              "dense control has test access or a pruned mask")
     _require(state["seed"] == int(config.seed), "dense seed differs")
@@ -51,7 +51,7 @@ def validate_reused_dense(config, source):
     _require(checkpoint["model_state_hash"] == state_hash(checkpoint["model_state_dict"]),
              "dense deployment checkpoint hash is invalid")
     _require(checkpoint["common_init_hash"] == state["common_init_hash"]
-             and checkpoint["global_epochs_consumed"] == 25
+             and checkpoint["global_epochs_consumed"] == expected_epochs
              and checkpoint["validation"] == state["validation"]
              and not checkpoint["pruning_mask"], "dense deployment provenance differs")
     return {**state, "reused_from": str(source)}

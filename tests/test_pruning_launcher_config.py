@@ -19,7 +19,7 @@ def _args(**overrides):
     return SimpleNamespace(**{
         "config_name": "pruning_nightly", "profile": None, "hours": None,
         "with_random_control": False, "data": None, "output": None,
-        "preflight_only": False, "resume_from": None, "job": None,
+        "preflight_only": False, "resume_from": None, "reuse_dense_from": None, "job": None,
         **overrides,
     })
 
@@ -227,4 +227,58 @@ def test_internal_child_keeps_job_config_and_never_repeats_preflight(tmp_path, m
         args.extend(["--resume-from", str(source)])
     launcher.main(args)
     assert received == ["learned" if resume else "random"]
+    assert not output.exists()
+
+
+def test_full_nightly_reuses_verified_dense_and_runs_only_pruning_jobs(tmp_path, monkeypatch):
+    from test_pruning_pilot_launcher import _completed_result
+    source, output = tmp_path / "dense_parent", tmp_path / "remaining"
+    source.mkdir()
+    launcher.write_json(source / "provenance.json", {"source": True})
+    _mock_runtime(monkeypatch)
+    dense = {**_completed_result(epochs=150, accuracy=0.9442),
+             "reused_from": str(source / "J1_dense_control")}
+    validated = []
+
+    def validate_dense(cfg, path, *, expected_epochs):
+        validated.append((path, expected_epochs, cfg.cyclic_channel_pruning.max_param_fraction))
+        assert cfg.cyclic_channel_pruning.weight_handoff.initial_checkpoint == str(
+            source / "shared_random_seed42.pt")
+        return dense
+
+    events = []
+    def child(command, log, deadline):
+        if "--job" not in command:
+            events.append("tests" if "pytest" in command else "smoke")
+            return
+        job = command[command.index("--job") + 1]
+        events.append(job)
+        assert "--resume-from" not in command
+        directory = Path(command[command.index("--output") + 1])
+        launcher.write_json(directory / "pilot_state.json",
+                            _completed_result(epochs=150, accuracy=0.94))
+
+    monkeypatch.setattr(launcher, "validate_reused_dense", validate_dense)
+    monkeypatch.setattr(launcher, "make_initializer", lambda *a: pytest.fail("initializer recreated"))
+    monkeypatch.setattr(launcher, "run_child", child)
+    launcher.main(["--config-name", "pruning_nightly", "--output", str(output),
+                   "--reuse-dense-from", str(source)])
+    assert validated == [(source / "J1_dense_control", 150, 0.0)]
+    assert events == ["tests", "smoke", "J2_output_fixed", "J3_internal_fixed", "J4_internal_random"]
+    status = json.loads((output / "nightly_status.json").read_text())
+    assert status["status"] == "completed"
+    assert status["reused_jobs"] == ["J1_dense_control"]
+    assert status["completed_jobs"] == launcher.JOBS + ["J4_internal_random"]
+    assert len(json.loads((output / "comparison.json").read_text())["runs"]) == 4
+    provenance = json.loads((output / "reuse_dense_provenance.json").read_text())
+    assert provenance["source_parent"] == str(source)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--profile", "daytime"], ["--preflight-only"], ["--job", "J2_output_fixed"],
+])
+def test_reuse_dense_rejects_unsupported_modes_before_output(tmp_path, extra):
+    output = tmp_path / "new"
+    with pytest.raises(SystemExit):
+        launcher.main(["--output", str(output), "--reuse-dense-from", str(tmp_path / "old"), *extra])
     assert not output.exists()

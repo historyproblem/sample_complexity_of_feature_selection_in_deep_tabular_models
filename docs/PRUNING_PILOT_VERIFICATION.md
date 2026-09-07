@@ -1,5 +1,20 @@
 # Проверки от 5 сентября 2026
 
+## Повторное использование полного J1, 7 сентября
+
+- `--reuse-dense-from` позволяет ночному parent launcher проверить и включить
+  законченный 150-эпоховый J1, не обучая его повторно, после чего выполнить
+  только J2/J3/J4 с его точным zero-epoch initializer.
+- Проверяются совпадение resolved config, 150 эпох, отсутствие test/pruned mask,
+  seed/hash initializer, целостность deployment checkpoint, validation provenance
+  и число потраченных эпох. Исходная папка остаётся read-only; новая сохраняет
+  `reuse_dense_provenance.json`, J1 state и общую comparison.
+- Режим закрыт для daytime, одиночного child, preflight-only и одновременного
+  search resume. Mocked orchestration проверяет отсутствие повторного J1 и
+  последовательный запуск только J2 → J3 → J4.
+- Серверный preflight-набор прошёл локально: 135 passed; `git diff --check`
+  и реальный `--cfg job` для команды повторного использования также прошли.
+
 ## Чистая V100 и отдельный полный J1, 7 сентября
 
 - Добавлен `requirements-pruning-v100.txt`: PyTorch 2.6.0+cu126, совместимая
