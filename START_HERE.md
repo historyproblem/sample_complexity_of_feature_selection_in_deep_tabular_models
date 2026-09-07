@@ -3,6 +3,45 @@
 Исправления подготовлены в ветке `fix/resnet50-pruning-audit-20260905`
 на базе `22c5866`. Основной способ получения кода — GitHub; архив не нужен.
 
+## Чистая V100: зависимости и первый эксперимент отдельно
+
+Для Linux/V100 с уже созданной `.venv` (на сервере Python 3.12.9), из корня
+репозитория:
+
+```bash
+git fetch origin
+git switch fix/resnet50-pruning-audit-20260905
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements-pruning-v100.txt
+.venv/bin/python -m pip check
+```
+
+Специальный requirements сохраняет PyTorch 2.6.0+cu126 и torchvision 0.21.0+cu126
+из официального CUDA 12.6 индекса; остальной список соответствует обычному
+`requirements.txt`, плюс pytest. Это не полный lockfile прежней среды.
+Не добавляйте `-r requirements.txt` или `pip install -e .`: они требуют другую
+версию torch. Launcher и preflight импортируют `src` прямо из checkout,
+поэтому editable-установка для этого запуска не нужна.
+
+После успешной установки запустите только первый полноценный эксперимент:
+
+```bash
+.venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_dense_control
+```
+
+`configs/pruning_dense_control.yaml` содержит только **J1_dense_control**:
+150 эпох, seed 42, без удаления каналов, исходный стадийный протокол ночного J1.
+Ожидаем около 2.5–3 часов по прежней скорости V100; лимит 4 часа включает
+preflight и запас. Значение `profile: nightly` выбирает протокол на 150 эпох,
+а не требует ночного времени. Это НЕ короткий `--profile daytime` на 25 эпох.
+
+Перед основным обучением выполняются прежние тесты и короткий synthetic GPU
+smoke. После J1 launcher завершится; J2/J3/J4 автоматически не запустятся.
+Логи видны в терминале, результаты — в новой
+`outputs/runs/<timestamp>_pruning_dense_control/`. Сохраните всю папку, включая
+`shared_random_seed42.pt`, для сопоставимых следующих экспериментов.
+Для первого анализа нужны `comparison.json` и `J1_dense_control/global_history.csv`.
+
 ## Запустить на сервере через YAML
 
 Все команды ниже выполняются из корня серверного репозитория.

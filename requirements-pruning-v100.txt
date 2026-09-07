@@ -1,0 +1,20 @@
+# Linux / V100 pruning pilot. Keep the CUDA-enabled stack of the completed
+# daytime run; do not combine this file with requirements.txt or pip install -e .
+# The launcher and its preflight tests import this checkout's src directly.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.6.0+cu126
+torchvision==0.21.0+cu126
+hydra-core
+omegaconf
+tqdm
+mlflow
+protobuf>=3.20.3,<6
+numpy
+pandas
+matplotlib
+ipykernel
+plotly
+nbformat
+optuna
+torch-pruning
+pytest

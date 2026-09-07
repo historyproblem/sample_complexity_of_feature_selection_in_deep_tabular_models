@@ -54,6 +54,37 @@ def test_explicit_cli_values_override_yaml_and_random_is_not_duplicated(tmp_path
     assert jobs.count("J4_internal_random") == 1
 
 
+def test_dense_only_yaml_uses_unchanged_150_epoch_protocol(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    args = _args(config_name="pruning_dense_control")
+    jobs, plan = launcher.resolve_launcher_plan(args)
+    assert jobs == ["J1_dense_control"]
+    assert plan["profile"] == "nightly"
+    assert plan["hours"] == 4.0
+    assert args.output.parent == Path("outputs/runs")
+    assert args.output.name.endswith("_pruning_dense_control")
+    assert not args.output.exists()
+    monkeypatch.setenv("AUDIT_INIT_CHECKPOINT", "unused")
+    cfg = config_for(jobs[0])
+    assert validate_config(cfg) == 150
+    assert cfg.seed == 42
+    assert cfg.cyclic_channel_pruning.max_param_fraction == 0.0
+    assert cfg.model.lambda_coef == 0.0
+    assert not cfg.training_arguments.evaluate_test
+
+
+def test_v100_requirements_preserve_dependency_list_but_pin_cuda_stack():
+    def requirements(filename):
+        return {line.strip() for line in (launcher.ROOT / filename).read_text().splitlines()
+                if line.strip() and not line.lstrip().startswith("#")}
+
+    generic = requirements("requirements.txt")
+    expected = {item for item in generic if not item.startswith(("torch==", "torchvision=="))}
+    expected.update({"torch==2.6.0+cu126", "torchvision==0.21.0+cu126", "pytest",
+                     "--extra-index-url https://download.pytorch.org/whl/cu126"})
+    assert requirements("requirements-pruning-v100.txt") == expected
+
+
 def test_old_cli_preserves_profiles_and_now_also_has_auto_output(tmp_path):
     args = _args(config_name=None, output=tmp_path / "explicit")
     jobs, plan = launcher.resolve_launcher_plan(args)
@@ -113,7 +144,13 @@ def _mock_runtime(monkeypatch):
     monkeypatch.setattr(launcher.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3))
 
 
-def test_yaml_launch_keeps_preflight_shared_init_deadline_and_comparison(tmp_path, monkeypatch):
+@pytest.mark.parametrize("config_name,expected_jobs,hours", [
+    ("pruning_nightly", launcher.JOBS + ["J4_internal_random"], 12.5),
+    ("pruning_dense_control", ["J1_dense_control"], 4.0),
+])
+def test_yaml_launch_keeps_preflight_shared_init_deadline_and_comparison(
+    tmp_path, monkeypatch, config_name, expected_jobs, hours,
+):
     from test_pruning_pilot_launcher import _completed_result
     monkeypatch.chdir(tmp_path)
     _mock_runtime(monkeypatch)
@@ -139,17 +176,19 @@ def test_yaml_launch_keeps_preflight_shared_init_deadline_and_comparison(tmp_pat
         launcher.write_json(directory / "pilot_state.json", _completed_result(epochs=150, accuracy=0.94))
     monkeypatch.setattr(launcher, "make_initializer", initializer)
     monkeypatch.setattr(launcher, "run_child", child)
-    launcher.main(["--config-name", "pruning_nightly", "--data", "dataset"])
-    assert events == ["tests", "smoke", "initializer", *launcher.JOBS, "J4_internal_random"]
+    launcher.main(["--config-name", config_name, "--data", "dataset"])
+    assert events == ["tests", "smoke", "initializer", *expected_jobs]
     assert len(set(deadlines)) == 1
     output, = (tmp_path / "outputs/runs").iterdir()
     saved = OmegaConf.load(output / "launcher_config.yaml")
-    assert saved.jobs == launcher.JOBS + ["J4_internal_random"]
-    assert saved.hours == 12.5 and saved.output == str(output)
+    assert saved.jobs == expected_jobs
+    assert saved.hours == hours and saved.output == str(output)
     assert saved.data == str(tmp_path / "dataset")
     status = json.loads((output / "nightly_status.json").read_text())
     assert status["status"] == "completed" and status["planned_jobs"] == list(saved.jobs)
-    assert len(json.loads((output / "comparison.json").read_text())["runs"]) == 4
+    assert status["completed_jobs"] == expected_jobs
+    assert not status["skipped_jobs"]
+    assert len(json.loads((output / "comparison.json").read_text())["runs"]) == len(expected_jobs)
 
 
 def test_existing_output_is_unchanged_and_no_process_starts(tmp_path, monkeypatch):
