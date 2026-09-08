@@ -33,6 +33,7 @@ from net_complexity.models.channel_pruning import build_structurally_pruned_mode
 from net_complexity.training.pruning_measurement import deployment_cost, mask_hash, state_hash, write_json
 
 JOBS = ("J1_dense_control", "J2_output_fixed", "J3_internal_fixed", "J4_internal_random")
+ADAPTIVE_JOBS = ("A1_internal_p18", "A2_internal_p12", "A3_internal_p23", "A4_output_p05")
 
 
 def require(condition, message):
@@ -104,8 +105,10 @@ def validate_config_and_mask(config, mask):
 
 def prepare_job(run_dir, job, dense_source=None):
     state, checkpoint_path, config_path = resolve_files(run_dir, job, dense_source)
-    require(state["status"] == "completed" and state["pilot_version"] == 1,
-            f"{job}: expected completed fixed-lambda pilot v1")
+    adaptive = state.get("pilot_version") == 2 and state.get("protocol") == "adaptive_lambda_v1"
+    require(state["status"] == "completed" and (state.get("pilot_version") == 1 or adaptive),
+            f"{job}: expected a completed audited fixed-v1 or adaptive-v2 deployment")
+    require(job not in ADAPTIVE_JOBS or adaptive, f"{job}: an adaptive job cannot be labelled fixed-lambda")
     require(state["global_epochs_completed"] == state["total_epochs_allocated"], f"{job}: incomplete epoch budget")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     mask = checkpoint["pruning_mask"]
@@ -121,6 +124,12 @@ def prepare_job(run_dir, job, dense_source=None):
     require(expected_hash == checkpoint["model_state_hash"], f"{job}: checkpoint tensor hash mismatch")
     config = OmegaConf.load(config_path)
     require(int(config.seed) == state["seed"], f"{job}: config seed differs")
+    if adaptive:
+        require(OmegaConf.select(config, "cyclic_channel_pruning.audit_protocol") == "adaptive_lambda_v1"
+                and OmegaConf.select(config, "training_arguments.adaptive_lambda.enabled") is True
+                and state.get("adaptive_lambda_enabled") is True,
+                f"{job}: adaptive deployment has a non-adaptive saved configuration")
+        require(state["global_epochs_completed"] <= 150, f"{job}: adaptive training exceeded 150 epochs")
     validate_config_and_mask(config, mask)
     structural_config = deepcopy(config)
     structural_config.model.lambda_coef = 0.0
@@ -135,6 +144,7 @@ def prepare_job(run_dir, job, dense_source=None):
     require(state_hash(model.state_dict()) == expected_hash, f"{job}: loading/cost check changed model state")
     record = {
         "job": job, "checkpoint": str(checkpoint_path), "checkpoint_sha256": file_hash(checkpoint_path),
+        "pilot_version": state["pilot_version"], "training_protocol": state.get("protocol", "fixed_lambda_pilot_v1"),
         "model_state_hash": expected_hash, "mask_hash": checkpoint["mask_hash"],
         "config": str(config_path), "config_sha256": file_hash(config_path),
         "state_sha256": file_hash(Path(run_dir) / job / "pilot_state.json"),
@@ -208,6 +218,8 @@ def write_comparison(output, records):
              "No training, model selection, or BN recalibration. One fixed checkpoint per job.", "",
              "| Job | Test accuracy | Validation accuracy | Parameters | Conv/Linear GMAC |",
              "|---|---:|---:|---:|---:|"]
+    if any(r.get("training_protocol") == "adaptive_lambda_v1" for r in records):
+        lines[4:4] = ["Exploratory comparison: prior test results informed further experimentation.", ""]
     for r in records:
         rows.append({"Run": r["job"], "model.trainable_parameters": r["physical_parameters"],
                      "test_accuracy": r["test"]["accuracy"], "validation_accuracy": r["validation"]["accuracy"],
@@ -248,6 +260,8 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     report = {"status": "running", "source_run": str(run_dir), "started_at_utc": datetime.now(timezone.utc).isoformat(),
               "protocol": "frozen_deployments_test_v1", "test_evaluated": False,
+              "comparison_scope": ("exploratory" if any(r["pilot_version"] == 2 for _, r in prepared)
+                                   else "frozen_deployment_evaluation"),
               "training_performed": False, "bn_recalibration": False, "test_based_selection": False,
               "device": str(args.device), "batch_size": args.batch_size, "precision": "fp32",
               "python": sys.version, "torch": str(torch.__version__), "cuda": torch.version.cuda,
@@ -286,7 +300,7 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True, help="Completed nightly run directory")
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--jobs", nargs="+", choices=JOBS, default=list(JOBS))
+    parser.add_argument("--jobs", nargs="+", choices=JOBS + ADAPTIVE_JOBS, default=list(JOBS))
     parser.add_argument("--dense-source", type=Path, help="Original dense parent/J1 folder, if relocated")
     parser.add_argument("--output", type=Path, help="Default: RUN_DIR/test_evaluation; must not exist")
     parser.add_argument("--batch-size", type=int, default=128)

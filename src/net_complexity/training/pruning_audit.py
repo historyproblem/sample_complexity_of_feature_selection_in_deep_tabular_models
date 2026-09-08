@@ -1,4 +1,4 @@
-"""Fixed-lambda pruning pilot. Deliberately NOT the full adaptive Pro contract.
+"""Audited physical pruning: historical fixed pilot and opt-in adaptive protocol.
 
 All decisions come from the selected checkpoint. Transactions are evaluated on
 validation only; rejecting one stops further pruning and spends only the remaining
@@ -7,6 +7,8 @@ epoch allowance on the previous accepted topology.
 from __future__ import annotations
 
 import csv
+import hashlib
+import math
 import shutil
 from copy import deepcopy
 from pathlib import Path
@@ -21,29 +23,56 @@ from net_complexity.models.channel_pruning import (
 )
 from net_complexity.models.pruning_budget import gates, select_by_budget, validate_mask
 from .cyclic_aig import _configure_run_history, _set_num_epochs
-from .engine import run_training
+from .engine import run_training, _set_model_lambda_coef
 from .interruption import TrainingInterrupted, check_stop, cooperative_signals
 from .pruning_measurement import (
     calibrate_bn, deployment_cost, evaluate_deployment, mask_hash, state_hash, write_json,
 )
 
 FIXED_PRUNING_PILOT_VERSION = 1
+ADAPTIVE_PRUNING_PILOT_VERSION = 2
+ADAPTIVE_PROTOCOL = "adaptive_lambda_v1"
+
+
+def is_adaptive(config):
+    return config.cyclic_channel_pruning.audit_protocol == ADAPTIVE_PROTOCOL
+
+
+def load_adaptive_reference(path, total_epochs):
+    """Load an explicit validation-only reference; never train a hidden baseline."""
+    path = Path(path)
+    with path.open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not {"global_epoch", "valid_accuracy"}.issubset(reader.fieldnames or []):
+            raise ValueError("Adaptive reference requires global_epoch and valid_accuracy columns.")
+        result = {}
+        for row in reader:
+            epoch, accuracy = int(row["global_epoch"]), float(row["valid_accuracy"])
+            if epoch in result or epoch < 1 or not math.isfinite(accuracy) or not 0 <= accuracy <= 1:
+                raise ValueError("Invalid/duplicate adaptive validation reference row.")
+            result[epoch] = accuracy
+    if not set(range(1, total_epochs + 1)).issubset(result):
+        raise ValueError("Adaptive validation reference does not cover the full training budget.")
+    return result
 
 
 def validate_config(config):
     c = config.cyclic_channel_pruning
+    adaptive = is_adaptive(config)
     supported = {
         "enabled", "audit_protocol", "max_cycles", "stop_on_convergence",
         "gumbel_epochs", "recovery_epochs", "final_epochs", "drop_mode",
         "max_param_fraction", "min_keep_ratio", "weight_handoff", "commit_guard",
         "ranking",
     }
+    if adaptive:
+        supported.add("adaptive_reference_history")
     unknown = set(c) - supported
     if unknown:
         raise ValueError(f"Unsupported pilot options: {sorted(unknown)}")
     required = {
         "training_arguments.evaluate_test": False,
-        "training_arguments.adaptive_lambda.enabled": False,
+        "training_arguments.adaptive_lambda.enabled": adaptive,
         "training_arguments.lambda_warmup.enabled": False,
         "training_arguments.batchnorm_recalibration.enabled": False,
         "model.entropy_regularization_coef": 0.0,
@@ -59,8 +88,15 @@ def validate_config(config):
     }
     for key, expected in required.items():
         if OmegaConf.select(config, key) != expected:
-            raise ValueError(f"Fixed pilot requires {key}={expected!r}.")
-    if float(config.model.lambda_coef) not in (0.0, 0.001):
+            raise ValueError(f"{'Adaptive' if adaptive else 'Fixed'} pilot requires {key}={expected!r}.")
+    if adaptive:
+        if not math.isfinite(float(config.model.lambda_coef)) or float(config.model.lambda_coef) <= 0:
+            raise ValueError("Adaptive pruning requires a positive finite initial lambda.")
+        if OmegaConf.select(config, "training_arguments.adaptive_lambda.baseline_history_dir") not in (None, ""):
+            raise ValueError("Adaptive pilot requires an explicit reference, not automatic baseline training.")
+        if not isinstance(c.get("adaptive_reference_history"), str) or not c.adaptive_reference_history.strip():
+            raise ValueError("Adaptive pilot requires adaptive_reference_history.")
+    elif float(config.model.lambda_coef) not in (0.0, 0.001):
         raise ValueError("Fixed pilot supports lambda=0 or 0.001 only.")
     if float(config.model.lambda_coef) == 0 and float(c.max_param_fraction) != 0:
         raise ValueError("Dense control must have zero pruning budget.")
@@ -94,7 +130,10 @@ def validate_config(config):
             raise ValueError(f"Invalid {name}.")
     if guard.train_bn_calibration_batches < 0:
         raise ValueError("Negative calibration budget.")
-    return c.max_cycles * c.gumbel_epochs + (c.max_cycles - 1) * c.recovery_epochs + c.final_epochs
+    total = c.max_cycles * c.gumbel_epochs + (c.max_cycles - 1) * c.recovery_epochs + c.final_epochs
+    if adaptive and total > 150:
+        raise ValueError("Adaptive pruning search + all recovery must fit within 150 epochs.")
+    return total
 
 
 def build_structural(config, carrier, mask):
@@ -114,6 +153,11 @@ def selected_model(config, result):
         raise ValueError("Decision epoch differs from selected checkpoint epoch.")
     model = instantiate(config.model)
     model.load_state_dict(payload["model_state_dict"], strict=True)
+    extra = payload.get("extra_state", {})
+    if "model_lambda_coef" in extra:
+        bypass = extra.get("gumbel_bypass_enabled")
+        _set_model_lambda_coef(model, float(extra["model_lambda_coef"]),
+                               bypass_gumbel=None if bypass is None else bool(bypass))
     return model, payload, path
 
 
@@ -183,6 +227,13 @@ def committed_equivalence(carrier, structural, mask, sample, device, *, report_p
 
 def _run(config, output_root, *, resume_search_from=None):
     total_epochs = validate_config(config)
+    adaptive = is_adaptive(config)
+    if adaptive and resume_search_from is not None:
+        raise ValueError("Legacy fixed search resume is not an adaptive controller resume.")
+    reference = (load_adaptive_reference(config.cyclic_channel_pruning.adaptive_reference_history,
+                                         total_epochs) if adaptive else None)
+    controller_state = None
+    controller_handoffs = []
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     if (output_root / "pilot_state.json").exists():
@@ -225,10 +276,17 @@ def _run(config, output_root, *, resume_search_from=None):
         split: list(getattr(loader.dataset, "indices", range(len(loader.dataset))))
         for split, loader in (("train", data.train_dataloader), ("valid", data.valid_dataloader))
     })
-    state = {"status": "running", "pilot_version": FIXED_PRUNING_PILOT_VERSION,
+    state = {"status": "running", "pilot_version": (ADAPTIVE_PRUNING_PILOT_VERSION if adaptive
+                                                     else FIXED_PRUNING_PILOT_VERSION),
              "total_epochs_allocated": total_epochs, "common_init_hash": common_hash,
              "split_indices_hash": split_hash, "seed": seed, "test_evaluated": False,
              "initial_cost": initial_cost, "stages": stages, "decisions": decisions}
+    if adaptive:
+        state.update(protocol=ADAPTIVE_PROTOCOL, adaptive_lambda_enabled=True,
+                     adaptive_reference_history=str(Path(c.adaptive_reference_history).resolve()),
+                     adaptive_reference_sha256=hashlib.sha256(Path(c.adaptive_reference_history).read_bytes()).hexdigest(),
+                     adaptive_controller_handoffs=controller_handoffs,
+                     controller_handoff_policy="selected_search_checkpoint_post_update; held_during_structural_recovery")
     if resume_search_from is not None:
         from .pruning_resume import load_completed_search
         resumed = load_completed_search(config, resume_search_from, common_hash=common_hash,
@@ -247,7 +305,7 @@ def _run(config, output_root, *, resume_search_from=None):
         write_json(output_root / "pilot_state.json", state)
 
     def stage(name, epochs, source, current_mask, structural):
-        nonlocal global_epoch
+        nonlocal global_epoch, controller_state
         check_stop()
         cfg = deepcopy(config)
         _set_num_epochs(cfg, epochs)
@@ -255,6 +313,15 @@ def _run(config, output_root, *, resume_search_from=None):
         cfg.training_arguments.audit_data_seed = seed
         cfg.dataloaders.loader_seed = seed
         cfg.model.lambda_coef = 0.0 if structural else config.model.lambda_coef
+        adaptive_kwargs = {}
+        if adaptive:
+            # The physically narrowed graph has no gate penalty. The selected
+            # search controller is held, not reset, until the next gated phase.
+            cfg.training_arguments.adaptive_lambda.enabled = not structural
+            if not structural:
+                adaptive_kwargs = {"adaptive_lambda_state": controller_state,
+                                   "adaptive_epoch_offset": global_epoch,
+                                   "adaptive_reference_by_epoch": reference}
         OmegaConf.update(cfg, "channel_pruning", {
             "enabled": True, "mode": "explicit", "structural": structural, "mask": current_mask,
         }, merge=False, force_add=True)
@@ -275,6 +342,23 @@ def _run(config, output_root, *, resume_search_from=None):
                    "lambda_used": float(cfg.model.lambda_coef), "lambda_next": float(cfg.model.lambda_coef),
                    "lr": train["lr"], "mask_hash": mask_hash(current_mask),
                    "optimizer_steps_total": global_epoch * len(data.train_dataloader)}
+            if adaptive:
+                with history.history_path.open(newline="") as stream:
+                    logged = list(csv.DictReader(stream))[-1]
+                if int(logged["epoch"]) != epoch:
+                    raise ValueError("Adaptive history epoch differs from current completed epoch.")
+                used, following = float(logged["lambda_used"]), float(logged["lambda_next"])
+                if not all(math.isfinite(value) and value >= 0 for value in (used, following)):
+                    raise ValueError("Non-finite adaptive lambda in epoch history.")
+                action = logged.get("adaptive_lambda_action", "")
+                if not structural and (used <= 0 or following <= 0 or not action
+                                       or not logged.get("valid_average_zero_prob")):
+                    raise ValueError("Adaptive search is missing live lambda/gate feedback.")
+                row.update(lambda_used=used, lambda_next=following,
+                           adaptive_lambda_action=action if not structural else "held_no_structural_gates",
+                           adaptive_lambda_reason=logged.get("adaptive_lambda_reason", ""),
+                           adaptive_lambda_step=logged.get("adaptive_lambda_step", ""),
+                           valid_average_zero_prob=logged.get("valid_average_zero_prob", ""))
             path = output_root / "global_history.csv"
             exists = path.exists()
             with path.open("a", newline="") as stream:
@@ -284,7 +368,7 @@ def _run(config, output_root, *, resume_search_from=None):
                 writer.writerow(row)
             persist()
 
-        result = run_training(cfg, model_initializer=initialize, epoch_end_callback=record)
+        result = run_training(cfg, model_initializer=initialize, epoch_end_callback=record, **adaptive_kwargs)
         if result.get("test_metrics") or not result.get("test_evaluation_disabled"):
             raise RuntimeError("Unexpected test access in training result.")
         if result["num_epochs_executed"] != epochs:
@@ -293,6 +377,17 @@ def _run(config, output_root, *, resume_search_from=None):
                        "best_epoch": result["best_epoch"], "best_metric": result["best_metric_value"]})
         checkpoint = torch.load(Path(result["run_dir"]) / "checkpoints" / "best.pt",
                                 map_location="cpu", weights_only=True)
+        if adaptive and not structural:
+            extra = checkpoint.get("extra_state", {})
+            if not isinstance(extra.get("adaptive_lambda_state"), dict):
+                raise ValueError("Selected search checkpoint has no adaptive controller state.")
+            controller_state = deepcopy(extra["adaptive_lambda_state"])
+            controller_handoffs.append({"stage": name, "selected_epoch": int(checkpoint["epoch"]),
+                                        "selected_global_epoch": offset + int(checkpoint["epoch"]),
+                                        "next_search_global_offset": global_epoch,
+                                        "lambda_used_at_selected_epoch": extra["model_lambda_coef"],
+                                        "controller_state": controller_state})
+            write_json(output_root / "adaptive_controller.json", controller_handoffs[-1])
         model = deepcopy(source).cpu()
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         return model, result
@@ -408,5 +503,14 @@ def _run(config, output_root, *, resume_search_from=None):
 
 
 def run_fixed_pruning_pilot(config, output_root, *, resume_search_from=None):
+    if is_adaptive(config):
+        raise ValueError("Use run_adaptive_pruning_pilot for the adaptive protocol.")
     with cooperative_signals():
         return _run(config, output_root, resume_search_from=resume_search_from)
+
+
+def run_adaptive_pruning_pilot(config, output_root):
+    if not is_adaptive(config):
+        raise ValueError("Adaptive entrypoint refuses a fixed-lambda configuration.")
+    with cooperative_signals():
+        return _run(config, output_root)

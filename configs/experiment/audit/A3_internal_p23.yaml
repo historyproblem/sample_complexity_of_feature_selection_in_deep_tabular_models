@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /experiment/audit/A1_internal_p18
+  - _self_
+cyclic_channel_pruning:
+  max_param_fraction: 0.23
+mlflow:
+  run_name: A3_internal_p23

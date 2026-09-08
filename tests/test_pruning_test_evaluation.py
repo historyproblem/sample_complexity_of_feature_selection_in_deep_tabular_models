@@ -121,6 +121,34 @@ def test_prepares_frozen_model(files):
     assert state_hash(model.state_dict()) == record["model_state_hash"]
 
 
+@pytest.mark.parametrize("bad", [None, "protocol", "disabled", "epochs"])
+def test_adaptive_v2_deployment_requires_audited_config(files, bad):
+    source = files / evaluation.JOBS[2]
+    job = evaluation.ADAPTIVE_JOBS[0]
+    target = files / job
+    shutil.copytree(source, target)
+    state = evaluation.read_json(target / "pilot_state.json")
+    state.update(pilot_version=2, protocol="adaptive_lambda_v1", adaptive_lambda_enabled=True)
+    config = OmegaConf.load(target / "resolved_config.yaml")
+    OmegaConf.update(config, "cyclic_channel_pruning.audit_protocol", "adaptive_lambda_v1", force_add=True)
+    OmegaConf.update(config, "training_arguments.adaptive_lambda.enabled", True, force_add=True)
+    if bad == "protocol":
+        state["protocol"] = "unknown"
+    elif bad == "disabled":
+        config.training_arguments.adaptive_lambda.enabled = False
+    elif bad == "epochs":
+        state["global_epochs_completed"] = state["total_epochs_allocated"] = 151
+    OmegaConf.save(config, target / "resolved_config.yaml")
+    write_json(target / "pilot_state.json", state)
+    if bad:
+        with pytest.raises(ValueError):
+            evaluation.prepare_job(files, job)
+    else:
+        model, record = evaluation.prepare_job(files, job)
+        assert not model.training and record["pilot_version"] == 2
+        assert record["training_protocol"] == "adaptive_lambda_v1"
+
+
 @pytest.mark.parametrize("mode", ["recorded", "relocated", "explicit_parent", "explicit_job"])
 def test_resolves_reused_dense(files, mode):
     job = evaluation.JOBS[0]

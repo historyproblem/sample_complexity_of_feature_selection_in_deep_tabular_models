@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -346,6 +347,72 @@ class AdaptiveLambdaController:
         )
         self.last_action = "hold"
         self.last_reason = "initialized"
+        self.last_epoch = 0
+        # The initial lambda is intentionally not part of the configuration:
+        # a stage handoff can instantiate the model with the persisted lambda.
+        self._configuration = {
+            name: deepcopy(getattr(self, name))
+            for name in (
+                "warmup_epochs", "update_every_epochs", "acc_window", "lambda_min",
+                "lambda_max", "log_step_min", "adaptive_log_step_enabled",
+                "prune_rate_low_per_epoch", "prune_rate_high_per_epoch",
+                "log_step_boost_factor", "log_step_max_boost_level",
+                "adaptive_log_step_max_epoch", "soft_drop", "hard_drop",
+                "reference_accuracy_by_epoch",
+            )
+        }
+        self._configuration["log_step_init"] = float(log_step_init)
+        self._configuration["recovery_config"] = self.recovery_config.as_dict()
+
+    def state_dict(self) -> dict[str, Any]:
+        """Complete, weights_only-safe controller state, not just log metrics."""
+        runtime = {
+            name: list(value) if isinstance(value, deque) else deepcopy(value)
+            for name, value in vars(self).items()
+            if name not in self._configuration and name not in {"_configuration", "recovery_config"}
+        }
+        return {"version": 1, "config": deepcopy(self._configuration), "runtime": runtime}
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Restore only a compatible controller, failing closed on partial state."""
+        if set(state) != {"version", "config", "runtime"} or state["version"] != 1:
+            raise ValueError("Unsupported adaptive lambda state format/version.")
+        if state["config"] != self._configuration:
+            raise ValueError("Adaptive lambda handoff configuration/reference mismatch.")
+        runtime = deepcopy(state["runtime"])
+        expected = self.state_dict()["runtime"]
+        if not isinstance(runtime, dict) or set(runtime) != set(expected):
+            raise ValueError("Incomplete adaptive lambda runtime state.")
+
+        def validate_plain(value: Any) -> None:
+            if value is None or isinstance(value, (bool, str)):
+                return
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                return
+            if isinstance(value, list):
+                for item in value:
+                    validate_plain(item)
+                return
+            if isinstance(value, dict) and all(isinstance(key, (int, str)) for key in value):
+                for item in value.values():
+                    validate_plain(item)
+                return
+            raise ValueError("Adaptive lambda state must contain finite Python primitives only.")
+
+        validate_plain(runtime)
+        history = runtime["acc_history"]
+        if not isinstance(history, list) or len(history) > self.acc_window:
+            raise ValueError("Invalid adaptive lambda accuracy window.")
+        if not isinstance(runtime["last_epoch"], int) or runtime["last_epoch"] < 0:
+            raise ValueError("Invalid adaptive lambda last epoch.")
+        if not 0 <= runtime["log_step_boost_level"] <= self.log_step_max_boost_level:
+            raise ValueError("Invalid adaptive lambda boost level.")
+        if runtime["step"] < self.log_step_min:
+            raise ValueError("Invalid adaptive lambda log step.")
+        if abs(self._clamp_log_lambda(runtime["log_lambda"]) - runtime["log_lambda"]) > 1e-10:
+            raise ValueError("Adaptive lambda state is outside configured bounds.")
+        for name, value in runtime.items():
+            setattr(self, name, deque(value, maxlen=self.acc_window) if name == "acc_history" else value)
 
     @property
     def lambda_coef(self) -> float:
@@ -358,7 +425,7 @@ class AdaptiveLambdaController:
         apply_lambda: LambdaApplier,
     ) -> None:
         apply_lambda(model, self.lambda_coef)
-        self._apply_recovery_open_bias(model, 0.0)
+        self._apply_recovery_open_bias(model, self.recovery_open_bias if self.recovery_active else 0.0)
         print(
             "Adaptive lambda initialized"
             f" | lambda_coef={self.lambda_coef:.12g}"
@@ -380,6 +447,7 @@ class AdaptiveLambdaController:
         apply_lambda: LambdaApplier,
     ) -> AdaptiveLambdaStepResult:
         epoch = int(epoch)
+        self.last_epoch = epoch
 
         _, valid_acc = _resolve_metric(valid_metrics, ACCURACY_METRIC_NAMES)
         _, valid_zero_prob = _resolve_metric(valid_metrics, ZERO_PROB_METRIC_NAMES)

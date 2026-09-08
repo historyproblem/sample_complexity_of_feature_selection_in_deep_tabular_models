@@ -1646,7 +1646,10 @@ def train(model: nn.Module,
           mlflow_logger=None,
           run_history: RunHistory | None = None,
           epoch_end_callback: EpochEndCallback | None = None,
-          progress_context: ProgressContext | None = None) -> dict[str, Any]:
+          progress_context: ProgressContext | None = None,
+          adaptive_lambda_state: Mapping[str, Any] | None = None,
+          adaptive_epoch_offset: int = 0,
+          adaptive_reference_by_epoch: Mapping[int, float] | None = None) -> dict[str, Any]:
 
     model.to(device)
     last_train_metrics: dict[str, float] = {}
@@ -1662,9 +1665,10 @@ def train(model: nn.Module,
         training_arguments,
         model,
         baseline_accuracy_by_epoch=(
-            baseline_accuracy_reference.accuracy_by_epoch
-            if baseline_accuracy_reference is not None
-            else None
+            adaptive_reference_by_epoch if adaptive_reference_by_epoch is not None else (
+                baseline_accuracy_reference.accuracy_by_epoch
+                if baseline_accuracy_reference is not None else None
+            )
         ),
     )
     completed_epochs = 0
@@ -1673,6 +1677,15 @@ def train(model: nn.Module,
 
     def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
         _set_model_lambda_coef(target_model, lambda_coef, bypass_gumbel=False)
+
+    if adaptive_epoch_offset < 0:
+        raise ValueError("adaptive_epoch_offset must be nonnegative.")
+    if adaptive_lambda_state is not None:
+        if adaptive_lambda is None:
+            raise ValueError("Cannot restore adaptive lambda state with its controller disabled.")
+        adaptive_lambda.load_state_dict(adaptive_lambda_state)
+        if adaptive_lambda.last_epoch > adaptive_epoch_offset:
+            raise ValueError("Adaptive lambda state is ahead of the requested epoch offset.")
 
     if adaptive_lambda is not None:
         adaptive_lambda.apply_initial_state(
@@ -1778,7 +1791,8 @@ def train(model: nn.Module,
         if scheduler_state is not None and scheduler_state.interval == "epoch":
             scheduler_state.step(observed_epoch_metrics)
 
-        if run_history is not None and run_history.should_update_best(epoch_num, valid_metrics):
+        updated_best = run_history is not None and run_history.should_update_best(epoch_num, valid_metrics)
+        if updated_best:
             run_history.save_checkpoint(
                 "best.pt",
                 model=model,
@@ -1792,12 +1806,17 @@ def train(model: nn.Module,
         controller_metrics: dict[str, Any] = {}
         if adaptive_lambda is not None:
             adaptive_step_result = adaptive_lambda.on_epoch_end(
-                epoch=epoch_num,
+                epoch=adaptive_epoch_offset + epoch_num,
                 model=model,
                 valid_metrics=valid_metrics,
                 apply_lambda=_apply_adaptive_lambda,
             )
             controller_metrics = dict(adaptive_step_result.metrics)
+            if updated_best:
+                run_history.update_checkpoint_extra_state(
+                    "best.pt", {"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                                "adaptive_global_epoch": adaptive_epoch_offset + epoch_num},
+                )
             if run_history is not None:
                 runtime_metadata = dict(run_history.runtime_metadata)
                 runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
@@ -1842,7 +1861,12 @@ def train(model: nn.Module,
                     **controller_metrics,
                 },
                 scheduler_state=scheduler_state,
-                extra_state=post_epoch_extra_metrics,
+                extra_state={
+                    **post_epoch_extra_metrics,
+                    **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                        "adaptive_global_epoch": adaptive_epoch_offset + epoch_num}
+                       if adaptive_lambda is not None else {}),
+                },
             )
             run_history.log_epoch(
                 epoch_num,
@@ -2008,6 +2032,9 @@ def train(model: nn.Module,
                         "model_lambda_coef": _resolve_model_lambda_coef(model),
                         "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
                         **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
+                        **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                            "adaptive_global_epoch": adaptive_epoch_offset + final_epoch}
+                           if adaptive_lambda is not None else {}),
                     },
                 )
 
@@ -2024,6 +2051,8 @@ def train(model: nn.Module,
             "last_valid_metrics": last_valid_metrics,
             "test_metrics": {},
             "test_evaluation_disabled": True,
+            **({"adaptive_lambda": adaptive_lambda.summary_state()}
+               if adaptive_lambda is not None else {}),
             "num_epochs_executed": completed_epochs,
             "full_train_time_sec": sum(
                 float(row.get("epoch_time_sec", 0.0) or 0.0)
@@ -2201,11 +2230,27 @@ def run_training(
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
     model_initializer: ModelInitializer | None = None,
+    adaptive_lambda_state: Mapping[str, Any] | None = None,
+    adaptive_epoch_offset: int = 0,
+    adaptive_reference_by_epoch: Mapping[int, float] | None = None,
 ) -> dict[str, Any]:
-    baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
-        config,
-        progress_context=progress_context,
-    )
+    if adaptive_reference_by_epoch is not None:
+        if not _adaptive_lambda_enabled(config.training_arguments):
+            raise ValueError("External adaptive reference requires the adaptive controller enabled.")
+        if _resolve_baseline_history_root(config.training_arguments) is not None:
+            raise ValueError("External adaptive reference conflicts with baseline_history_dir.")
+        if not adaptive_reference_by_epoch or any(
+            int(epoch) < 1 or not math.isfinite(float(value)) or not 0 <= float(value) <= 1
+            for epoch, value in adaptive_reference_by_epoch.items()
+        ):
+            raise ValueError("External adaptive reference must contain finite epoch accuracies in [0, 1].")
+        # An explicitly supplied validation curve must never trigger hidden
+        # baseline training outside the caller's total epoch budget.
+        baseline_accuracy_reference = None
+    else:
+        baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
+            config, progress_context=progress_context,
+        )
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
 
@@ -2357,6 +2402,9 @@ def run_training(
             run_history=run_history,
             epoch_end_callback=epoch_end_callback,
             progress_context=progress_context,
+            adaptive_lambda_state=adaptive_lambda_state,
+            adaptive_epoch_offset=adaptive_epoch_offset,
+            adaptive_reference_by_epoch=adaptive_reference_by_epoch,
         )
     except TrainingInterrupted as exc:
         run_history.save_checkpoint(

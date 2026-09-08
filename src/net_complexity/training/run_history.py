@@ -458,7 +458,25 @@ class RunHistory:
             from .pruning_measurement import mask_hash, state_hash
             payload["model_state_hash"] = state_hash(payload["model_state_dict"])
             payload["mask_hash"] = mask_hash(payload["pruning_mask"])
-            payload["controller_state"] = {"enabled": False, "mode": "fixed_lambda_pilot"}
+            adaptive_state = (extra_state or {}).get("adaptive_lambda_state")
+            adaptive_protocol = OmegaConf.select(
+                self.config, "cyclic_channel_pruning.audit_protocol"
+            ) == "adaptive_lambda_v1"
+            if adaptive_state is not None:
+                payload["controller_state"] = {
+                    "enabled": True, "mode": "adaptive_lambda", "state": deepcopy(adaptive_state),
+                }
+            elif adaptive_protocol:
+                searching = bool(OmegaConf.select(
+                    self.config, "training_arguments.adaptive_lambda.enabled", default=False
+                ))
+                payload["controller_state"] = {
+                    "enabled": searching,
+                    "mode": ("adaptive_state_pending" if searching else "structural_recovery_no_gates"),
+                    "held_in_parent": not searching,
+                }
+            else:
+                payload["controller_state"] = {"enabled": False, "mode": "fixed_lambda_pilot"}
             payload["global_epochs_completed"] = int(OmegaConf.select(
                 self.config, "training_arguments.global_epoch_offset", default=0)) + int(
                     (extra_state or {}).get("completed_epochs", epoch))
@@ -466,6 +484,24 @@ class RunHistory:
         torch.save(payload, temporary)
         temporary.replace(checkpoint_path)
         return checkpoint_path
+
+    def update_checkpoint_extra_state(self, file_name: str, extra_state: Mapping[str, Any]) -> None:
+        """Attach post-control state without resnapshotting evaluated model weights.
+
+        The best checkpoint is captured before the controller changes gate
+        open-bias buffers. Only its metadata is updated after that transition.
+        """
+        checkpoint_path = self.checkpoints_dir / file_name
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        payload.setdefault("extra_state", {}).update(self._to_cpu(deepcopy(dict(extra_state))))
+        if "controller_state" in payload and "adaptive_lambda_state" in extra_state:
+            payload["controller_state"] = {
+                "enabled": True, "mode": "adaptive_lambda",
+                "state": deepcopy(extra_state["adaptive_lambda_state"]),
+            }
+        temporary = checkpoint_path.with_suffix(".pt.tmp")
+        torch.save(payload, temporary)
+        temporary.replace(checkpoint_path)
 
     def save_summary(
         self,
