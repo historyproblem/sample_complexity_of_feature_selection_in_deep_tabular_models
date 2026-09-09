@@ -124,6 +124,21 @@ def prepare_job(run_dir, job, dense_source=None):
     require(expected_hash == checkpoint["model_state_hash"], f"{job}: checkpoint tensor hash mismatch")
     config = OmegaConf.load(config_path)
     require(int(config.seed) == state["seed"], f"{job}: config seed differs")
+    normalization = OmegaConf.select(config, "model.backbone.resnet_block.regularization_normalization",
+                                     default="enabled_channels")
+    require(normalization in ("enabled_channels", "initial_channels"),
+            f"{job}: unsupported gate regularization normalization")
+    require(state.get("gate_regularization_normalization", "enabled_channels") == normalization
+            == checkpoint.get("gate_regularization_normalization", "enabled_channels"),
+            f"{job}: gate regularization normalization differs between config/state/checkpoint")
+    if normalization == "initial_channels":
+        require(adaptive, f"{job}: initial_channels requires the adaptive training protocol")
+        widths = state.get("initial_gate_channels")
+        require(isinstance(widths, dict) and bool(widths)
+                and all(isinstance(name, str) and type(width) is int and width > 0
+                        for name, width in widths.items())
+                and widths == checkpoint.get("initial_gate_channels"),
+                f"{job}: original gate normalization widths missing or inconsistent")
     if adaptive:
         require(OmegaConf.select(config, "cyclic_channel_pruning.audit_protocol") == "adaptive_lambda_v1"
                 and OmegaConf.select(config, "training_arguments.adaptive_lambda.enabled") is True
@@ -145,6 +160,7 @@ def prepare_job(run_dir, job, dense_source=None):
     record = {
         "job": job, "checkpoint": str(checkpoint_path), "checkpoint_sha256": file_hash(checkpoint_path),
         "pilot_version": state["pilot_version"], "training_protocol": state.get("protocol", "fixed_lambda_pilot_v1"),
+        "gate_regularization_normalization": normalization,
         "model_state_hash": expected_hash, "mask_hash": checkpoint["mask_hash"],
         "config": str(config_path), "config_sha256": file_hash(config_path),
         "state_sha256": file_hash(Path(run_dir) / job / "pilot_state.json"),
@@ -222,6 +238,7 @@ def write_comparison(output, records):
         lines[4:4] = ["Exploratory comparison: prior test results informed further experimentation.", ""]
     for r in records:
         rows.append({"Run": r["job"], "model.trainable_parameters": r["physical_parameters"],
+                     "gate_regularization_normalization": r.get("gate_regularization_normalization", "enabled_channels"),
                      "test_accuracy": r["test"]["accuracy"], "validation_accuracy": r["validation"]["accuracy"],
                      "test_ce_loss": r["test"]["ce_loss"], "test_correct_count": r["test"]["correct_count"],
                      "test_example_count": r["test"]["example_count"],

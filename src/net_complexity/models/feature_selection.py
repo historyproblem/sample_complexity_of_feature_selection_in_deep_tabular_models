@@ -15,6 +15,17 @@ from .resnet import Block, Bottleneck, ResNet
 
 
 _VALID_BACKBONE_WEIGHT_INITS = {"default", "paper_kaiming_normal"}
+_VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS = {"enabled_channels", "initial_channels"}
+
+
+def _normalize_channel_regularization(value: str) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in _VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS:
+        allowed = ", ".join(sorted(_VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS))
+        raise ValueError(
+            f"regularization_normalization must be one of: {allowed}. Got: {value!r}"
+        )
+    return normalized
 
 
 def apply_paper_style_conv_init(model: nn.Module) -> None:
@@ -786,7 +797,11 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
         gate_output: bool = True,
         disabled_mid1_channels: list[int] | None = None,
         disabled_mid2_channels: list[int] | None = None,
+        regularization_normalization: str = "enabled_channels",
     ):
+        regularization_normalization = _normalize_channel_regularization(
+            regularization_normalization
+        )
         super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
         self.gate_output = bool(gate_output)
         if not self.gate_output and disabled_channels:
@@ -802,6 +817,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
             disabled_channels=disabled_channels,
+            regularization_normalization=regularization_normalization,
         ) if self.gate_output else nn.Identity()
 
         self.gate_internal_width = bool(gate_internal_width)
@@ -819,6 +835,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
                 eval_gate_mode=eval_gate_mode,
                 gate_threshold=gate_threshold,
                 disabled_channels=disabled_mid1_channels,
+                regularization_normalization=regularization_normalization,
             )
             self.mid2_gumbel_layer = MaskedGumbelLayer(
                 input_dim=out_channels,
@@ -831,6 +848,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
                 eval_gate_mode=eval_gate_mode,
                 gate_threshold=gate_threshold,
                 disabled_channels=disabled_mid2_channels,
+                regularization_normalization=regularization_normalization,
             )
 
     def forward(self, x):
@@ -896,9 +914,18 @@ class MaskedGumbelLayer(GumbelLayer):
     """GumbelLayer that permanently disables a subset of channels.
 
     Disabled channels: gate is always 0 regardless of learned logits.
-    They are excluded from the regularisation mean and reported as
-    zero in get_selection_probs().  Logits of disabled channels receive
-    no gradient and are never updated.
+    They contribute zero to regularisation and are reported as zero in
+    get_selection_probs(). Disabled logits receive no gradient from gating
+    or regularisation (an optimizer may still apply weight decay).
+
+    ``regularization_normalization="enabled_channels"`` preserves the historic
+    mean over the surviving channels. ``"initial_channels"`` divides their
+    probability sum by the original gate width instead. Iterative pruning keeps
+    full-width gate logits in its search carrier and transfers physical weights
+    back into it, so this denominator stays fixed across cumulative masks. It
+    neither rescales lambda nor changes the reported selection probabilities.
+    The mode is constructor configuration, not checkpoint tensor state; restore
+    it from the saved config when loading a checkpoint.
 
     Two ways to disable channels:
       1. Pass disabled_channels at construction time (same list for every
@@ -919,7 +946,11 @@ class MaskedGumbelLayer(GumbelLayer):
         eval_gate_mode: str | None = None,
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
+        regularization_normalization: str = "enabled_channels",
     ):
+        regularization_normalization = _normalize_channel_regularization(
+            regularization_normalization
+        )
         super().__init__(
             input_dim=input_dim,
             temperature=temperature,
@@ -931,11 +962,21 @@ class MaskedGumbelLayer(GumbelLayer):
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
         )
+        self._regularization_normalization = regularization_normalization
         channel_mask = torch.ones(input_dim)
         for channel in disabled_channels or []:
             if 0 <= int(channel) < input_dim:
                 channel_mask[int(channel)] = 0.0
         self.register_buffer("channel_mask", channel_mask)
+
+    @property
+    def regularization_normalization(self) -> str:
+        return self._regularization_normalization
+
+    def _regularization_denominator(self):
+        if self.regularization_normalization == "initial_channels":
+            return self.logits.shape[0]
+        return self.channel_mask.sum()
 
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         gates = super().compute_gates(x)
@@ -943,25 +984,38 @@ class MaskedGumbelLayer(GumbelLayer):
         return gates * mask
 
     def regularization_loss(self) -> torch.Tensor:
+        # The historical enabled-channel path regularizes even while bypassed;
+        # retain that behavior for old recipes. The opt-in path follows the
+        # base GumbelLayer/posterior convention: bypassed gates have no penalty.
+        if self._bypass and self.regularization_normalization == "initial_channels":
+            return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
-        total_enabled = self.channel_mask.sum()
-        if total_enabled == 0:
-            return torch.tensor(0.0, device=self.logits.device)
-        return (probs * self.channel_mask).sum() / total_enabled
+        denominator = self._regularization_denominator()
+        if denominator == 0:
+            return self.logits.new_zeros(())
+        return (probs * self.channel_mask).sum() / denominator
 
     def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return open-probability and negative-entropy sums, equally normalized.
+
+        With initial_channels, the historically named ``mean_p_open`` is the
+        surviving probability mass per original channel, not the mean among
+        survivors. Entropy uses the same fixed denominator so its per-survivor
+        coefficient does not jump after pruning either. Metrics continue to use
+        get_selection_probs(), independent of this regularization convention.
+        """
         if self._bypass:
             zero = self.logits.new_zeros(())
             return zero, zero
-        total_enabled = self.channel_mask.sum()
-        if total_enabled == 0:
+        denominator = self._regularization_denominator()
+        if denominator == 0:
             zero = self.logits.new_zeros(())
             return zero, zero
         log_probs = F.log_softmax(self.logits, dim=-1)
         probs = log_probs.exp()
-        mean_p_open = (probs[:, 1] * self.channel_mask).sum() / total_enabled
+        mean_p_open = (probs[:, 1] * self.channel_mask).sum() / denominator
         per_channel_negative_entropy = (probs * log_probs).sum(dim=-1)
-        negative_entropy = (per_channel_negative_entropy * self.channel_mask).sum() / total_enabled
+        negative_entropy = (per_channel_negative_entropy * self.channel_mask).sum() / denominator
         return mean_p_open, negative_entropy
 
     def get_selection_probs(self) -> torch.Tensor:
@@ -1329,11 +1383,13 @@ def get_gumbel_posterior_regularization_terms(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Channel-granularity counterpart of ``get_AIG_posterior_regularization_terms``.
 
-    Aggregates ``GumbelLayer.posterior_regularization_terms()`` (mean p(open),
-    mean negative entropy) across every Gumbel selector in the model, weighting
+    Aggregates ``GumbelLayer.posterior_regularization_terms()`` (normalized
+    p(open) and negative entropy) across every Gumbel selector in the model, weighting
     each layer equally — the same convention as ``get_gumbel_loss``. Returns
     ``None`` when the model has no Gumbel selectors so callers can fall back to
-    a plain ``regularization_loss`` callable.
+    a plain ``regularization_loss`` callable. A masked gate configured with
+    ``initial_channels`` contributes probability mass per original channel,
+    not mean probability among survivors.
     """
     gumbel_modules = _get_gumbel_modules(model)
     if not gumbel_modules:

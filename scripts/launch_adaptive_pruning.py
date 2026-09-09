@@ -1,7 +1,8 @@
 """Sequential adaptive-lambda pruning, capped at 150 epochs per new model.
 
 The existing dense validation curve is read-only controller reference, not a
-trained initializer. Frozen deployments are evaluated on test after the queue;
+trained initializer. Each frozen deployment is evaluated on test immediately
+after it completes, before starting the next preplanned training job;
 test results never enter checkpoint selection or subsequent training decisions.
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ import time
 
 from pruning_pilot_common import ROOT, config_for
 from launch_pruning_pilot import run_child, write_comparison
-from evaluate_pruning_test import ADAPTIVE_JOBS, file_hash, prepare_job
+from evaluate_pruning_test import ADAPTIVE_JOBS, file_hash, prepare_job, write_comparison as write_test_comparison
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -33,7 +34,10 @@ from net_complexity.training.pruning_measurement import state_hash, write_json
 PROTOCOL = "adaptive_lambda_v1"
 DENSE = "J1_dense_control"
 TEST_RESERVE_SECONDS = 180
+REGULARIZATION_NORMALIZATIONS = ("enabled_channels", "initial_channels")
 PREFLIGHT_TESTS = [
+    "tests/test_adaptive_lambda.py",
+    "tests/test_gumbel_regularization_normalization.py",
     "tests/test_adaptive_pruning_audit.py", "tests/test_adaptive_lambda_handoff.py",
     "tests/test_pruning_audit.py", "tests/test_adaptive_pruning_launcher.py",
     "tests/test_pruning_test_evaluation.py", "tests/test_pruned_bottleneck.py",
@@ -53,9 +57,15 @@ def resolve_plan(args):
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
         config = compose(config_name=name)
     plan = OmegaConf.to_container(config, resolve=True)
-    require(isinstance(plan, dict) and set(plan) == {
+    required_fields = {
         "name", "protocol", "jobs", "dense_source", "hours", "data", "evaluate_test", "run_history"
-    }, "Unexpected adaptive launcher fields")
+    }
+    require(isinstance(plan, dict) and required_fields <= set(plan)
+            and not set(plan) - required_fields - {"gate_regularization_normalization"},
+            "Unexpected adaptive launcher fields")
+    normalization = plan.get("gate_regularization_normalization", "enabled_channels")
+    require(normalization in REGULARIZATION_NORMALIZATIONS,
+            "gate_regularization_normalization must be enabled_channels or initial_channels")
     require(plan["protocol"] == PROTOCOL, "Adaptive protocol must not be disabled")
     require(plan["evaluate_test"] is True, "Final frozen test evaluation is required")
     jobs = plan["jobs"]
@@ -78,6 +88,7 @@ def resolve_plan(args):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output = Path(plan["run_history"]["root_dir"]) / f"{stamp}_{plan['name']}"
     return {**plan, "config_name": name, "hours": hours,
+            "gate_regularization_normalization": normalization,
             "data": str(Path(args.data or plan["data"]).resolve()),
             "dense_source": str(Path(args.dense_source or plan["dense_source"]).resolve()),
             "output": str(output.resolve()), "epochs_per_new_model": 150,
@@ -163,6 +174,64 @@ def enough_time_for_job(remaining_seconds, previous_seconds):
     return remaining_seconds > 0 and (previous_seconds is None or remaining_seconds >= previous_seconds * 1.15)
 
 
+def write_test_summary(output, status, records):
+    """Refresh only aggregate reports; immutable per-job evaluation directories remain intact."""
+    if not records:
+        return
+    evaluation = output / "test_evaluation"
+    evaluation.mkdir(exist_ok=True)
+    evaluated = [record["job"] for record in records]
+    batches = []
+    for relative_report in dict.fromkeys(record["evaluation_report"] for record in records):
+        report = json.loads((evaluation / relative_report).read_text())
+        batches.append({"report": relative_report,
+                        "metadata": {key: value for key, value in report.items() if key != "runs"}})
+    summary = {
+        **batches[0]["metadata"],
+        "status": status["status"], "source_run": str(output),
+        "protocol": "frozen_deployments_test_v1", "test_evaluated": True,
+        "comparison_scope": "exploratory", "training_performed": False,
+        "bn_recalibration": False, "test_based_selection": False,
+        "planned_jobs": [DENSE, *status["planned_jobs"]], "evaluated_jobs": evaluated,
+        "completed_training_jobs": list(status["completed_jobs"]),
+        "pending_jobs": [job for job in [DENSE, *status["planned_jobs"]] if job not in evaluated],
+        "all_completed_models_test_evaluated": all(job in evaluated for job in status["completed_jobs"]),
+        "all_planned_models_test_evaluated": all(job in evaluated for job in [DENSE, *status["planned_jobs"]]),
+        "evaluation_batches": batches, "runs": records,
+    }
+    summary.pop("finished_at_utc", None)
+    if "error" in status:
+        summary["error"] = status["error"]
+    write_json(evaluation / "test_summary.json", summary)
+    write_test_comparison(evaluation, records)
+
+
+def evaluate_completed_job(plan, output, job, status, records, deadline):
+    """No model selection here: score the frozen result, retain it, then continue the fixed queue."""
+    jobs = ([DENSE] if DENSE not in status["evaluated_jobs"] else []) + [job]
+    evaluation = output / "test_evaluation" / job
+    require(not evaluation.exists(), f"Refusing to overwrite existing evaluation: {evaluation}")
+    status["status"] = f"evaluating_frozen_test_{job}"
+    write_json(output / "nightly_status.json", status)
+    run_child([sys.executable, str(ROOT / "scripts/evaluate_pruning_test.py"),
+               "--run-dir", str(output), "--data", plan["data"], "--output", str(evaluation),
+               "--jobs", *jobs], output / f"{job}_test_evaluation.log", deadline)
+    report = json.loads((evaluation / "test_summary.json").read_text())
+    require(report["status"] == "completed" and report["test_evaluated"],
+            f"{job}: test evaluation did not complete")
+    require([record["job"] for record in report["runs"]] == jobs,
+            f"{job}: test evaluation returned unexpected models")
+    for record in report["runs"]:
+        require(record["job"] not in status["evaluated_jobs"], "Repeated test evaluation is forbidden")
+        # Prediction filenames in the child report are relative to its own directory.
+        records.append({**record, "predictions": str(Path(job) / record["predictions"]),
+                        "evaluation_report": str(Path(job) / "test_summary.json")})
+        status["evaluated_jobs"].append(record["job"])
+    status.update(test_evaluated=True, test_comparisons="exploratory")
+    write_json(output / "nightly_status.json", status)
+    write_test_summary(output, status, records)
+
+
 def run_queue(plan):
     output = Path(plan["output"])
     require(not output.exists(), f"Refusing to overwrite existing output: {output}")
@@ -172,6 +241,8 @@ def run_queue(plan):
     for cfg in configurations.values():
         cfg.dataloaders.path_to_data = plan["data"]
         cfg.cyclic_channel_pruning.adaptive_reference_history = str(output / "adaptive_reference_history.csv")
+        OmegaConf.update(cfg, "model.backbone.resnet_block.regularization_normalization",
+                         plan["gate_regularization_normalization"], force_add=True)
         validate_nightly_config(cfg)
     dense = validate_dense_source(plan["dense_source"], configurations[plan["jobs"][0]])
     output.mkdir(parents=True, exist_ok=False)
@@ -180,7 +251,9 @@ def run_queue(plan):
     training_deadline = deadline - TEST_RESERVE_SECONDS
     status = {"status": "preflight", "protocol": PROTOCOL, "planned_jobs": plan["jobs"],
               "completed_jobs": [], "skipped_jobs": [], "incomplete_jobs": [], "test_evaluated": False,
-              "reused_jobs": [DENSE], "new_training_epochs_per_model": 150}
+              "evaluated_jobs": [], "reused_jobs": [DENSE], "new_training_epochs_per_model": 150,
+              "gate_regularization_normalization": plan["gate_regularization_normalization"]}
+    test_records = []
     previous_term = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         require(shutil.disk_usage(output).free >= 30 * 1024 ** 3, "Need at least 30 GiB free for checkpoints")
@@ -197,7 +270,8 @@ def run_queue(plan):
         run_child([sys.executable, "-m", "pytest", "-q", *[str(ROOT / p) for p in PREFLIGHT_TESTS]],
                   output / "preflight_tests.log", training_deadline)
         run_child([sys.executable, str(ROOT / "scripts/smoke_adaptive_pruning.py"),
-                   "--output", str(output / "gpu_smoke"), "--device", "cuda:0"],
+                   "--output", str(output / "gpu_smoke"), "--device", "cuda:0",
+                   "--gate-regularization-normalization", plan["gate_regularization_normalization"]],
                   output / "preflight_gpu_smoke.log", training_deadline)
         print("[reuse] Dense validation reference and zero-epoch random initializer verified; no dense retraining.", flush=True)
         previous_seconds = None
@@ -214,13 +288,16 @@ def run_queue(plan):
                            "--job-config", str(output / f"{job}_resolved.yaml"),
                            "--output", str(output / job)], output / f"{job}.log", training_deadline)
             except TimeoutError:
-                # A true deadline leaves a reserve to evaluate previous completed
-                # models. A manual interruption must still stop the whole queue.
+                status["incomplete_jobs"].append(job)
+                # Previous completed models have already been tested. A manual
+                # interruption must still stop the whole queue without hidden work.
                 if time.monotonic() < training_deadline or not status["completed_jobs"]:
                     raise
-                status["incomplete_jobs"].append(job)
                 status["skipped_jobs"] = plan["jobs"][index + 1:]
                 break
+            except BaseException:
+                status["incomplete_jobs"].append(job)
+                raise
             previous_seconds = time.monotonic() - started
             result = json.loads((output / job / "pilot_state.json").read_text())
             require(result["status"] == "completed" and result["global_epochs_completed"] == 150
@@ -232,24 +309,24 @@ def run_queue(plan):
             write_comparison(output, [DENSE, *status["completed_jobs"]], "adaptive_lambda_nightly")
             print(f"{job}: valid={result['validation']['accuracy']:.2%}; "
                   f"params={result['final_cost']['physical_total_parameters']:,}; "
-                  f"wall={previous_seconds / 60:.1f} min. Frozen test evaluation follows the queue.", flush=True)
+                  f"wall={previous_seconds / 60:.1f} min. Evaluating frozen deployment on test now.", flush=True)
+            evaluate_completed_job(plan, output, job, status, test_records, deadline)
         require(bool(status["completed_jobs"]), "No new model completed within the wall-clock budget")
-        status["status"] = "evaluating_frozen_test"
-        write_json(output / "nightly_status.json", status)
-        run_child([sys.executable, str(ROOT / "scripts/evaluate_pruning_test.py"),
-                   "--run-dir", str(output), "--data", plan["data"],
-                   "--jobs", DENSE, *status["completed_jobs"]], output / "test_evaluation.log", deadline)
-        test = json.loads((output / "test_evaluation/test_summary.json").read_text())
-        require(test["status"] == "completed" and test["test_evaluated"], "Test evaluation did not complete")
-        status.update(test_evaluated=True, test_comparisons="exploratory",
-                      status=("completed_partial_wall_budget"
-                              if status["skipped_jobs"] or status["incomplete_jobs"] else "completed"))
+        require(all(job in status["evaluated_jobs"] for job in status["completed_jobs"]),
+                "A completed model is missing its required frozen test evaluation")
+        status["status"] = ("completed_partial_wall_budget"
+                            if status["skipped_jobs"] or status["incomplete_jobs"] else "completed")
     except BaseException as exc:
         status.update(status="failed_or_interrupted", error=f"{type(exc).__name__}: {exc}")
         raise
     finally:
         signal.signal(signal.SIGTERM, previous_term)
+        status["all_completed_models_test_evaluated"] = bool(status["completed_jobs"]) and all(
+            job in status["evaluated_jobs"] for job in status["completed_jobs"])
+        status["all_planned_models_test_evaluated"] = all(
+            job in status["evaluated_jobs"] for job in [DENSE, *status["planned_jobs"]])
         write_json(output / "nightly_status.json", status)
+        write_test_summary(output, status, test_records)
         print(f"Status: {status['status']}; logs and checkpoints: {output}", flush=True)
     return status
 
@@ -282,6 +359,9 @@ def main(argv=None):
         require(args.job_config is not None, "Internal --job requires its frozen --job-config")
         config = OmegaConf.load(args.job_config)
         require(config.mlflow.run_name == args.job, "Job/config identity differs")
+        require(OmegaConf.select(config, "model.backbone.resnet_block.regularization_normalization",
+                                 default="enabled_channels") == plan["gate_regularization_normalization"],
+                "Job/config gate regularization normalization differs")
         validate_nightly_config(config)
         from net_complexity.training.pruning_audit import run_adaptive_pruning_pilot
         run_adaptive_pruning_pilot(config, Path(plan["output"]))

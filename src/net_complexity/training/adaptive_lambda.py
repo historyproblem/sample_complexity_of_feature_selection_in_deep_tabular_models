@@ -771,7 +771,11 @@ class AdaptiveLambdaController:
             self.log_step_boost_level = 0
             step_action = "step_reset_target_pruning"
         else:
-            step_action = "step_keep_fast_pruning_no_new_logic"
+            # Acceleration is only useful while closure is too slow. Discard
+            # stale boost before this update when closure overshoots the target;
+            # the accuracy policy still decides lambda's direction at base step.
+            self.log_step_boost_level = 0
+            step_action = "step_reset_fast_pruning"
 
         self._store_control_zero_prob(epoch=epoch, valid_zero_prob=valid_zero_prob)
         return self._set_log_step_update_state(

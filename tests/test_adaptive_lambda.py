@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 from types import SimpleNamespace
 
@@ -335,14 +337,95 @@ def test_adaptive_log_step_slow_pruning_boosts_to_cap_and_target_resets():
     assert lambda_after_target_update / lambda_after_fourth_update == pytest.approx(1.25)
 
     assert fast_update.metrics["adaptive_lambda_step_action"] == (
-        "step_keep_fast_pruning_no_new_logic"
+        "step_reset_fast_pruning"
     )
     assert fast_update.metrics["adaptive_lambda_log_step_boost_level"] == 0
     assert fast_update.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(0.10)
     assert model.lambda_coef / lambda_after_target_update == pytest.approx(1.25)
 
 
-def test_adaptive_log_step_bad_accuracy_resets_boost_and_uses_base_step():
+@pytest.mark.parametrize("slow_updates", [0, 1, 2])
+@pytest.mark.parametrize("restore", [False, True])
+def test_fast_pruning_resets_accumulated_boost_before_lambda_update(slow_updates, restore):
+    kwargs = dict(initial_lambda_coef=0.001, warmup_epochs=0,
+                  update_every_epochs=3, acc_window=1, log_step_init=math.log(2.0))
+    control = AdaptiveLambdaController(**kwargs)
+    model = _DummyModel(lambda_coef=0.001)
+    control.apply_initial_state(model, apply_lambda=_apply_lambda)
+
+    def advance(epoch, zero_prob):
+        return control.on_epoch_end(
+            epoch=epoch, model=model,
+            valid_metrics={"valid_accuracy": 0.90, "valid_average_zero_prob": zero_prob},
+            apply_lambda=_apply_lambda,
+        )
+
+    epoch, zero_prob = 3, 0.10
+    advance(epoch, zero_prob)
+    for _ in range(slow_updates):
+        epoch += 3
+        zero_prob += 0.005
+        advance(epoch, zero_prob)
+    assert control.log_step_boost_level == slow_updates
+    if restore:
+        saved = control.state_dict()
+        control = AdaptiveLambdaController(**kwargs)
+        control.load_state_dict(saved)
+        control.apply_initial_state(model, apply_lambda=_apply_lambda)
+
+    # Jump directly from slow to fast closure, without a target-rate update
+    # that could hide the stale boost by resetting it first.
+    for _ in range(2):
+        before = model.lambda_coef
+        epoch += 3
+        zero_prob += 0.30
+        result = advance(epoch, zero_prob)
+        assert result.action == "increase_lambda"
+        assert result.metrics["adaptive_lambda_step_action"] == "step_reset_fast_pruning"
+        assert result.metrics["adaptive_lambda_log_step_boost_level"] == 0
+        assert result.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(0.10)
+        assert result.metrics["adaptive_lambda_effective_log_step"] == pytest.approx(math.log(2.0))
+        assert model.lambda_coef == pytest.approx(before * 2.0)
+        assert control.state_dict()["runtime"]["log_step_boost_level"] == 0
+
+    # Slow closure can start building acceleration again, from zero.
+    before = model.lambda_coef
+    result = advance(epoch + 3, zero_prob + 0.005)
+    assert result.metrics["adaptive_lambda_step_action"] == "step_boost_slow_pruning"
+    assert control.log_step_boost_level == 1
+    assert model.lambda_coef == pytest.approx(before * 4.0)
+
+
+def test_nightly_fast_closure_does_not_repeat_sixteenfold_lambda_jump():
+    # Recreate the epoch-37 lambda/boost and subsequent measured closure rate;
+    # this is a controller regression, not a replay of model training.
+    control = AdaptiveLambdaController(initial_lambda_coef=0.016)
+    model = _DummyModel(lambda_coef=0.016)
+    control.apply_initial_state(model, apply_lambda=_apply_lambda)
+    for epoch, zero_prob in [(31, 0.0975), (34, 0.1075), (37, 0.1175)]:
+        control.on_epoch_end(
+            epoch=epoch, model=model,
+            valid_metrics={"valid_accuracy": 0.90, "valid_average_zero_prob": zero_prob},
+            apply_lambda=_apply_lambda,
+        )
+    assert control.log_step_boost_level == 2
+    assert model.lambda_coef == pytest.approx(2.048)
+
+    result = control.on_epoch_end(
+        epoch=40, model=model,
+        valid_metrics={"valid_accuracy": 0.90, "valid_average_zero_prob": 0.3376},
+        apply_lambda=_apply_lambda,
+    )
+    assert result.metrics["adaptive_lambda_prune_rate_per_epoch"] == pytest.approx(
+        (0.3376 - 0.1175) / 3
+    )
+    assert result.metrics["adaptive_lambda_step_action"] == "step_reset_fast_pruning"
+    assert control.log_step_boost_level == 0
+    assert model.lambda_coef == pytest.approx(4.096)  # Previously 32.768 (x16).
+
+
+@pytest.mark.parametrize("zero_prob", [0.11, 0.41])
+def test_adaptive_log_step_bad_accuracy_resets_boost_and_uses_base_step(zero_prob):
     model = _DummyModel(lambda_coef=1.0)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     log_step = math.log(1.25)
@@ -367,7 +450,7 @@ def test_adaptive_log_step_bad_accuracy_resets_boost_and_uses_base_step():
         optimizer,
         epoch=3,
         accuracy=0.80,
-        zero_prob=0.11,
+        zero_prob=zero_prob,
     )
 
     assert result.action == "decrease_lambda"

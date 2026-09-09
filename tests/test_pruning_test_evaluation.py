@@ -121,25 +121,43 @@ def test_prepares_frozen_model(files):
     assert state_hash(model.state_dict()) == record["model_state_hash"]
 
 
-@pytest.mark.parametrize("bad", [None, "protocol", "disabled", "epochs"])
-def test_adaptive_v2_deployment_requires_audited_config(files, bad):
+@pytest.mark.parametrize("normalization", ["enabled_channels", "initial_channels"])
+@pytest.mark.parametrize("bad", [None, "protocol", "disabled", "epochs", "normalization_state",
+                                "normalization_checkpoint", "normalization_unknown"])
+def test_adaptive_v2_deployment_requires_audited_config(files, bad, normalization):
     source = files / evaluation.JOBS[2]
     job = evaluation.ADAPTIVE_JOBS[0]
     target = files / job
     shutil.copytree(source, target)
     state = evaluation.read_json(target / "pilot_state.json")
     state.update(pilot_version=2, protocol="adaptive_lambda_v1", adaptive_lambda_enabled=True)
+    checkpoint = torch.load(target / "deployment.pt", weights_only=True)
     config = OmegaConf.load(target / "resolved_config.yaml")
     OmegaConf.update(config, "cyclic_channel_pruning.audit_protocol", "adaptive_lambda_v1", force_add=True)
     OmegaConf.update(config, "training_arguments.adaptive_lambda.enabled", True, force_add=True)
+    # Legacy artifacts omit normalization metadata; they must retain their
+    # enabled-channel meaning. The new opt-in must be explicit everywhere.
+    if normalization == "initial_channels":
+        OmegaConf.update(config, "model.backbone.resnet_block.regularization_normalization",
+                         normalization, force_add=True)
+        state["gate_regularization_normalization"] = checkpoint["gate_regularization_normalization"] = normalization
+        state["initial_gate_channels"] = {"backbone.layer1.0.mid1_gumbel_layer": 64}
+        checkpoint["initial_gate_channels"] = dict(state["initial_gate_channels"])
     if bad == "protocol":
         state["protocol"] = "unknown"
     elif bad == "disabled":
         config.training_arguments.adaptive_lambda.enabled = False
     elif bad == "epochs":
         state["global_epochs_completed"] = state["total_epochs_allocated"] = 151
+    elif bad == "normalization_state":
+        state["gate_regularization_normalization"] = "initial_channels" if normalization == "enabled_channels" else "enabled_channels"
+    elif bad == "normalization_checkpoint":
+        checkpoint["gate_regularization_normalization"] = "initial_channels" if normalization == "enabled_channels" else "enabled_channels"
+    elif bad == "normalization_unknown":
+        OmegaConf.update(config, "model.backbone.resnet_block.regularization_normalization", "unknown", force_add=True)
     OmegaConf.save(config, target / "resolved_config.yaml")
     write_json(target / "pilot_state.json", state)
+    torch.save(checkpoint, target / "deployment.pt")
     if bad:
         with pytest.raises(ValueError):
             evaluation.prepare_job(files, job)
@@ -147,6 +165,26 @@ def test_adaptive_v2_deployment_requires_audited_config(files, bad):
         model, record = evaluation.prepare_job(files, job)
         assert not model.training and record["pilot_version"] == 2
         assert record["training_protocol"] == "adaptive_lambda_v1"
+        assert record["gate_regularization_normalization"] == normalization
+
+
+@pytest.mark.parametrize("bad_widths", [None, {}, {"layer": 0}, {"layer": True}, {"layer": 3.5}])
+def test_initial_normalization_requires_original_width_provenance(files, bad_widths):
+    source = files / evaluation.JOBS[2]
+    state = evaluation.read_json(source / "pilot_state.json")
+    checkpoint = torch.load(source / "deployment.pt", weights_only=True)
+    cfg = OmegaConf.load(source / "resolved_config.yaml")
+    state.update(pilot_version=2, protocol="adaptive_lambda_v1", adaptive_lambda_enabled=True,
+                 gate_regularization_normalization="initial_channels", initial_gate_channels=bad_widths)
+    checkpoint.update(gate_regularization_normalization="initial_channels", initial_gate_channels=bad_widths)
+    OmegaConf.update(cfg, "cyclic_channel_pruning.audit_protocol", "adaptive_lambda_v1", force_add=True)
+    OmegaConf.update(cfg, "training_arguments.adaptive_lambda.enabled", True, force_add=True)
+    OmegaConf.update(cfg, "model.backbone.resnet_block.regularization_normalization", "initial_channels", force_add=True)
+    OmegaConf.save(cfg, source / "resolved_config.yaml")
+    write_json(source / "pilot_state.json", state)
+    torch.save(checkpoint, source / "deployment.pt")
+    with pytest.raises(ValueError, match="normalization widths"):
+        evaluation.prepare_job(files, evaluation.JOBS[2])
 
 
 @pytest.mark.parametrize("mode", ["recorded", "relocated", "explicit_parent", "explicit_job"])

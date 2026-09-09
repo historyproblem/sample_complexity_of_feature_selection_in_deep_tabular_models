@@ -38,6 +38,14 @@ def is_adaptive(config):
     return config.cyclic_channel_pruning.audit_protocol == ADAPTIVE_PROTOCOL
 
 
+def gate_regularization_normalization(config):
+    mode = OmegaConf.select(config, "model.backbone.resnet_block.regularization_normalization",
+                            default="enabled_channels")
+    if mode not in ("enabled_channels", "initial_channels"):
+        raise ValueError("Unsupported gate regularization normalization.")
+    return mode
+
+
 def load_adaptive_reference(path, total_epochs):
     """Load an explicit validation-only reference; never train a hidden baseline."""
     path = Path(path)
@@ -59,6 +67,9 @@ def load_adaptive_reference(path, total_epochs):
 def validate_config(config):
     c = config.cyclic_channel_pruning
     adaptive = is_adaptive(config)
+    normalization = gate_regularization_normalization(config)
+    if not adaptive and normalization != "enabled_channels":
+        raise ValueError("Historical fixed pilot requires enabled_channels normalization.")
     supported = {
         "enabled", "audit_protocol", "max_cycles", "stop_on_convergence",
         "gumbel_epochs", "recovery_epochs", "final_epochs", "drop_mode",
@@ -253,6 +264,11 @@ def _run(config, output_root, *, resume_search_from=None):
         raise ValueError("Pilot requires the shared zero-trained-epoch initializer with matching seed.")
     common_hash = state_hash(initial["model_state_dict"])
     carrier = instantiate(config.model)
+    normalization = gate_regularization_normalization(config)
+    initial_gate_channels = {name: int(gate.logits.shape[0]) for name, gate in gates(carrier).items()}
+    if any(getattr(gate, "regularization_normalization", "enabled_channels") != normalization
+           for gate in gates(carrier).values()):
+        raise ValueError("Constructed gate normalization differs from requested configuration.")
     incompatible = carrier.load_state_dict(initial["model_state_dict"], strict=False)
     if incompatible.unexpected_keys or any("gumbel_layer" not in k for k in incompatible.missing_keys):
         raise ValueError(f"Incompatible shared initializer: {incompatible}")
@@ -283,6 +299,8 @@ def _run(config, output_root, *, resume_search_from=None):
              "initial_cost": initial_cost, "stages": stages, "decisions": decisions}
     if adaptive:
         state.update(protocol=ADAPTIVE_PROTOCOL, adaptive_lambda_enabled=True,
+                     gate_regularization_normalization=normalization,
+                     initial_gate_channels=initial_gate_channels,
                      adaptive_reference_history=str(Path(c.adaptive_reference_history).resolve()),
                      adaptive_reference_sha256=hashlib.sha256(Path(c.adaptive_reference_history).read_bytes()).hexdigest(),
                      adaptive_controller_handoffs=controller_handoffs,
@@ -319,6 +337,10 @@ def _run(config, output_root, *, resume_search_from=None):
             # search controller is held, not reset, until the next gated phase.
             cfg.training_arguments.adaptive_lambda.enabled = not structural
             if not structural:
+                if {key: int(gate.logits.shape[0]) for key, gate in gates(source).items()} != initial_gate_channels:
+                    raise ValueError("Search carrier changed the original gate normalization widths.")
+                if any(gate.regularization_normalization != normalization for gate in gates(source).values()):
+                    raise ValueError("Gate normalization changed across search/recovery handoff.")
                 adaptive_kwargs = {"adaptive_lambda_state": controller_state,
                                    "adaptive_epoch_offset": global_epoch,
                                    "adaptive_reference_by_epoch": reference}
@@ -355,6 +377,11 @@ def _run(config, output_root, *, resume_search_from=None):
                                        or not logged.get("valid_average_zero_prob")):
                     raise ValueError("Adaptive search is missing live lambda/gate feedback.")
                 row.update(lambda_used=used, lambda_next=following,
+                           job=output_root.name,
+                           gate_regularization_normalization=normalization,
+                           initial_gate_channels=sum(initial_gate_channels.values()),
+                           remaining_gate_channels=sum(width - len(current_mask.get(key, []))
+                                                       for key, width in initial_gate_channels.items()),
                            adaptive_lambda_action=action if not structural else "held_no_structural_gates",
                            adaptive_lambda_reason=logged.get("adaptive_lambda_reason", ""),
                            adaptive_lambda_step=logged.get("adaptive_lambda_step", ""),
@@ -375,6 +402,9 @@ def _run(config, output_root, *, resume_search_from=None):
             raise RuntimeError("Incomplete stage; refusing to claim full epoch budget.")
         stages.append({"name": name, "epochs": epochs, "run_dir": result["run_dir"],
                        "best_epoch": result["best_epoch"], "best_metric": result["best_metric_value"]})
+        if adaptive:
+            stages[-1].update(gate_regularization_normalization=normalization,
+                              regularization_active=not structural)
         checkpoint = torch.load(Path(result["run_dir"]) / "checkpoints" / "best.pt",
                                 map_location="cpu", weights_only=True)
         if adaptive and not structural:
@@ -397,6 +427,9 @@ def _run(config, output_root, *, resume_search_from=None):
                    "mask_hash": mask_hash(mask), "model_state_hash": state_hash(model.state_dict()),
                    "validation": metrics, "provenance": provenance,
                    "global_epochs_consumed": global_epoch, "common_init_hash": common_hash}
+        if adaptive:
+            payload["gate_regularization_normalization"] = normalization
+            payload["initial_gate_channels"] = initial_gate_channels
         temporary = output_root / "deployment.pt.tmp"
         torch.save(payload, temporary)
         temporary.replace(output_root / "deployment.pt")

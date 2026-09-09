@@ -43,9 +43,10 @@ def test_adaptive_contract_requires_controller_and_total_budget(tmp_path, monkey
         ("model.lambda_coef", 0),
         ("model.lambda_coef", float("nan")),
         ("cyclic_channel_pruning.adaptive_reference_history", ""),
+        ("model.backbone.resnet_block.regularization_normalization", "unknown"),
     ):
         changed = deepcopy(cfg)
-        OmegaConf.update(changed, key, value)
+        OmegaConf.update(changed, key, value, force_add=True)
         with pytest.raises(ValueError):
             validate_config(changed)
     with pytest.raises(ValueError, match="adaptive"):
@@ -63,9 +64,11 @@ def test_reference_must_be_complete_finite_and_unambiguous(tmp_path, rows):
         load_adaptive_reference(path, 2)
 
 
-def test_real_two_cycle_adaptive_pruning_keeps_selected_controller(tmp_path, monkeypatch):
+@pytest.mark.parametrize("normalization", ["enabled_channels", "initial_channels"])
+def test_real_two_cycle_adaptive_pruning_keeps_selected_controller(tmp_path, monkeypatch, normalization):
     torch.set_num_threads(1)
     cfg = make_config(tmp_path, monkeypatch)
+    OmegaConf.update(cfg, "model.backbone.resnet_block.regularization_normalization", normalization, force_add=True)
     cfg.device = "cpu"
     cfg.dataloaders = {"_target_": "smoke_pruning_pilot.SmokeDataloaders", "loader_seed": 42}
     c = cfg.cyclic_channel_pruning
@@ -87,6 +90,7 @@ def test_real_two_cycle_adaptive_pruning_keeps_selected_controller(tmp_path, mon
     result = run_adaptive_pruning_pilot(cfg, tmp_path / "run")
     assert result["status"] == "completed" and result["pilot_version"] == 2
     assert result["protocol"] == ADAPTIVE_PROTOCOL and result["adaptive_lambda_enabled"] is True
+    assert result["gate_regularization_normalization"] == normalization
     assert result["global_epochs_completed"] == 8 and result["optimizer_steps_total"] == 16
     assert result["test_evaluated"] is False
     assert result["accepted_mask"] and all(d["status"] == "accepted" for d in result["decisions"])
@@ -100,6 +104,12 @@ def test_real_two_cycle_adaptive_pruning_keeps_selected_controller(tmp_path, mon
     assert all(r["valid_average_zero_prob"] != "" for r in search)
     assert all(float(r["lambda_used"]) == 0 for r in recovery)
     assert all(r["adaptive_lambda_action"] == "held_no_structural_gates" for r in recovery)
+    assert all(r["gate_regularization_normalization"] == normalization and r["job"] == "run" for r in rows)
+    assert len({r["initial_gate_channels"] for r in rows}) == 1
+    assert int(search[3]["remaining_gate_channels"]) < int(search[0]["remaining_gate_channels"])
+    deployment = torch.load(tmp_path / "run/deployment.pt", weights_only=True)
+    assert deployment["gate_regularization_normalization"] == normalization
+    assert deployment["initial_gate_channels"] == result["initial_gate_channels"]
     handoffs = result["adaptive_controller_handoffs"]
     assert len(handoffs) == 2
     for stage, handoff in zip((s for s in result["stages"] if s["name"].endswith("search")), handoffs):

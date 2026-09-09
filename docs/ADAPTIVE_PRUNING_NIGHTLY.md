@@ -88,17 +88,20 @@ outputs/runs/20260907_134446_507828_pruning_dense_control
 
 ## Итоговая метрика — test
 
-После фиксации всех завершённых deployment автоматически запускается
-`evaluate_pruning_test.py` на 10 000 официальных test изображений, включая
-сохранённый dense reference. Обучение, выбор checkpoint и pruning guard
+После фиксации каждого завершённого deployment, до старта следующего job,
+автоматически запускается `evaluate_pruning_test.py` на 10 000 официальных test
+изображений. Сохранённый dense reference оценивается один раз вместе с первым job.
+Ошибка следующей модели больше не лишает предыдущую test-отчёта.
+Обучение, выбор checkpoint и pruning guard
 никогда не используют test. Итоговый файл:
 
 ```text
 <run>/test_evaluation/test_comparison.csv
 ```
 
-Также сохраняются `test_summary.json`, план выбранных checkpoint и предсказания
-каждого test-примера. `comparison.md/json` в корне run остаются явно подписанными
+Также сохраняется сводный `test_summary.json`. Отдельные отчёты, планы выбранных
+checkpoint и предсказания каждого test-примера лежат в `test_evaluation/<job>/`.
+`comparison.md/json` в корне run остаются явно подписанными
 промежуточными **validation**-отчётами; для итогового графика нужны `test_evaluation/`.
 Главный конкурент — DepGraph. Старые его метрики требуют единого подсчёта
 `correct_count / example_count`, прежде чем делать точные выводы о разнице.
@@ -116,6 +119,10 @@ outputs/runs/20260907_134446_507828_pruning_dense_control
 
 Исторический `pruning_nightly` и fixed-pilot оставлены для воспроизводимости;
 они не являются новой командой выше. Не запускать старый конфиг вместо adaptive.
+
+Новый одиночный дневной запуск с нормировкой на исходные ширины каналов описан в
+[ADAPTIVE_PRUNING_DAY.md](ADAPTIVE_PRUNING_DAY.md). Этот ночной YAML без явного
+нового поля сохраняет прежнюю нормировку `enabled_channels`.
 
 ## Проверки перед передачей
 
