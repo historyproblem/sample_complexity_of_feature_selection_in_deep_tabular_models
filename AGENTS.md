@@ -11,6 +11,12 @@
 - A new model may consume at most 150 total training epochs, counting all search,
   intermediate recovery and final fine-tuning. Never add training to a completed
   150-epoch result; allocate phases within the same budget on a new model.
+- Explicit exception requested on 2026-09-10: `one_shot_reinit_v1` trains a search
+  model for 150 epochs, exports its learned threshold mask without a parameter
+  budget, discards its learned weights, and trains a randomly initialized compact
+  model for another 150 epochs without gates. Report 300 epochs per experiment,
+  not 150. A matching dense reference costs a separate 150 epochs once; report
+  whether it was newly trained or reused. This does not extend cyclic budgets.
 - Physical recovery has no gates or gate penalty. Hold the adaptive controller
   state and restore it for the next search; do not reset it silently.
 - Primary competitor: DepGraph (also called "depthgraph" by the user).

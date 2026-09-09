@@ -1,0 +1,87 @@
+# @package _global_
+# A separate protocol: 150 epochs mask search, ONE physical prune, fresh random
+# compact initialization, then 150 epochs scratch training. Not cyclic recovery.
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: gumbel_masked_bottleneck
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /run_history: valid_accuracy_max
+  - _self_
+
+seed: 42
+device: cuda:0
+model:
+  lambda_coef: 0.001
+  gumbel_init_mode: paper_resnet50
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.0
+  backbone:
+    resnet_block:
+      gate_output: false
+      gate_internal_width: true
+      train_gate_mode: ste_hard
+      eval_gate_mode: deterministic_hard
+      gate_threshold: 0.5
+      temperature: 1.0
+      regularization_normalization: initial_channels
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0005
+  gate_weight_decay_scale: 0.0
+scheduler:
+  T_max: 150
+dataloaders:
+  path_to_data: data
+  seed: 42
+  loader_seed: 42
+  include_test: false
+  batch_size: 128
+  num_workers: 2
+training_arguments:
+  num_epochs: 150
+  evaluate_test: false
+  global_epoch_offset: 0
+  audit_data_seed: 42
+  adaptive_lambda:
+    enabled: true
+    # Never let the engine silently train a baseline. The launcher explicitly
+    # builds or verifies a continuous-150 dense reference before search.
+    baseline_history_dir: null
+  lambda_warmup:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+      return_counts: true
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+      log_channel_zero_probs: false
+  test_metrics: []
+one_shot_pruning:
+  protocol: one_shot_reinit_v1
+  search_epochs: 150
+  retrain_epochs: 150
+  mask_threshold: 0.5
+  selection_checkpoint: best.pt
+  probability_source: raw_logits
+  reinit_seed: 4242
+  initial_checkpoint: null
+  reference_history: null
+mlflow:
+  enabled: false
+  run_name: one_shot_pruning
+run_history:
+  root_dir: outputs/runs
+  run_name: one_shot_pruning
+  log_channel_history: true
+  secondary_monitor: valid_ce_loss
+  log_gate_history: false

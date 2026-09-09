@@ -327,7 +327,12 @@ def build_pruned_bottleneck_model(
     criterion_cfg = OmegaConf.select(config, "model.criterion")
     criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
-    total_disabled = sum(len(v) for v in pruning_spec.values())
+    # Bottleneck specs may contain output/mid1/mid2 lists per block. Count
+    # channel indices, not the number of boundary keys in the nested dict.
+    total_disabled = sum(
+        sum(len(indices) for indices in value.values()) if isinstance(value, dict) else len(value)
+        for value in pruning_spec.values()
+    )
     print(
         f"[channel_pruning] Structural pruning applied (Bottleneck): "
         f"{len(pruning_spec)} blocks affected, "

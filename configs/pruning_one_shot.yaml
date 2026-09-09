@@ -1,0 +1,15 @@
+# First run: 150 dense-reference epochs + 150 search + 150 fresh scratch = 450.
+# With --reference-source pointing to a completed matching one-shot dense: 300.
+name: pruning_one_shot
+protocol: one_shot_reinit_v1
+jobs:
+  - O1_internal_gap05_1
+reference_source: null
+# No automatic timeout by default: do not discard a long 150+150 experiment.
+# --hours may explicitly set a hard wall-clock cap (partial results remain).
+hours: null
+data: data
+device: cuda:0
+evaluate_test: true
+run_history:
+  root_dir: outputs/runs

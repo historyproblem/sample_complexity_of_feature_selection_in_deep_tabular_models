@@ -1,0 +1,15 @@
+# Predeclared variants; test results never alter this queue.
+# 3 x (150 search + 150 fresh scratch) + 150 shared reference = 1050 new epochs.
+name: pruning_one_shot_queue
+protocol: one_shot_reinit_v1
+jobs:
+  - O1_internal_gap05_1
+  - O2_internal_gap1_2
+  - O3_internal_gap2_5
+reference_source: null
+hours: null
+data: data
+device: cuda:0
+evaluate_test: true
+run_history:
+  root_dir: outputs/runs

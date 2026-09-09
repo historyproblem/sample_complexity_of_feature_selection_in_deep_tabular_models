@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /experiment/one_shot/_base
+  - _self_
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.005
+    hard_drop: 0.01
+mlflow:
+  run_name: O1_internal_gap05_1
+run_history:
+  run_name: O1_internal_gap05_1
