@@ -124,23 +124,26 @@ class ResNet(nn.Module):
         stem_stride: int = 2,
         stem_padding: int = 3,
         use_maxpool: bool = True,
+        base_width: int = 64,
     ):
         super().__init__()
-        self.in_channels = 64
+        if type(base_width) is not int or base_width < 1:
+            raise ValueError("base_width must be a positive integer.")
+        self.in_channels = base_width
         self.block_expansion = _block_attr(ResBlock, "expansion", 1)
 
         self.conv1 = nn.Conv2d(
             in_channels,
-            64,
+            base_width,
             kernel_size=stem_kernel_size,
             stride=stem_stride,
             padding=stem_padding,
             bias=False,
         )
-        self.batch_norm1 = nn.BatchNorm2d(64)
+        self.batch_norm1 = nn.BatchNorm2d(base_width)
         self.relu = nn.ReLU()
         self.stem_feature_selector = (
-            stem_feature_selector_factory(64)
+            stem_feature_selector_factory(base_width)
             if stem_feature_selector_factory is not None
             else nn.Identity()
         )
@@ -150,13 +153,13 @@ class ResNet(nn.Module):
             else nn.Identity()
         )
 
-        self.layer1 = self._make_layer(ResBlock, layer_list[0], planes=64)
-        self.layer2 = self._make_layer(ResBlock, layer_list[1], planes=128, stride=2)
-        self.layer3 = self._make_layer(ResBlock, layer_list[2], planes=256, stride=2)
-        self.layer4 = self._make_layer(ResBlock, layer_list[3], planes=512, stride=2)
+        self.layer1 = self._make_layer(ResBlock, layer_list[0], planes=base_width)
+        self.layer2 = self._make_layer(ResBlock, layer_list[1], planes=base_width * 2, stride=2)
+        self.layer3 = self._make_layer(ResBlock, layer_list[2], planes=base_width * 4, stride=2)
+        self.layer4 = self._make_layer(ResBlock, layer_list[3], planes=base_width * 8, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * self.block_expansion, num_classes)
+        self.fc = nn.Linear(base_width * 8 * self.block_expansion, num_classes)
 
     def forward(self, x):
         x = self.relu(self.batch_norm1(self.conv1(x)))

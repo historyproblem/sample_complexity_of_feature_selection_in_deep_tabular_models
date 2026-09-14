@@ -177,6 +177,87 @@ def prepare_job(run_dir, job, dense_source=None):
     return model, record
 
 
+def prepare_v3_deployment(run_dir):
+    """Load only a selected v3 physical deployment; never reinterpret gated-only artifacts."""
+    from net_complexity.training.accuracy_guided_config import PROTOCOL, validate_config_v3
+    run_dir = Path(run_dir).resolve()
+    state_path, checkpoint_path = run_dir / "protocol_state.json", run_dir / "deployment.pt"
+    config_path = run_dir / "resolved_config.yaml"
+    state = read_json(state_path)
+    require(state.get("protocol") == PROTOCOL and state.get("artifact_type") == "physical_ungated",
+            "v3 evaluator requires an explicitly physical_ungated artifact; gated-only evaluation is separate")
+    require(state.get("status") in ("completed", "infeasible"), "v3 deployment is not finalized")
+    config = OmegaConf.load(config_path)
+    total = validate_config_v3(config)
+    require(not config.accuracy_guided.smoke, "Synthetic smoke artifacts must never access official test data")
+    require(state["global_epochs_completed"] == state["total_epochs_allocated"] == total,
+            "v3 deployment has incomplete consumed training budget")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    require(checkpoint.get("artifact_type") == "physical_ungated" and checkpoint.get("protocol") == PROTOCOL,
+            "v3 checkpoint artifact type/protocol differs")
+    weights, mask = checkpoint["model_state_dict"], checkpoint["pruning_mask"]
+    require(not any("gumbel" in name or "gate_logits" in name for name in weights),
+            "Ungated evaluator refuses checkpoint tensors containing gates")
+    require(mask == state["accepted_mask"] and mask_hash(mask) == checkpoint["mask_hash"] == state["accepted_mask_hash"],
+            "v3 accepted deployment mask differs")
+    require(checkpoint["validation"] == state["validation"] and checkpoint["common_init_hash"] == state["common_init_hash"],
+            "v3 deployment validation/initializer provenance differs")
+    require(0 < checkpoint["global_epochs_consumed"] <= state["global_epochs_completed"], "v3 checkpoint clocks invalid")
+    expected_hash = state_hash(weights)
+    require(expected_hash == checkpoint["model_state_hash"], "v3 deployment tensor hash differs")
+    require(all(not v.is_floating_point() or v.dtype == torch.float32 for v in weights.values()), "Expected FP32 deployment")
+    require(int(config.seed) == state["seed"], "v3 deployment seed differs")
+    metadata = checkpoint.get("normalization_metadata")
+    require(isinstance(metadata, dict) and metadata == state.get("provenance", {}).get("normalization"),
+            "v3 normalization provenance differs")
+    require(state.get("normalization") == "initial_channels" and state.get("scaling_contract")
+            == metadata.get("scaling_contract") == "survivor_equivalent_v1", "v3 scaling provenance differs")
+    widths = metadata.get("n_b0")
+    require(isinstance(widths, dict) and bool(widths)
+            and all(type(width) is int and width > 0 for width in widths.values()), "v3 original width metadata invalid")
+    require(metadata.get("M0") == len(widths)
+            and metadata.get("normalization") == {name: "initial_channels" for name in widths},
+            "v3 original M0/normalization metadata invalid")
+    validate_config_and_mask(config, mask)
+    expected_widths = {}
+    block = config.model.backbone.resnet_block
+    base_width = int(OmegaConf.select(config, "model.backbone.base_width", default=64))
+    for stage, blocks in enumerate((3, 4, 6, 3), 1):
+        for index in range(blocks):
+            prefix = f"backbone.layer{stage}.{index}."
+            width = base_width * 2 ** (stage - 1)
+            if block.gate_internal_width:
+                expected_widths.update({prefix + "mid1_gumbel_layer": width, prefix + "mid2_gumbel_layer": width})
+            if block.gate_output:
+                expected_widths[prefix + "gumbel_layer"] = 4 * width
+    require(widths == expected_widths, "v3 original boundary ids/widths differ from the saved architecture")
+    structural_config = deepcopy(config)
+    structural_config.model.lambda_coef = 0.0
+    pruning = OmegaConf.create({"mode": "explicit", "structural": True, "enabled": True, "mask": mask})
+    with redirect_stdout(io.StringIO()):
+        model = build_structurally_pruned_model_from_config(structural_config, pruning)
+    model.load_state_dict(weights, strict=True)
+    model.eval()
+    cost = deployment_cost(model)
+    for key in ("physical_total_parameters", "conv_linear_macs_per_image"):
+        require(cost[key] == state["final_cost"][key], f"v3 deployment cost differs: {key}")
+    require(state_hash(model.state_dict()) == expected_hash, "v3 loading/cost check changed model state")
+    record = {
+        "job": run_dir.name, "checkpoint": str(checkpoint_path), "checkpoint_sha256": file_hash(checkpoint_path),
+        "pilot_version": 3, "training_protocol": PROTOCOL, "artifact_type": "physical_ungated",
+        "gate_regularization_normalization": "initial_channels", "scaling_contract": "survivor_equivalent_v1",
+        "model_state_hash": expected_hash, "mask_hash": checkpoint["mask_hash"],
+        "config": str(config_path), "config_sha256": file_hash(config_path), "state_sha256": file_hash(state_path),
+        "seed": state["seed"], "common_init_hash": state["common_init_hash"],
+        "split_indices_hash": state["split_indices_hash"], "epochs_consumed": state["global_epochs_completed"],
+        "optimizer_steps_total": state["optimizer_steps_total"],
+        "deployment_epochs_consumed": checkpoint["global_epochs_consumed"], "selection_provenance": checkpoint["provenance"],
+        "validation": state["validation"], "quality_feasible": state["quality_feasible"],
+        "physical_parameters": cost["physical_total_parameters"], "conv_linear_macs_per_image": cost["conv_linear_macs_per_image"],
+    }
+    return model, record
+
+
 def build_test_loader(data_dir, batch_size, num_workers, device, download=False):
     _, test_transform = _build_cifar_transforms()
     # Do not construct a training/validation dataset, let alone calibrate BN on test.
@@ -234,7 +315,7 @@ def write_comparison(output, records):
              "No training, model selection, or BN recalibration. One fixed checkpoint per job.", "",
              "| Job | Test accuracy | Validation accuracy | Parameters | Conv/Linear GMAC |",
              "|---|---:|---:|---:|---:|"]
-    if any(r.get("training_protocol") == "adaptive_lambda_v1" for r in records):
+    if any(r.get("training_protocol") in ("adaptive_lambda_v1", "accuracy_guided_gates_v3") for r in records):
         lines[4:4] = ["Exploratory comparison: prior test results informed further experimentation.", ""]
     for r in records:
         rows.append({"Run": r["job"], "model.trainable_parameters": r["physical_parameters"],
@@ -262,7 +343,9 @@ def run(args):
     if not args.check_only and str(args.device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable. Run on the GPU server, or explicitly pass --device cpu.")
     # Freeze and validate ALL chosen deployments before touching any test image.
-    prepared = [prepare_job(run_dir, job, args.dense_source) for job in args.jobs]
+    is_v3 = getattr(args, "protocol_v3", False)
+    prepared = ([prepare_v3_deployment(run_dir)] if is_v3 else
+                [prepare_job(run_dir, job, args.dense_source) for job in args.jobs])
     reference = prepared[0][1]
     for _, record in prepared:
         for key in ("seed", "common_init_hash", "split_indices_hash", "epochs_consumed", "optimizer_steps_total"):
@@ -277,14 +360,14 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     report = {"status": "running", "source_run": str(run_dir), "started_at_utc": datetime.now(timezone.utc).isoformat(),
               "protocol": "frozen_deployments_test_v1", "test_evaluated": False,
-              "comparison_scope": ("exploratory" if any(r["pilot_version"] == 2 for _, r in prepared)
+              "comparison_scope": ("exploratory" if any(r["pilot_version"] >= 2 for _, r in prepared)
                                    else "frozen_deployment_evaluation"),
               "training_performed": False, "bn_recalibration": False, "test_based_selection": False,
               "device": str(args.device), "batch_size": args.batch_size, "precision": "fp32",
               "python": sys.version, "torch": str(torch.__version__), "cuda": torch.version.cuda,
               "gpu": torch.cuda.get_device_name(args.device) if str(args.device).startswith("cuda") else None,
               "evaluation_script_sha256": file_hash(__file__), "dataset": dataset_info,
-              "planned_jobs": list(args.jobs), "runs": []}
+              "planned_jobs": [record["job"] for _, record in prepared], "runs": []}
     write_json(output / "evaluation_plan.json", {**report, "selected_deployments": [r for _, r in prepared]})
     write_json(output / "test_summary.json", report)
     print(f"Results: {output}", flush=True)
@@ -315,6 +398,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True, help="Completed nightly run directory")
+    parser.add_argument("--protocol-v3", action="store_true", help="RUN_DIR is one finalized v3 physical deployment, not a legacy job queue")
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--jobs", nargs="+", choices=JOBS + ADAPTIVE_JOBS, default=list(JOBS))

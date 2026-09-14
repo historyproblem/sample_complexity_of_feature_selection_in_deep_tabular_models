@@ -1165,3 +1165,218 @@ class AdaptiveLambdaController:
             f" | boost_level={self.log_step_boost_level}"
             f" | reason={reason}"
         )
+
+
+class AccuracyOnlyLambdaController:
+    """Validation-gap controller with a search clock independent of recovery.
+
+    This deliberately does not inherit legacy anti-collapse/rate-boost behavior.
+    It uses the same engine interface; only the feedback contract is different.
+    """
+
+    control_mode = "accuracy_only"
+
+    def __init__(self, *, initial_lambda_coef: float = 0.001,
+                 reference_accuracy_by_epoch: Mapping[int, float],
+                 alpha_min: float = 1e-8, alpha_max: float = 80.0,
+                 soft_drop: float = 0.02, hard_drop: float = 0.05,
+                 gap_window: int = 3, update_every_search_epochs: int = 3,
+                 initial_search_warmup: int = 10, reentry_samples: int = 3,
+                 log_step: float = math.log(2.0)):
+        numbers = (initial_lambda_coef, alpha_min, alpha_max, soft_drop, hard_drop, log_step)
+        if any(not math.isfinite(float(x)) for x in numbers):
+            raise ValueError("accuracy_only configuration must be finite")
+        if not 0 < alpha_min <= initial_lambda_coef <= alpha_max:
+            raise ValueError("accuracy_only requires alpha_min <= alpha_init <= alpha_max and alpha_min > 0")
+        if not 0 <= soft_drop < hard_drop or log_step <= 0:
+            raise ValueError("accuracy_only requires 0 <= soft_drop < hard_drop and positive log_step")
+        if (any(not isinstance(x, int) or isinstance(x, bool) for x in
+                (gap_window, update_every_search_epochs, reentry_samples, initial_search_warmup))
+                or min(gap_window, update_every_search_epochs, reentry_samples) < 1
+                or initial_search_warmup < 0):
+            raise ValueError("Invalid accuracy_only search windows/cadence")
+        reference = {int(k): float(v) for k, v in reference_accuracy_by_epoch.items()}
+        if not reference or any(k < 1 or not math.isfinite(v) or not 0 <= v <= 1
+                                for k, v in reference.items()):
+            raise ValueError("accuracy_only requires an immutable finite validation reference in [0, 1]")
+        self._configuration = dict(alpha_min=float(alpha_min), alpha_max=float(alpha_max),
+            soft_drop=float(soft_drop), hard_drop=float(hard_drop), gap_window=int(gap_window),
+            update_every_search_epochs=int(update_every_search_epochs),
+            initial_search_warmup=int(initial_search_warmup), reentry_samples=int(reentry_samples),
+            log_step=float(log_step), reference_accuracy_by_epoch=reference)
+        self._runtime = dict(lambda_coef=float(initial_lambda_coef), global_training_epoch=0,
+            search_epochs_consumed=0, local_search_epoch=0,
+            next_update_epoch=int(initial_search_warmup + update_every_search_epochs),
+            gap_history=[], phase_id="initial_search", topology_id=None, last_transition_id=None,
+            transitions=[], last_action="hold", last_reason="initialized", reentered=False)
+
+    @property
+    def lambda_coef(self) -> float:
+        return self._runtime["lambda_coef"]
+
+    @property
+    def last_epoch(self) -> int:
+        return self._runtime["global_training_epoch"]
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"version": 2, "control_mode": self.control_mode,
+                "config": deepcopy(self._configuration), "runtime": deepcopy(self._runtime)}
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if (set(state) != {"version", "control_mode", "config", "runtime"}
+                or state["version"] != 2 or state["control_mode"] != self.control_mode):
+            raise ValueError("Incomplete or legacy controller state: explicit migration required")
+        if state["config"] != self._configuration:
+            raise ValueError("accuracy_only immutable configuration/reference mismatch")
+        runtime = deepcopy(state["runtime"])
+        if not isinstance(runtime, dict) or set(runtime) != set(self._runtime):
+            raise ValueError("Incomplete accuracy_only runtime")
+        def finite_primitives(value):
+            if value is None or isinstance(value, (str, bool)):
+                return True
+            if isinstance(value, (int, float)):
+                return math.isfinite(value)
+            if isinstance(value, list):
+                return all(finite_primitives(item) for item in value)
+            if isinstance(value, dict):
+                return all(isinstance(key, (str, int)) and finite_primitives(item)
+                           for key, item in value.items())
+            return False
+        if not finite_primitives(runtime):
+            raise ValueError("accuracy_only runtime must contain finite primitives only")
+        for key in ("global_training_epoch", "search_epochs_consumed", "local_search_epoch", "next_update_epoch"):
+            if not isinstance(runtime[key], int) or isinstance(runtime[key], bool) or runtime[key] < 0:
+                raise ValueError(f"Invalid accuracy_only clock: {key}")
+        if not (runtime["local_search_epoch"] <= runtime["search_epochs_consumed"]
+                <= runtime["global_training_epoch"]):
+            raise ValueError("Inconsistent accuracy_only clocks")
+        if runtime["next_update_epoch"] <= runtime["local_search_epoch"]:
+            raise ValueError("Already consumed accuracy_only update cannot be replayed")
+        if not self._configuration["alpha_min"] <= runtime["lambda_coef"] <= self._configuration["alpha_max"]:
+            raise ValueError("accuracy_only alpha outside bounds")
+        history = runtime["gap_history"]
+        if not isinstance(history, list) or len(history) > self._configuration["gap_window"]:
+            raise ValueError("Invalid accuracy_only gap window")
+        if (not isinstance(runtime["transitions"], list) or not isinstance(runtime["reentered"], bool)
+                or any(not isinstance(runtime[key], str) for key in ("phase_id", "last_action", "last_reason"))
+                or len(history) > runtime["local_search_epoch"]):
+            raise ValueError("Invalid accuracy_only phase/window runtime")
+        previous_epoch = 0
+        for pair in history:
+            if not isinstance(pair, dict) or set(pair) != {"global_training_epoch", "accuracy", "reference", "gap"}:
+                raise ValueError("Incomplete accuracy_only gap observation")
+            if not previous_epoch < pair["global_training_epoch"] <= runtime["global_training_epoch"]:
+                raise ValueError("Invalid accuracy_only gap observation clock")
+            previous_epoch = pair["global_training_epoch"]
+            ref = self._configuration["reference_accuracy_by_epoch"].get(pair["global_training_epoch"])
+            if (ref != pair["reference"] or not math.isfinite(pair["accuracy"])
+                    or not math.isfinite(pair["gap"])
+                    or not 0 <= pair["accuracy"] <= 1
+                    or abs(pair["gap"] - (ref - pair["accuracy"])) > 1e-12):
+                raise ValueError("Inconsistent accuracy_only gap pair")
+        self._runtime = runtime
+
+    def apply_initial_state(self, model: nn.Module, *, apply_lambda: LambdaApplier) -> None:
+        # Do not silently continue or clear an active legacy open-bias episode.
+        if any(float(getattr(module, "open_bias", 0.0)) != 0 for module in model.modules()):
+            raise ValueError("accuracy_only is incompatible with active legacy open_bias")
+        apply_lambda(model, self.lambda_coef)
+
+    def rebase(self, *, transition_id: str, phase_id: str, previous_mask_hash: str,
+               new_mask_hash: str, reason: str,
+               global_training_epoch: int, search_epochs_consumed: int) -> bool:
+        r = self._runtime
+        identity = dict(transition_id=transition_id, phase_id=phase_id,
+            previous_mask_hash=previous_mask_hash, new_mask_hash=new_mask_hash, reason=reason,
+            global_training_epoch=global_training_epoch, search_epochs_consumed=search_epochs_consumed)
+        if r["last_transition_id"] == transition_id:
+            if (not r["transitions"]
+                    or any(r["transitions"][-1].get(key) != value for key, value in identity.items())):
+                raise ValueError("Reused handoff transition id has different topology/phase/clocks/reason")
+            return False
+        if any(event["transition_id"] == transition_id for event in r["transitions"]):
+            raise ValueError("An earlier handoff transition cannot be replayed")
+        if (not transition_id or not reason or global_training_epoch < r["global_training_epoch"]
+                or search_epochs_consumed < r["search_epochs_consumed"]
+                or search_epochs_consumed > global_training_epoch):
+            raise ValueError("Invalid accuracy_only rebase identity or consumed clocks")
+        event = dict(transition_id=transition_id, phase_id=phase_id,
+            previous_mask_hash=previous_mask_hash, new_mask_hash=new_mask_hash, reason=reason,
+            global_training_epoch=int(global_training_epoch), search_epochs_consumed=int(search_epochs_consumed),
+            alpha_preserved=self.lambda_coef)
+        r.update(global_training_epoch=int(global_training_epoch),
+            search_epochs_consumed=int(search_epochs_consumed), local_search_epoch=0,
+            next_update_epoch=max(self._configuration["reentry_samples"], self._configuration["gap_window"]),
+            gap_history=[], phase_id=phase_id, topology_id=new_mask_hash,
+            last_transition_id=transition_id, reentered=True,
+            last_action="hold", last_reason="reentry_window")
+        r["transitions"].append(event)
+        return True
+
+    def hold_recovery(self, *, global_training_epoch: int) -> dict[str, Any]:
+        if global_training_epoch < self.last_epoch:
+            raise ValueError("Recovery cannot roll back the consumed clock")
+        self._runtime.update(global_training_epoch=int(global_training_epoch),
+                             last_action="hold", last_reason="physical_recovery_no_gates")
+        return self.summary_state()
+
+    def on_epoch_end(self, *, epoch: int, model: nn.Module,
+                     valid_metrics: Mapping[str, Any], apply_lambda: LambdaApplier) -> AdaptiveLambdaStepResult:
+        r, c = self._runtime, self._configuration
+        if int(epoch) <= r["global_training_epoch"]:
+            raise ValueError("Search feedback epoch is already consumed; exact resume must not repeat updates")
+        r["global_training_epoch"] = int(epoch)
+        r["search_epochs_consumed"] += 1
+        r["local_search_epoch"] += 1
+        _, accuracy = _resolve_metric(valid_metrics, ACCURACY_METRIC_NAMES)
+        reference = c["reference_accuracy_by_epoch"].get(int(epoch))
+        if (accuracy is None or reference is None or not math.isfinite(accuracy)
+                or not 0 <= accuracy <= 1):
+            r.update(last_action="error", last_reason="missing_or_nonfinite_quality_feedback")
+            raise ValueError(f"Missing/nonfinite accuracy_only validation feedback/reference at global epoch {epoch}")
+        gap = reference - accuracy
+        r["gap_history"].append(dict(global_training_epoch=int(epoch), accuracy=accuracy,
+                                    reference=reference, gap=gap))
+        r["gap_history"] = r["gap_history"][-c["gap_window"]:]
+        mean_gap = sum(x["gap"] for x in r["gap_history"]) / len(r["gap_history"])
+        before = self.lambda_coef
+        action, reason = "hold", "waiting_for_search_cadence"
+        if r["local_search_epoch"] < r["next_update_epoch"]:
+            if not r["reentered"] and r["local_search_epoch"] <= c["initial_search_warmup"]:
+                reason = "initial_search_warmup"
+            elif r["reentered"] and r["local_search_epoch"] < max(c["reentry_samples"], c["gap_window"]):
+                reason = "reentry_window"
+        elif len(r["gap_history"]) < c["gap_window"]:
+            reason = "incomplete_gap_window"
+            r["next_update_epoch"] += c["update_every_search_epochs"]
+        else:
+            r["next_update_epoch"] += c["update_every_search_epochs"]
+            if mean_gap <= c["soft_drop"] + 1e-12:
+                action, reason, direction = "increase_lambda", "mean_gap_within_soft_drop", 1
+            elif mean_gap <= c["hard_drop"] + 1e-12:
+                action, reason, direction = "hold", "mean_gap_between_tolerances", 0
+            else:
+                action, reason, direction = "decrease_lambda", "mean_gap_exceeds_hard_drop", -1
+            if direction:
+                bounded_log = min(math.log(c["alpha_max"]), max(math.log(c["alpha_min"]),
+                    math.log(before) + direction * c["log_step"]))
+                r["lambda_coef"] = min(c["alpha_max"], max(c["alpha_min"], math.exp(bounded_log)))
+            if direction and r["lambda_coef"] == before:
+                reason += "_alpha_bound"
+            apply_lambda(model, self.lambda_coef)
+        r.update(last_action=action, last_reason=reason)
+        metrics = {**self.summary_state(), "alpha_used": before, "alpha_next": self.lambda_coef,
+                   "quality_gap": gap, "quality_mean_gap": mean_gap,
+                   "quality_reference_epoch": int(epoch), "quality_reference_accuracy": reference,
+                   "quality_gap_window": deepcopy(r["gap_history"])}
+        return AdaptiveLambdaStepResult(action, reason, before != self.lambda_coef, metrics)
+
+    def summary_state(self) -> dict[str, Any]:
+        r = self._runtime
+        return {"control_mode": self.control_mode, "lambda_coef": self.lambda_coef,
+                "adaptive_lambda_action": r["last_action"], "adaptive_lambda_reason": r["last_reason"],
+                "adaptive_lambda_step": self._configuration["log_step"],
+                "global_training_epoch": r["global_training_epoch"],
+                "search_epochs_consumed": r["search_epochs_consumed"],
+                "local_search_epoch": r["local_search_epoch"], "next_update_epoch": r["next_update_epoch"],
+                "controller_phase_id": r["phase_id"], "controller_topology_id": r["topology_id"]}

@@ -295,6 +295,9 @@ class GumbelLayer(nn.Module):
         if beta < 0:
             raise ValueError("beta must be non-negative for GumbelLayer.")
         self.logits = nn.Parameter(torch.empty(input_dim, 2))
+        # Permanent original width, independent of the number of survivors.
+        self.register_buffer("initial_channels_count", torch.tensor(input_dim, dtype=torch.int64))
+        self.normalization_metadata_status = "native"
         self.temperature = temperature
         self.beta = float(beta)
         self.gate_threshold = float(gate_threshold)
@@ -448,6 +451,59 @@ class GumbelLayer(nn.Module):
     def _raw_selection_probs(self) -> torch.Tensor:
         return F.softmax(self.logits, dim=1)[:, 1]
 
+    @property
+    def initial_channels(self) -> int:
+        return int(self.initial_channels_count.item())
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "initial_channels_count"
+        if key not in state_dict:
+            # Legacy carriers were always full width. This migrates only the
+            # known denominator; it does not claim an exact runtime snapshot.
+            state_dict[key] = self.initial_channels_count.detach().clone()
+            self.normalization_metadata_status = "legacy_full_width_inferred"
+        width = state_dict[key]
+        if width.dtype != torch.int64 or width.numel() != 1 or int(width.item()) != self.initial_channels:
+            error_msgs.append(f"{prefix}original channel width disagrees with constructed gate")
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
+    def get_permanent_survivor_mask(self) -> torch.Tensor:
+        return torch.ones(self.logits.shape[0], device=self.logits.device, dtype=torch.bool)
+
+    def get_raw_selection_probs(self) -> torch.Tensor:
+        """Unmasked posterior in the forward dtype, before legacy open bias."""
+        return self._raw_selection_probs().detach()
+
+    def get_effective_selection_probs(self) -> torch.Tensor:
+        """Unmasked posterior including bias/bypass; permanent mask is separate."""
+        if self._bypass:
+            return self.logits.new_ones(self.logits.shape[0])
+        return F.softmax(self._effective_logits(), dim=1)[:, 1].detach()
+
+    def _hard_decision_from_probs(self, probabilities: torch.Tensor) -> torch.Tensor:
+        return probabilities > self.gate_threshold
+
+    def get_hard_gate_decisions(self, *, raw: bool = False,
+                               apply_permanent_mask: bool = True) -> torch.Tensor:
+        """Exact deterministic eval decision: open iff probability > threshold.
+
+        A stochastic sample or a soft predictor is never a pruning decision.
+        RAW decisions ignore runtime bias/bypass, but retain the same precision.
+        """
+        if raw:
+            decision = self._hard_decision_from_probs(self.get_raw_selection_probs())
+        elif self._bypass or self.eval_gate_mode == "ones":
+            decision = torch.ones_like(self.logits[:, 1], dtype=torch.bool)
+        else:
+            if self.eval_gate_mode not in {"deterministic_hard", "ste_hard"}:
+                raise ValueError("Hard gate decisions require deterministic hard eval runtime")
+            decision = self._hard_decision_from_probs(self.get_effective_selection_probs())
+        if apply_permanent_mask:
+            decision = decision & self.get_permanent_survivor_mask()
+        return decision
+
     def _revive_mask(self, probs_on: torch.Tensor) -> torch.Tensor:
         return (probs_on > self._open_bias_p_min) & (probs_on < self._open_bias_p_max)
 
@@ -489,8 +545,10 @@ class GumbelLayer(nn.Module):
         return probs_on.expand(batch_size, -1)
 
     def _hard_threshold_mask(self, batch_size: int) -> torch.Tensor:
-        probs_on = self._selection_probs(batch_size)
-        return (probs_on > self.gate_threshold).float()
+        # Shared probability/threshold contract with checkpoint selection. Keep
+        # the historic forward dtype; do not upcast logits before thresholding.
+        probs_on = self.get_effective_selection_probs()
+        return self._hard_decision_from_probs(probs_on).float().unsqueeze(0).expand(batch_size, -1)
 
     def _sample_gumbel_like(self, template_tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
         uniform_samples = torch.rand_like(template_tensor)
@@ -924,8 +982,9 @@ class MaskedGumbelLayer(GumbelLayer):
     full-width gate logits in its search carrier and transfers physical weights
     back into it, so this denominator stays fixed across cumulative masks. It
     neither rescales lambda nor changes the reported selection probabilities.
-    The mode is constructor configuration, not checkpoint tensor state; restore
-    it from the saved config when loading a checkpoint.
+    The mode is constructor configuration, restored from saved config. The
+    original width is a persistent checkpoint buffer with explicit migration
+    from legacy full-width carriers; checkpoints also store the model's M0.
 
     Two ways to disable channels:
       1. Pass disabled_channels at construction time (same list for every
@@ -975,8 +1034,15 @@ class MaskedGumbelLayer(GumbelLayer):
 
     def _regularization_denominator(self):
         if self.regularization_normalization == "initial_channels":
-            return self.logits.shape[0]
+            return self.initial_channels
         return self.channel_mask.sum()
+
+    def get_permanent_survivor_mask(self) -> torch.Tensor:
+        if self.channel_mask.shape != self.logits[:, 1].shape or not bool(
+            ((self.channel_mask == 0) | (self.channel_mask == 1)).all().item()
+        ):
+            raise ValueError("Permanent channel mask must be binary and match original ids")
+        return self.channel_mask.detach().bool()
 
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         gates = super().compute_gates(x)
@@ -1396,8 +1462,9 @@ def get_gumbel_posterior_regularization_terms(
         return None
 
     terms = [module.posterior_regularization_terms() for module in gumbel_modules.values()]
-    mean_p_open = torch.stack([term[0] for term in terms]).mean()
-    negative_entropy = torch.stack([term[1] for term in terms]).mean()
+    denominator = get_gate_normalization_metadata(model)["M0"]
+    mean_p_open = torch.stack([term[0] for term in terms]).sum() / denominator
+    negative_entropy = torch.stack([term[1] for term in terms]).sum() / denominator
     return mean_p_open, negative_entropy
 
 
@@ -1474,6 +1541,56 @@ def get_gumbel_modules(model: nn.Module):
     return _get_gumbel_modules(model)
 
 
+def get_gate_normalization_metadata(model: nn.Module) -> dict:
+    """Snapshot immutable original widths and boundary count for checkpoints.
+
+    A physical model has no gate contract and zero gate loss. A search carrier
+    keeps every original boundary, including an empty boundary's zero term.
+    """
+    modules = {name: gate for name, gate in model.named_modules()
+               if isinstance(gate, GumbelLayer)}
+    widths = {name: gate.initial_channels for name, gate in modules.items()}
+    stored = getattr(model, "_original_gate_widths", None)
+    if stored is None:
+        model._original_gate_widths = dict(widths)
+    elif stored != widths:
+        raise ValueError("Original gate boundaries/widths changed after contract initialization")
+    normalizations = {name: getattr(gate, "regularization_normalization", "initial_channels")
+                      for name, gate in modules.items()}
+    return {"version": 1, "M0": len(widths), "n_b0": widths,
+            "normalization": normalizations,
+            "scaling_contract": ("survivor_equivalent_v1" if all(
+                value == "initial_channels" for value in normalizations.values())
+                else "legacy_or_mixed_normalization")}
+
+
+def validate_gate_normalization_metadata(model: nn.Module, metadata: dict) -> None:
+    expected = get_gate_normalization_metadata(model)
+    if metadata != expected:
+        raise ValueError("Checkpoint original gate widths/M0/normalization contract mismatch")
+
+
+def get_gate_regularization_diagnostics(model: nn.Module, alpha_base: float) -> dict:
+    """Log the survivor-equivalent form without applying a second alpha decay."""
+    metadata = get_gate_normalization_metadata(model)
+    boundaries = {}
+    for name, gate in model.named_modules():
+        if not isinstance(gate, GumbelLayer):
+            continue
+        survivor = gate.get_permanent_survivor_mask()
+        n0, nt = gate.initial_channels, int(survivor.sum().item())
+        ratio = nt / n0 if n0 else 0.0
+        boundaries[name] = {
+            "n_b0": n0, "n_bt": nt, "r_b": ratio,
+            "normalization": metadata["normalization"][name],
+            "mean_survivor_p_raw": float(gate.get_raw_selection_probs()[survivor].mean().item()) if nt else None,
+            "lambda_effective": float(alpha_base) * (ratio if metadata["normalization"][name] == "initial_channels" else 1),
+            "gate_penalty": float(alpha_base) * float(gate.regularization_loss().detach().item()) / metadata["M0"],
+        }
+    return {**metadata, "alpha_base": float(alpha_base), "boundaries": boundaries,
+            "actual_L_gate": sum(item["gate_penalty"] for item in boundaries.values())}
+
+
 # ACTUAL: regularization entry point used by the current main_gumbel training loss.
 def get_gumbel_loss(model: nn.Module):
     gumbel_modules = _get_gumbel_modules(model)
@@ -1482,7 +1599,7 @@ def get_gumbel_loss(model: nn.Module):
     loss = 0.0
     for _, module in gumbel_modules.items():
         loss += module.regularization_loss()
-    loss /= len(gumbel_modules)
+    loss /= get_gate_normalization_metadata(model)["M0"]
     return loss
 
 
@@ -1550,6 +1667,7 @@ def ResNet50(
     stem_stride: int = 2,
     stem_padding: int = 3,
     use_maxpool: bool = True,
+    base_width: int = 64,
 ):
     return ResNet(
         resnet_block,
@@ -1560,6 +1678,7 @@ def ResNet50(
         stem_stride=stem_stride,
         stem_padding=stem_padding,
         use_maxpool=use_maxpool,
+        base_width=base_width,
     )
 
 

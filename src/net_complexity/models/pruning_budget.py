@@ -47,6 +47,111 @@ def checkpoint_probabilities(model):
     return result
 
 
+def select_learned_closed(model, previous, min_keep_ratio=0.0, *, dependency_groups=None):
+    """Materialize the maximal valid deterministic learned-closed subset.
+
+    Costs are measurements, never a removal quota. Coordinates are original
+    ids. Dependency groups, if supplied, are iterables of (gate_name, id); an
+    open survivor blocks its entire connected group. The repository Bottleneck
+    slicing has independent boundaries and therefore needs no extra groups.
+    This function does not mutate either the checkpoint or its permanent mask.
+    """
+    validate_mask(model, previous, min_keep_ratio=min_keep_ratio)
+    available = gates(model)
+    records, eligible, runtime_blocked = {}, set(), []
+    for name, gate in available.items():
+        survivor = gate.get_permanent_survivor_mask()
+        disabled = set((~survivor).nonzero().flatten().tolist())
+        if disabled != set(previous.get(name, [])):
+            raise ValueError(f"Checkpoint permanent mask differs from supplied previous mask at {name}")
+        if gate.initial_channels != gate.logits.shape[0]:
+            raise ValueError("Learned-closed selection requires the original-coordinate carrier")
+        raw, effective = gate.get_raw_selection_probs(), gate.get_effective_selection_probs()
+        if not bool(torch.isfinite(raw).all() and torch.isfinite(effective).all()):
+            raise FloatingPointError(f"Non-finite checkpoint probabilities in {name}")
+        raw_open = gate.get_hard_gate_decisions(raw=True, apply_permanent_mask=False)
+        eval_open = gate.get_hard_gate_decisions(apply_permanent_mask=False)
+        for index in survivor.nonzero().flatten().tolist():
+            key = (name, index)
+            records[key] = {"gate": name, "original_id": index,
+                            "raw_probability": float(raw[index].item()),
+                            "effective_probability": float(effective[index].item()),
+                            "threshold": gate.gate_threshold}
+            if not bool(raw_open[index]) and not bool(eval_open[index]):
+                eligible.add(key)
+            elif not bool(raw_open[index]):
+                runtime_blocked.append({**records[key], "reason": "raw_closed_effective_open"})
+
+    # Connected components ensure overlapping dependencies cannot cascade an
+    # ineligible/open component into a removal.
+    components = []
+    for group in dependency_groups or []:
+        component = set()
+        for name, index in group:
+            if name not in available or type(index) is not int or not 0 <= index < available[name].initial_channels:
+                raise ValueError("Invalid original id in dependency group")
+            if index not in previous.get(name, []):
+                component.add((name, index))
+        merged = []
+        for old in components:
+            if old & component:
+                component |= old
+            else:
+                merged.append(old)
+        components = merged + ([component] if component else [])
+    grouped = set().union(*components) if components else set()
+    components.extend({key} for key in eligible - grouped)
+    components = [group for group in components if group & eligible]
+    rank = lambda key: (records[key]["raw_probability"], key[0], key[1])
+    components.sort(key=lambda group: min(rank(key) for key in group))
+
+    costs = PhysicalBudget(model, previous)
+    before = costs.total()
+    mask = deepcopy(previous)
+    blocked, removed = [], []
+    for group in components:
+        reason = None
+        if not group.issubset(eligible):
+            reason = "dependency_contains_open_survivor"
+        else:
+            for name in sorted({key[0] for key in group}):
+                width = available[name].initial_channels
+                count = sum(key[0] == name for key in group)
+                if width - len(mask.get(name, [])) - count < max(1, math.ceil(width * min_keep_ratio)):
+                    reason = "blocked_by_floor"
+                    break
+        if reason:
+            blocked.extend({**records[key], "reason": reason,
+                            "dependency_group": [[name, index] for name, index in sorted(group)]}
+                           for key in sorted(group & eligible))
+            continue
+        for name, index in sorted(group, key=rank):
+            costs.remove(name)
+            mask.setdefault(name, []).append(index)
+            removed.append(records[(name, index)])
+    mask = {name: sorted(indices) for name, indices in mask.items() if indices}
+    validate_mask(model, mask, previous=previous, min_keep_ratio=min_keep_ratio)
+    report = {
+        "drop_mode": "learned_closed_gates", "params_before": before,
+        "params_after": costs.total(), "removed_params": before - costs.total(),
+        "eligible": [records[key] for key in sorted(eligible, key=rank)],
+        "blocked": blocked, "removed": removed,
+        "runtime_blocked": runtime_blocked,
+        "eligible_original_ids": {name: sorted(index for gate, index in eligible if gate == name)
+                                  for name in sorted({key[0] for key in eligible})},
+        "removed_original_ids": {name: sorted(set(mask.get(name, [])) - set(previous.get(name, [])))
+                                 for name in mask if set(mask[name]) - set(previous.get(name, []))},
+        "min_keep_ratio": float(min_keep_ratio), "minimum_channels": 1,
+        "dependency_policy": "block_if_any_open_component",
+        "no_op_reason": (None if removed else "no_new_pruning" if not eligible
+                         else "blocked_by_floor" if all(item["reason"] == "blocked_by_floor" for item in blocked)
+                         else "blocked_by_dependencies"),
+        "learned_candidates_materialized": len(removed),
+        "compression_achieved": costs.total() < before,
+    }
+    return mask, report
+
+
 class PhysicalBudget:
     def __init__(self, model, mask):
         validate_mask(model, mask)

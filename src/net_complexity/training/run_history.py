@@ -394,7 +394,7 @@ class RunHistory:
                 "logit_on": logit_on,
                 "logit_margin": [
                     float(on_value - off_value)
-                    for off_value, on_value in zip(logit_off, logit_on, strict=False)
+                    for off_value, on_value in zip(logit_off, logit_on)
                 ],
             })
 
@@ -435,6 +435,13 @@ class RunHistory:
             payload["scaler_state_dict"] = self._to_cpu(deepcopy(scaler.state_dict()))
         if extra_state:
             payload["extra_state"] = self._to_cpu(deepcopy(dict(extra_state)))
+        if (extra_state or {}).get("epoch_event") is not None:
+            payload["epoch_event"] = self._to_cpu(deepcopy(extra_state["epoch_event"]))
+            payload["selection_state"] = {key: deepcopy(getattr(self, key)) for key in (
+                "best_metric_name", "best_metric_value", "best_epoch", "best_valid_metrics")}
+        ledger = getattr(self, "training_ledger", None)
+        if ledger is not None:
+            payload["consumed_ledger"] = deepcopy(ledger)
         # Primitive/tensor RNG representation is compatible with weights_only=True.
         import random
         import numpy as np
@@ -454,6 +461,12 @@ class RunHistory:
             OmegaConf.select(self.config, "channel_pruning.mask", default=OmegaConf.create({})),
             resolve=True,
         )
+        if "epoch_event" in payload:
+            from .pruning_measurement import mask_hash, state_hash
+            payload["model_state_hash"] = state_hash(payload["model_state_dict"])
+            payload["mask_hash"] = mask_hash(payload["pruning_mask"])
+            payload["epoch_event"]["topology"]["mask_hash"] = payload["mask_hash"]
+            payload["epoch_event"]["topology"]["permanent_mask"] = deepcopy(payload["pruning_mask"])
         if OmegaConf.select(self.config, "cyclic_channel_pruning.audit_protocol", default=False):
             from .pruning_measurement import mask_hash, state_hash
             payload["model_state_hash"] = state_hash(payload["model_state_dict"])
@@ -461,7 +474,7 @@ class RunHistory:
             adaptive_state = (extra_state or {}).get("adaptive_lambda_state")
             adaptive_protocol = OmegaConf.select(
                 self.config, "cyclic_channel_pruning.audit_protocol"
-            ) == "adaptive_lambda_v1"
+            ) in {"adaptive_lambda_v1", "accuracy_guided_gates_v3"}
             if adaptive_state is not None:
                 payload["controller_state"] = {
                     "enabled": True, "mode": "adaptive_lambda", "state": deepcopy(adaptive_state),
@@ -485,6 +498,44 @@ class RunHistory:
         temporary.replace(checkpoint_path)
         return checkpoint_path
 
+    def restore_epoch_selection(self, checkpoint: Mapping[str, Any], source_path: Path) -> None:
+        """Preserve earlier selection candidates when continuing in a new directory."""
+        import shutil
+        expected = {"best_metric_name", "best_metric_value", "best_epoch", "best_valid_metrics"}
+        selection = checkpoint.get("selection_state", {})
+        if set(selection) != expected:
+            raise ValueError("Exact resume checkpoint lacks complete checkpoint-selection state")
+        for key, value in selection.items():
+            setattr(self, key, deepcopy(value))
+        boundary = int(checkpoint["epoch"])
+        sources = []
+        for epoch in range(1, boundary + 1):
+            source = source_path.parent / f"epoch_{epoch:04d}.pt"
+            if not source.is_file():
+                if epoch == boundary:
+                    source = source_path
+                else:
+                    raise ValueError(f"Exact resume missing prior selection candidate epoch {epoch}")
+            sources.append((epoch, source))
+        for epoch, source in sources:
+            destination = self.checkpoints_dir / f"epoch_{epoch:04d}.pt"
+            if source.resolve() != destination.resolve():
+                temporary = destination.with_suffix(".pt.tmp")
+                shutil.copyfile(source, temporary)
+                temporary.replace(destination)
+        if self.best_epoch is not None:
+            best = self.checkpoints_dir / f"epoch_{self.best_epoch:04d}.pt"
+            if not best.is_file():
+                raise ValueError("Exact resume selected checkpoint is missing")
+            temporary = self.checkpoints_dir / "best.pt.tmp"
+            shutil.copyfile(best, temporary)
+            temporary.replace(self.checkpoints_dir / "best.pt")
+        self.runtime_metadata["exact_epoch_resume"] = {
+            "source_checkpoint": str(source_path), "source_run_id": checkpoint.get("run_id"),
+            "completed_stage_epochs": boundary, "optimizer_scheduler_rng_restored": True,
+            "selection_candidates_preserved": boundary,
+        }
+
     def update_checkpoint_extra_state(self, file_name: str, extra_state: Mapping[str, Any]) -> None:
         """Attach post-control state without resnapshotting evaluated model weights.
 
@@ -494,6 +545,10 @@ class RunHistory:
         checkpoint_path = self.checkpoints_dir / file_name
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         payload.setdefault("extra_state", {}).update(self._to_cpu(deepcopy(dict(extra_state))))
+        if "epoch_event" in extra_state:
+            payload["epoch_event"] = self._to_cpu(deepcopy(extra_state["epoch_event"]))
+            from .pruning_measurement import state_hash
+            payload["model_state_hash"] = state_hash(payload["model_state_dict"])
         if "controller_state" in payload and "adaptive_lambda_state" in extra_state:
             payload["controller_state"] = {
                 "enabled": True, "mode": "adaptive_lambda",

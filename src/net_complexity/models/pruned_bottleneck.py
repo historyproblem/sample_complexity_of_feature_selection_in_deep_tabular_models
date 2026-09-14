@@ -191,32 +191,35 @@ class PrunedResNet(nn.Module):
         stem_stride: int = 2,
         stem_padding: int = 3,
         use_maxpool: bool = True,
+        base_width: int = 64,
     ):
         super().__init__()
-        self.in_channels = 64
+        if type(base_width) is not int or base_width < 1:
+            raise ValueError("base_width must be a positive integer.")
+        self.in_channels = base_width
         self.pruning_spec = dict(pruning_spec)
 
         self.conv1 = nn.Conv2d(
             in_channels,
-            64,
+            base_width,
             kernel_size=stem_kernel_size,
             stride=stem_stride,
             padding=stem_padding,
             bias=False,
         )
-        self.batch_norm1 = nn.BatchNorm2d(64)
+        self.batch_norm1 = nn.BatchNorm2d(base_width)
         self.relu = nn.ReLU()
         self.max_pool = (
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1) if use_maxpool else nn.Identity()
         )
 
-        self.layer1 = self._make_layer("layer1", layer_list[0], planes=64, stride=1)
-        self.layer2 = self._make_layer("layer2", layer_list[1], planes=128, stride=2)
-        self.layer3 = self._make_layer("layer3", layer_list[2], planes=256, stride=2)
-        self.layer4 = self._make_layer("layer4", layer_list[3], planes=512, stride=2)
+        self.layer1 = self._make_layer("layer1", layer_list[0], planes=base_width, stride=1)
+        self.layer2 = self._make_layer("layer2", layer_list[1], planes=base_width * 2, stride=2)
+        self.layer3 = self._make_layer("layer3", layer_list[2], planes=base_width * 4, stride=2)
+        self.layer4 = self._make_layer("layer4", layer_list[3], planes=base_width * 8, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * PrunedGumbelBottleneck.expansion, num_classes)
+        self.fc = nn.Linear(base_width * 8 * PrunedGumbelBottleneck.expansion, num_classes)
 
     def _spec_for_block(self, key: str) -> tuple[list[int], list[int], list[int]]:
         raw = self.pruning_spec.get(key, [])

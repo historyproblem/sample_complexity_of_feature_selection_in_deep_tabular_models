@@ -321,6 +321,7 @@ def build_pruned_bottleneck_model(
         stem_stride=stem_stride,
         stem_padding=stem_padding,
         use_maxpool=use_maxpool,
+        base_width=int(OmegaConf.select(config, "model.backbone.base_width", default=64)),
     )
 
     lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)

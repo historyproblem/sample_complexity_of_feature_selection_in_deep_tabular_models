@@ -1,0 +1,110 @@
+# Opt-in technical profile. No experiment queue; test is a separate frozen pass.
+defaults:
+  - data: cifar10_best_practice
+  - model: resnet50
+  - method: gumbel_masked_bottleneck
+  - optimizer: adamw
+  - scheduler: cosine_200
+  - run_history: valid_accuracy_max
+  - _self_
+
+seed: 42
+device: cuda:0
+model:
+  lambda_coef: 0.001
+  gumbel_init_mode: paper_resnet50
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.0
+  backbone:
+    resnet_block:
+      gate_output: false
+      gate_internal_width: true
+      train_gate_mode: ste_hard
+      eval_gate_mode: deterministic_hard
+      gate_threshold: 0.5
+      temperature: 1.0
+      regularization_normalization: initial_channels
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0005
+  gate_weight_decay_scale: 0.0
+dataloaders:
+  path_to_data: data
+  seed: 42
+  loader_seed: 42
+  include_test: false
+  batch_size: 128
+  num_workers: 2
+training_arguments:
+  num_epochs: 150
+  evaluate_test: false
+  global_epoch_offset: 0
+  audit_data_seed: 42
+  lambda_warmup: {enabled: false}
+  batchnorm_recalibration: {enabled: false}
+  adaptive_lambda:
+    enabled: true
+    control_mode: accuracy_only
+    alpha_init: 0.001
+    alpha_min: 1.0e-8
+    alpha_max: 80.0
+    soft_drop: 0.02
+    hard_drop: 0.05
+    gap_window: 3
+    update_every_search_epochs: 3
+    initial_search_warmup: 10
+    reentry_samples: 3
+    log_step: 0.6931471805599453
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+      return_counts: true
+  test_metrics: []
+accuracy_guided:
+  protocol: accuracy_guided_gates_v3
+  smoke: false
+  total_epochs: 150
+  normalization: initial_channels
+  scaling_contract: survivor_equivalent_v1
+  drop_mode: learned_closed_gates
+  carry_policy: carry
+  eligibility: {min_keep_ratio: 0.5}
+  selection:
+    policy: best_feasible_compact
+    reference: stage_end
+    objective: physical_total_parameters
+    tie_break: [validation_accuracy, ce_loss, earlier_epoch]
+  guard:
+    policy: recover_then_quality_guard
+    reference: stage_end
+    train_bn_calibration_batches: 20
+    on_reject: rollback_stop_commits_ungated_fallback
+  reference:
+    history_path: outputs/runs/20260907_134446_507828_pruning_dense_control/J1_dense_control/global_history.csv
+    state_path: outputs/runs/20260907_134446_507828_pruning_dense_control/J1_dense_control/pilot_state.json
+    config_path: outputs/runs/20260907_134446_507828_pruning_dense_control/J1_dense_control/resolved_config.yaml
+  initializer:
+    path: outputs/runs/20260907_134446_507828_pruning_dense_control/shared_random_seed42.pt
+    required_trained_epochs: 0
+  stage_plan:
+    - {id: search_0, kind: search, epochs: 20, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: commit_0, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: recovery_0, kind: recovery, epochs: 15, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: search_1, kind: search, epochs: 20, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: commit_1, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: recovery_1, kind: recovery, epochs: 15, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: search_2, kind: search, epochs: 20, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: commit_2, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: recovery_2, kind: recovery, epochs: 60, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+mlflow: {enabled: false, run_name: accuracy_guided_gates_v3}
+run_history:
+  root_dir: outputs/runs
+  run_name: accuracy_guided_gates_v3
+  log_channel_history: true
+  secondary_monitor: valid_ce_loss
+  log_gate_history: false
