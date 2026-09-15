@@ -104,15 +104,29 @@ def validate_config(config):
     return total
 
 
+def _reference_origin_info(config, result):
+    raw_path = config.accuracy_guided.reference.state_path
+    if raw_path is None:
+        return result
+    path = Path(raw_path)
+    if path.is_file():
+        reference = json.loads(path.read_text())
+        if reference.get("reference_protocol") == "one_shot_dense_reference_v1":
+            result = {**result, "reference_origin": reference["reference_origin"],
+                "reference_kind": reference["reference_kind"],
+                "reference_training_epochs_actually_executed": reference["reference_training_epochs_actually_executed"]}
+    return result
+
+
 def validate_inputs(config):
     validate_config(config)
     try:
-        return _validate_v3_inputs(to_v3_config(config))
+        return _reference_origin_info(config, _validate_v3_inputs(to_v3_config(config)))
     except FileNotFoundError:
         paths = {**dict(config.accuracy_guided.reference),
                  "initializer_path": config.accuracy_guided.initializer.path}
-        missing = {key: str(Path(value).resolve()) for key, value in paths.items()
-                   if not Path(value).is_file()}
+        missing = {key: str(Path(value).resolve()) if value is not None else "<not configured>"
+                   for key, value in paths.items() if value is None or not Path(value).is_file()}
         if not missing:
             raise
         details = "\n".join(f"  {key}: {value}" for key, value in missing.items())
@@ -125,7 +139,10 @@ def validate_inputs(config):
               "--override accuracy_guided.initializer.path=PATH take precedence.\n"
               "Locate existing artifacts from the repository root:\n"
               "  find outputs -type f \\( -name shared_random_seed42.pt -o -name pilot_state.json \\) -print\n"
-              "The original zero-epoch initializer is required; trained dense weights cannot replace it."
+              "For a clean clone, --from-scratch explicitly creates a NEW shared initializer and "
+              "trains a NEW dense reference for 150 epochs before the one-shot experiment. "
+              "Use --from-scratch --dry-run to preview that separate training cost. "
+              "Trained dense weights cannot replace the shared zero-epoch initializer."
         ) from None
 
 
@@ -139,6 +156,8 @@ def output_paths(config, output_root=None):
 def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     total = validate_config(config)
     shared = resolved_v3(to_v3_config(config), check_inputs=check_inputs)
+    if check_inputs:
+        shared["inputs"] = _reference_origin_info(config, shared["inputs"])
     one = OmegaConf.to_container(config.one_shot, resolve=True)
     paths = output_paths(config, output_root)
     # Do not expose the inherited iterative guard as this runner's actual policy.

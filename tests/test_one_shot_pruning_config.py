@@ -109,7 +109,7 @@ def test_input_validation_uses_stripped_shared_schema(tmp_path, monkeypatch):
     cfg = schema.compose_config()
     for key in ("history_path", "state_path", "config_path"):
         path = tmp_path / key
-        path.touch()
+        path.write_text("{}")
         cfg.accuracy_guided.reference[key] = str(path)
     initializer = tmp_path / "initializer.pt"
     initializer.touch()

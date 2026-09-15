@@ -10,26 +10,106 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from net_complexity.training.one_shot_pruning_config import (
-    CONFIG_NAME, compose_config, output_paths, resolved_one_shot, validate_inputs,
+    CONFIG_NAME, compose_config, dense_source_paths, output_paths, resolved_one_shot,
+    validate_config, validate_inputs,
 )
+
+DEFAULT_REFERENCE_OUTPUT = Path("outputs/runs/one_shot_dense_reference_seed42")
+
+
+def _new_reference_preview(config, reference_output, output, *, prepare_only):
+    """Resolve the clean-clone plan without importing the reference/training runtime."""
+    report = resolved_one_shot(config, check_inputs=False, output_root=output)
+    dense_epochs = int(config.accuracy_guided.total_epochs)
+    mode = "prepare_reference_only" if prepare_only else "prepare_reference_then_one_shot"
+    report["mode"] = mode
+    report["inputs"] = {"status": "planned_new_reference", "paths": dense_source_paths(reference_output)}
+    report["reference_preparation"] = {
+        "output_root": str(reference_output), "output_exists": reference_output.exists(),
+        "initializer": "shared_random_seed42.pt", "initializer_origin": "newly_generated",
+        "initializer_trained_epochs": 0,
+        "seed": int(config.seed), "dense_training_epochs": dense_epochs,
+        "dense_gates": False, "dense_adaptive_lambda": False,
+        "search_initialization": "same_new_zero_epoch_initializer; no_trained_dense_weights",
+        "replaces_missing_historical_reference": True,
+        "selection_data": "validation", "test_evaluated": False,
+        "existing_output_policy": "refuse_overwrite_or_resume",
+    }
+    pruning_epochs = report["budget"]["total_unique_training_epochs_both_branches"]
+    report["budget"].update({
+        "dense_reference_training_epochs": dense_epochs,
+        "total_unique_training_epochs_including_reference": dense_epochs + pruning_epochs,
+        "total_unique_training_epochs_this_command": dense_epochs if prepare_only else dense_epochs + pruning_epochs,
+        "dense_reference_is_separate_from_pruning_branch_budget": True,
+    })
+    graph = {"dense_reference": {"epochs": dense_epochs}}
+    if not prepare_only:
+        graph.update(report["execution_graph"])
+    report["execution_graph"] = graph
+    report["training_performed"] = False
+    return report
+
+
+def _check_new_paths(reference_output, output, *, prepare_only):
+    if reference_output.exists():
+        raise FileExistsError(f"Refusing existing dense reference output: {reference_output}. Use a fresh directory.")
+    if prepare_only:
+        return
+    if output == reference_output or output in reference_output.parents or reference_output in output.parents:
+        raise ValueError("Dense reference and one-shot outputs must be separate directories, neither inside the other.")
+    if output.exists():
+        raise FileExistsError(f"Refusing existing one-shot output: {output}. Use a fresh --output directory.")
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-name", default=CONFIG_NAME)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--dense-source", type=Path,
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--dense-source", type=Path,
                         help="Existing dense run root or J1_dense_control directory; resolves reference metadata and shared zero-epoch initializer")
+    source.add_argument("--prepare-reference", type=Path, metavar="PATH",
+                        help="Create a NEW shared seed42 initializer and train only its dense150 validation reference in PATH")
+    source.add_argument("--from-scratch", action="store_true",
+                        help="Create a NEW shared seed42 initializer, train its dense150 reference, then run shared search60 and inherited/scratch90")
+    parser.add_argument("--reference-output", type=Path,
+                        help=f"New reference directory for --from-scratch (default: {DEFAULT_REFERENCE_OUTPUT})")
     parser.add_argument("--dry-run", action="store_true", help="Resolve paths/contracts without training, CUDA, or dataset construction")
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
-    config = compose_config(args.config_name, args.override, dense_source=args.dense_source)
+    if args.reference_output is not None and not args.from_scratch:
+        parser.error("--reference-output requires --from-scratch; use --prepare-reference PATH for preparation alone")
+    if args.prepare_reference is not None and args.output is not None:
+        parser.error("--output is for one-shot results; --prepare-reference PATH creates only the reference")
+    new_reference = args.from_scratch or args.prepare_reference is not None
+    reference_output = ((args.prepare_reference if args.prepare_reference is not None
+                         else args.reference_output or DEFAULT_REFERENCE_OUTPUT).expanduser().resolve()
+                        if new_reference else None)
+    config = compose_config(args.config_name, args.override,
+                            dense_source=reference_output if new_reference else args.dense_source)
+    output = Path(output_paths(config, args.output)["root"])
+    if new_reference:
+        validate_config(config)
+        expected = dense_source_paths(reference_output)
+        if any(reference_output not in Path(value).resolve().parents for value in expected.values()):
+            parser.error("New reference output must be the parent run directory, not J1_dense_control; all generated artifacts must remain inside it")
+        actual = {**dict(config.accuracy_guided.reference),
+                  "initializer_path": str(config.accuracy_guided.initializer.path)}
+        if any(Path(actual[key]).expanduser().resolve() != Path(value) for key, value in expected.items()):
+            parser.error("New-reference modes require all initializer/reference paths inside their new reference output; remove path overrides")
     if args.dry_run:
-        report = resolved_one_shot(config, output_root=args.output)
+        report = (_new_reference_preview(config, reference_output, output,
+                                         prepare_only=args.prepare_reference is not None)
+                  if new_reference else resolved_one_shot(config, output_root=args.output))
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
         return report
-    output = Path(output_paths(config, args.output)["root"])
+    if new_reference:
+        _check_new_paths(reference_output, output, prepare_only=args.prepare_reference is not None)
+        from net_complexity.training.one_shot_reference import prepare_dense_reference
+        reference_state = prepare_dense_reference(config, reference_output)
+        if args.prepare_reference is not None:
+            return reference_state
     if output.exists():
         raise FileExistsError(f"Refusing existing one-shot output: {output}. Use a fresh --output directory.")
     try:
@@ -38,7 +118,32 @@ def main(argv=None):
         parser.error(str(exc))
     # Preview/preflight cannot import or accidentally invoke the training engine.
     from net_complexity.training.one_shot_pruning import run_one_shot_pruning
-    return run_one_shot_pruning(config, output)
+    result = run_one_shot_pruning(config, output)
+    if args.from_scratch:
+        from net_complexity.training.pruning_measurement import write_json
+        reference_epochs = reference_state["reference_training_epochs_actually_executed"]
+        pruning_epochs = result["compute_ledger"]["actual_training_epochs_executed"]
+        write_json(output / "clean_clone_state.json", {
+            "protocol": "pruning_v3_clean_clone", "status": result["status"],
+            "reference": {
+                "root": str(reference_output),
+                "state_path": dense_source_paths(reference_output)["state_path"],
+                "status": reference_state["status"],
+                "reference_origin": reference_state["reference_origin"],
+                "common_init_hash": reference_state["common_init_hash"],
+                "initializer_file_hash": reference_state["initializer_file_hash"],
+            },
+            "pruning": {"root": str(output), "state_path": str(output / "one_shot_state.json")},
+            "compute_ledger": {
+                "reference_training_epochs_actually_executed": reference_epochs,
+                "pruning_training_epochs_actually_executed": pruning_epochs,
+                "actual_training_epochs_executed": reference_epochs + pruning_epochs,
+            },
+            "per_pruning_branch_total_allocated": result["per_branch_total_allocated"],
+            "reference_cost_is_external_to_pruning_branch_budget": True,
+            "test_evaluated": bool(reference_state["test_evaluated"] or result["test_evaluated"]),
+        })
+    return result
 
 
 if __name__ == "__main__":
