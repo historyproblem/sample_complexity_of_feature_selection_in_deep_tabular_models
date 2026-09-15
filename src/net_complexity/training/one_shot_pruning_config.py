@@ -6,6 +6,7 @@ has an explicit terminal no-feasible-search policy and no iterative rollback.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
 
 from hydra import compose, initialize_config_dir
@@ -25,12 +26,40 @@ def _require(condition, message):
         raise ValueError(f"Invalid {PROTOCOL} configuration: {message}")
 
 
-def compose_config(config_name=CONFIG_NAME, overrides=None):
+def dense_source_paths(source):
+    """Locate reference metadata and its original initializer, without loading weights.
+
+    Accept the original dense run tree or its self-contained adaptive copy.
+    Never follow historical absolute paths or discover/select a different run.
+    """
+    _require(bool(str(source).strip()), "dense source must be a directory path")
+    source = Path(source).expanduser().resolve()
+    _require(not source.is_file(), "dense source must be a directory, not a checkpoint file")
+    job = source if source.name == "J1_dense_control" or (source / "pilot_state.json").is_file() else source / "J1_dense_control"
+    root = job.parent
+    history, config = job / "global_history.csv", job / "resolved_config.yaml"
+    bundled_history = root / "adaptive_reference_history.csv"
+    bundled_config = root / "J1_dense_control_resolved.yaml"
+    # Select a complete known layout, never mix partial metadata pairs silently.
+    if (not history.exists() and not config.exists()
+            and bundled_history.is_file() and bundled_config.is_file()):
+        history, config = bundled_history, bundled_config
+    return {"history_path": str(history), "state_path": str(job / "pilot_state.json"),
+            "config_path": str(config), "initializer_path": str(root / "shared_random_seed42.pt")}
+
+
+def compose_config(config_name=CONFIG_NAME, overrides=None, *, dense_source=None):
     name = str(config_name).removesuffix(".yaml")
     _require(re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", name) is not None,
              "config name must be a relative Hydra config path without traversal")
+    source_overrides = []
+    if dense_source is not None:
+        for key, value in dense_source_paths(dense_source).items():
+            field = ("accuracy_guided.initializer.path" if key == "initializer_path"
+                     else f"accuracy_guided.reference.{key}")
+            source_overrides.append(f"{field}={json.dumps(value)}")
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base=None):
-        return compose(config_name=name, overrides=list(overrides or []))
+        return compose(config_name=name, overrides=source_overrides + list(overrides or []))
 
 
 def to_v3_config(config):
@@ -77,7 +106,27 @@ def validate_config(config):
 
 def validate_inputs(config):
     validate_config(config)
-    return _validate_v3_inputs(to_v3_config(config))
+    try:
+        return _validate_v3_inputs(to_v3_config(config))
+    except FileNotFoundError:
+        paths = {**dict(config.accuracy_guided.reference),
+                 "initializer_path": config.accuracy_guided.initializer.path}
+        missing = {key: str(Path(value).resolve()) for key, value in paths.items()
+                   if not Path(value).is_file()}
+        if not missing:
+            raise
+        details = "\n".join(f"  {key}: {value}" for key, value in missing.items())
+        raise FileNotFoundError(
+            "Blocked: required immutable reference/initializer inputs missing:\n" + details
+            + "\nThese run artifacts are not distributed with Git. Pass --dense-source PATH "
+              "to the existing dense run directory (containing J1_dense_control/ and "
+              "shared_random_seed42.pt), or to J1_dense_control/ itself. "
+              "Explicit --override accuracy_guided.reference.*=PATH and "
+              "--override accuracy_guided.initializer.path=PATH take precedence.\n"
+              "Locate existing artifacts from the repository root:\n"
+              "  find outputs -type f \\( -name shared_random_seed42.pt -o -name pilot_state.json \\) -print\n"
+              "The original zero-epoch initializer is required; trained dense weights cannot replace it."
+        ) from None
 
 
 def output_paths(config, output_root=None):

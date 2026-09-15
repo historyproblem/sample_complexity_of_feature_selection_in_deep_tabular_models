@@ -87,8 +87,41 @@ not part of the local implementation verification:
 The explicit `--config-name` and `--output` shown above are also the launcher
 defaults. An existing output directory is refused, including an empty directory;
 there is no silent overwrite or implicit resume. Relocated reference/initializer
-paths may be supplied with explicit `--override KEY=VALUE` arguments, subject to
-the same strict compatibility checks. The full schema rejects another search
+paths can be supplied together with `--dense-source`, subject to the same strict
+compatibility checks. The timestamped default paths refer to a historical server
+run; Git does not distribute those training artifacts. Locate the existing files
+from the repository root if their directory is unknown:
+
+```sh
+find outputs -type f \( -name shared_random_seed42.pt -o -name pilot_state.json \) -print
+```
+
+Pass the directory containing both `J1_dense_control/` and
+`shared_random_seed42.pt`, or the `J1_dense_control/` directory itself. Replace
+the example absolute path below with the actual location:
+
+```sh
+.venv/bin/python scripts/launch_one_shot_pruning.py --dense-source /absolute/path/to/existing_dense_run --output outputs/runs/one_shot_60_90_inherited_vs_scratch --dry-run
+```
+
+After this reports `inputs.status=ready`, use the same command without `--dry-run`
+to launch. The expected metadata in `J1_dense_control/` are `global_history.csv`,
+`pilot_state.json` and `resolved_config.yaml`. A self-contained historical adaptive
+bundle is also supported: its root-level `adaptive_reference_history.csv` and
+`J1_dense_control_resolved.yaml` replace the history/config pair when both original
+files are absent. The state and original initializer retain their usual paths.
+Incomplete metadata pairs are not mixed, and stale `reused_from` paths are not
+followed automatically. A nightly directory containing only a reused dense state
+is insufficient; restore the original artifacts from storage if they are missing.
+
+Individual `--override KEY=VALUE` arguments take precedence over `--dense-source`
+paths when files are stored separately. The initializer must still match the dense
+state's `common_init_hash` and have `trained_epochs=0`; neither a trained dense
+checkpoint nor a newly generated random file is a replacement. No dense deployment
+weights are loaded during this preflight. Missing inputs produce an error listing
+the absolute missing paths and stop before training or creating the output run.
+
+The full schema rejects another search
 length, extra branches, fixed lambda, pruning targets and enabled calibration.
 Short synthetic plans require the existing explicit smoke marker and separate
 fixture inputs; they do not create additional experimental profiles.
@@ -144,7 +177,7 @@ are not evidence about CIFAR10 quality. No full 60+90 experiment or official tes
 evaluation is run while implementing this change. The verification report must
 state the actual environment/dependency versions and any unperformed checks.
 
-The final combined run passed **228 tests in 56.34 seconds**: the three one-shot
+The initial implementation's combined run passed **228 tests in 56.34 seconds**: the three one-shot
 suites above, plus `test_accuracy_guided_config.py`,
 `test_accuracy_guided_iterative.py`, `test_accuracy_guided_evaluator.py`,
 `test_accuracy_guided_gate_contract.py`, `test_pruning_resume.py` and
@@ -152,6 +185,13 @@ suites above, plus `test_accuracy_guided_config.py`,
 tiny CPU search/final optimizer steps, no-op and learned pruning, complete state
 inheritance/reinitialization, consumed-budget accounting and both explained and
 unexplained export mismatches.
+
+The relocated-input preflight update passed **137 tests in 21.72 seconds** using
+the three one-shot suites plus `test_accuracy_guided_config.py`. This includes 55
+configuration/CLI tests, actual relocated zero-epoch fixtures, unchanged initializer
+hash checks, a tripwire against loading trained dense checkpoints, and both known
+reference layouts. A real CLI invocation with missing inputs exited with code 2,
+listed all four absolute paths, and did not create the output run or start training.
 
 The local verification environment was Python 3.9.6, PyTorch 2.8.0 and pytest 8.4.2
 on CPU (CUDA unavailable). The full-profile dry-run completed without training
