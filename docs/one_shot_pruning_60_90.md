@@ -22,8 +22,13 @@ mask** to define their architecture. Scratch does not retain inherited Conv,
 classifier, BN affine weights, running statistics, or batch counters. Removing
 gates means both physical branches have zero gate penalty and ordinary weight
 decay; the shared search retains mandatory accuracy-only adaptive lambda.
-Each branch starts a new AdamW optimizer and a 90-epoch cosine schedule. There is
-no second search, hidden warmup, gate reentry, BN calibration, or extra recovery.
+The inherited branch builds a new AdamW bound to the compact parameters, then
+maps the selected search checkpoint's `step`, `exp_avg`, `exp_avg_sq` and optional
+AMSGrad state through the exact same original-coordinate channel indices as the
+weights. Gate optimizer state is discarded. Scratch starts with empty AdamW
+state. Both branches intentionally start a new 90-epoch cosine schedule; scheduler
+state and optimizer-group hyperparameters are not inherited. There is no second
+search, hidden warmup, gate reentry, BN calibration, or extra recovery.
 
 The attribution is 60 shared search epochs + 90 physical epochs = **150 epochs
 per branch**. Actual work performed by the combined run is 60 + 90 + 90 = **240

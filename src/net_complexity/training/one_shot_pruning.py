@@ -1,7 +1,9 @@
 """One shared adaptive search, one learned architecture, inherited/scratch finals.
 
 The iterative algorithm is not invoked or changed. All optimization uses the
-existing engine; physical branches have independent, fresh AdamW/cosine state.
+existing engine.  The inherited branch receives the selected search
+checkpoint's sliced AdamW moments/steps; scratch starts with empty AdamW state.
+Both physical branches deliberately restart their compact-stage cosine schedule.
 """
 from __future__ import annotations
 
@@ -24,10 +26,11 @@ from net_complexity.models.pruning_budget import gates, select_learned_closed
 from .accuracy_guided_config import code_provenance, file_hash
 from .accuracy_guided_pruning import atomic_checkpoint, select_checkpoint_records
 from .cyclic_aig import _configure_run_history, _set_num_epochs
-from .engine import run_training
+from .engine import _build_optimizer, run_training
 from .interruption import cooperative_signals, TrainingInterrupted
 from .one_shot_pruning_config import PROTOCOL, to_v3_config, validate_config, validate_inputs
 from .one_shot_progress import epoch_progress, phase_progress, progress_message
+from .optimizer_handoff import transfer_adamw_state_to_structural
 from .pruning_audit import build_structural, committed_equivalence, load_adaptive_reference
 from .pruning_measurement import (
     compare_predictors, deployment_cost, evaluate_deployment, gated_export_equivalence,
@@ -167,7 +170,18 @@ def run_one_shot_pruning(config, output_root):
         state["wall_seconds"] = time.perf_counter() - started
         write_json(output_root / "one_shot_state.json", state)
 
-    def train_stage(name, source, mask, epochs, ledger, *, structural, identity=None, held_state=None):
+    def train_stage(
+        name,
+        source,
+        mask,
+        epochs,
+        ledger,
+        *,
+        structural,
+        identity=None,
+        held_state=None,
+        optimizer_initializer=None,
+    ):
         stage_started = time.perf_counter()
         stage_cfg = deepcopy(cfg)
         _set_num_epochs(stage_cfg, epochs)
@@ -189,6 +203,10 @@ def run_one_shot_pruning(config, output_root):
         record = {"epochs_allocated": epochs, "global_epoch_offset": offset, "ledger": ledger,
             "optimizer": OmegaConf.to_container(stage_cfg.optimizer, resolve=True),
             "scheduler": OmegaConf.to_container(stage_cfg.scheduler, resolve=True),
+            "optimizer_state_initialization": (
+                "mapped_adamw_moments_and_step" if optimizer_initializer is not None else "fresh"
+            ),
+            "scheduler_state_initialization": "fresh",
             "initialization_state_hash": initial_hash, "training_initializer_verified": False,
             "epoch_events": []}
         state["stages"][name] = record
@@ -205,6 +223,11 @@ def run_one_shot_pruning(config, output_root):
                 validate_gate_normalization_metadata(model, normalization)
             record["training_initializer_verified"] = True
 
+        def initialize_optimizer(model, optimizer):
+            handoff = optimizer_initializer(model, optimizer)
+            record["optimizer_handoff"] = deepcopy(handoff)
+            return handoff
+
         def epoch_end(epoch, train, valid, model, optimizer, history):
             record["epoch_events"].append({"epoch": epoch, "ledger": deepcopy(ledger),
                 "validation": {"accuracy": valid["valid_accuracy"], "ce_loss": valid["valid_ce_loss"]},
@@ -213,6 +236,8 @@ def run_one_shot_pruning(config, output_root):
             epoch_progress(name, epoch, epochs, valid, ledger, time.perf_counter() - stage_started)
 
         kwargs = {"training_ledger": ledger, "runtime_initialized_callback": initialized}
+        if optimizer_initializer is not None:
+            kwargs["optimizer_initializer"] = initialize_optimizer
         if not structural:
             kwargs.update(adaptive_epoch_offset=0, adaptive_reference_by_epoch=reference)
         with phase_progress(name, f"training {epochs} epochs on {device}; state={output_root / 'one_shot_state.json'}",
@@ -260,6 +285,10 @@ def run_one_shot_pruning(config, output_root):
                 progress_message("selection", "no feasible search checkpoint; stopping before export and branch training")
                 return state
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
+            if "optimizer_state_dict" not in checkpoint:
+                raise ValueError("Selected search checkpoint has no optimizer_state_dict for handoff.")
+            selected_optimizer, _ = _build_optimizer(cfg, selected_carrier)
+            selected_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             mask = selected["pruning_mask"]
             selected_hash = file_hash(selected["path"])
             identity = {"selected_checkpoint_id": f"shared_search:epoch_{selected['epoch']:04d}:{selected_hash[:16]}",
@@ -338,12 +367,34 @@ def run_one_shot_pruning(config, output_root):
                     "status": "running", "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                     "initialization_state_hash": initialization[name]["initialization_state_hash"],
                     "initialization": initialization[name]["initialization"], "ledger": ledger,
+                    "optimizer_state_initialization": (
+                        "mapped_adamw_moments_and_step" if name == "inherited" else "fresh"
+                    ),
+                    "scheduler_state_initialization": "fresh",
                     "normalization_metadata": normalization, "provenance": provenance, "test_evaluated": False}
                 state["branches"][name] = branch
                 atomic_checkpoint(branch_dir / "initial_state.pt", {**branch,
                     "model_state_dict": model.cpu().state_dict(), "model_state_hash": state_hash(model.state_dict())})
-                paths, stage_record = train_stage(name, model, mask, final_epochs, ledger, structural=True,
-                                                  identity=identity, held_state=held_controller)
+                optimizer_initializer = None
+                if name == "inherited":
+                    def optimizer_initializer(target_model, target_optimizer):
+                        return transfer_adamw_state_to_structural(
+                            selected_carrier,
+                            selected_optimizer,
+                            target_model,
+                            target_optimizer,
+                        )
+                paths, stage_record = train_stage(
+                    name,
+                    model,
+                    mask,
+                    final_epochs,
+                    ledger,
+                    structural=True,
+                    identity=identity,
+                    held_state=held_controller,
+                    optimizer_initializer=optimizer_initializer,
+                )
                 final_candidates = []
                 with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
                     for path in paths:
@@ -366,6 +417,7 @@ def run_one_shot_pruning(config, output_root):
                     final_cost=deployment_cost(deployed, image_shape=image_shape), model_state_hash=before,
                     selected_final_checkpoint=str(final_selected["path"]), selected_final_epoch=final_selected["epoch"],
                     training_initializer_verified=stage_record["training_initializer_verified"],
+                    optimizer_handoff=stage_record.get("optimizer_handoff"),
                     final_training_epochs_executed=final_epochs, per_branch_total_allocated=total,
                     selection_policy=final_selection["policy"], reference_epoch=total)
                 atomic_checkpoint(branch_dir / "deployment.pt", {**branch, "model_state_dict": deployed.state_dict()})

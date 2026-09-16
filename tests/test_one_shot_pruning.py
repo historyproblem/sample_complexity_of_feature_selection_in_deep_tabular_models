@@ -33,6 +33,7 @@ def one_shot_fixture(directory, *, learned_closed=True, reject_after=None):
         "protocol": "pruning_v3_one_shot_60_90", "search_epochs": 3, "final_epochs": 2,
         "branches": ["inherited", "scratch"],
         "scratch_initialization": "pytorch_default_all_trainable_and_bn",
+        "inherited_optimizer_state": "mapped_adamw_moments_and_step",
     }, force_add=True)
     cfg.accuracy_guided.total_epochs = cfg.training_arguments.num_epochs = 5
     cfg.accuracy_guided.guard.train_bn_calibration_batches = 0
@@ -153,6 +154,12 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
     assert selected_payload["epoch_event"]["alpha_next"] > selected_payload["epoch_event"]["alpha_used"]
     assert selection["mask_hash"] == mask_hash(selection["pruning_mask"])
     assert sum(map(len, selection["pruning_mask"].values())) == (2 if learned_closed else 0)
+    selected_steps = {
+        int(item["step"])
+        for item in selected_payload["optimizer_state_dict"]["state"].values()
+    }
+    assert len(selected_steps) == 1
+    selected_step = selected_steps.pop()
     identities = [result["export_only"], result["branches"]["inherited"], result["branches"]["scratch"]]
     for record in identities:
         for key in ("selected_checkpoint_id", "selected_checkpoint_hash", "selected_model_state_hash", "mask_hash"):
@@ -177,14 +184,21 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
         first_epoch_paths = list((output / name).rglob("epoch_0001.pt"))
         assert len(first_epoch_paths) == 1
         first_epoch = torch.load(first_epoch_paths[0], map_location="cpu", weights_only=True)
-        # Independent stage optimizers have exactly the two real minibatch
-        # updates in this epoch, with no moments/steps inherited from search.
         optimizer_state = first_epoch["optimizer_state_dict"]["state"]
-        assert optimizer_state and all(int(item["step"]) == 2 for item in optimizer_state.values())
+        expected_step = selected_step + 2 if name == "inherited" else 2
+        assert optimizer_state and all(
+            int(item["step"]) == expected_step for item in optimizer_state.values()
+        )
         assert first_epoch["scheduler_step_count"] == 1
         assert not any("gumbel_layer" in key for key in first_epoch["model_state_dict"])
         assert first_epoch["metrics"]["train_regularization_loss"] == 0
         assert all(event["train_L_gate_mean"] == 0 for event in result["stages"][name]["epoch_events"])
+    assert inherited["optimizer_state_initialization"] == "mapped_adamw_moments_and_step"
+    assert inherited["optimizer_handoff"]["source_step_min"] == selected_step
+    assert inherited["optimizer_handoff"]["source_step_max"] == selected_step
+    assert inherited["optimizer_handoff"]["scheduler_state_transferred"] is False
+    assert scratch["optimizer_state_initialization"] == "fresh"
+    assert scratch["optimizer_handoff"] is None
     exported = torch.load(output / "export_only/deployment.pt", map_location="cpu", weights_only=True)
     assert exported["model_state_hash"] == inherited["initialization_state_hash"]
     assert exported["model_state_hash"] == state_hash(exported["model_state_dict"])

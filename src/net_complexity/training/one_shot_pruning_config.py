@@ -74,7 +74,10 @@ def validate_config(config):
     plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
     _require(isinstance(plain, dict), "root must be a mapping")
     one = plain.get("one_shot")
-    fields = {"protocol", "search_epochs", "final_epochs", "branches", "scratch_initialization"}
+    fields = {
+        "protocol", "search_epochs", "final_epochs", "branches",
+        "scratch_initialization", "inherited_optimizer_state",
+    }
     _require(isinstance(one, dict), "one_shot mapping is required")
     _require(set(one) == fields,
              f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
@@ -82,6 +85,8 @@ def validate_config(config):
     _require(one["branches"] == ["inherited", "scratch"], "exactly inherited and scratch branches required")
     _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",
              "scratch must reinitialize every trainable parameter and BN state")
+    _require(one["inherited_optimizer_state"] == "mapped_adamw_moments_and_step",
+             "inherited branch must map AdamW moments and step from the selected search checkpoint")
     for field in ("search_epochs", "final_epochs"):
         _require(type(one[field]) is int and one[field] > 0, f"{field} must be a positive integer")
     shared = to_v3_config(config)
@@ -170,7 +175,9 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         "bn_calibration_batches": 0,
         "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
         "scratch_initialization": one["scratch_initialization"],
-        "branch_optimizer_scheduler": "independent new AdamW and cosine for final_epochs",
+        "inherited_optimizer_state": one["inherited_optimizer_state"],
+        "scratch_optimizer_state": "fresh",
+        "branch_scheduler": "independent new cosine schedule for final_epochs",
         "branch_gate_penalty": 0,
         "quality_failure": "record_infeasible_keep_shared_architecture; no iterative rollback",
         "iterative_recovery_guard_executed": False,
@@ -183,7 +190,11 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
                         "inherited": execution["inherited_initialization"],
                         "scratch": execution["scratch_initialization"],
                         "gate_reentry": None, "controller_rebase": None,
-                        "optimizer": execution["branch_optimizer_scheduler"]},
+                        "optimizer": {
+                            "inherited": execution["inherited_optimizer_state"],
+                            "scratch": execution["scratch_optimizer_state"],
+                            "scheduler": execution["branch_scheduler"],
+                        }},
             "execution_graph": {"shared": [{"id": "shared_search", "epochs": one["search_epochs"]},
                                              {"id": "export_only", "epochs": 0}],
                                 "physical_branches": [{"id": name, "epochs": one["final_epochs"]}

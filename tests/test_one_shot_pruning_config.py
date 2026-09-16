@@ -21,6 +21,7 @@ def test_only_authorized_full_plan_composes_with_shared_base_contract():
     assert schema.validate_config(cfg) == 150
     assert cfg.one_shot.protocol == "pruning_v3_one_shot_60_90"
     assert cfg.one_shot.branches == ["inherited", "scratch"]
+    assert cfg.one_shot.inherited_optimizer_state == "mapped_adamw_moments_and_step"
     assert [(s.id, s.epochs) for s in cfg.accuracy_guided.stage_plan] == [
         ("shared_search", 60), ("export_only", 0), ("final_recovery", 90)]
     assert cfg.training_arguments.adaptive_lambda.enabled is True
@@ -59,6 +60,8 @@ def test_resolved_budget_and_output_paths_are_explicit(tmp_path):
     assert report["execution_policy"]["iterative_recovery_guard_executed"] is False
     assert report["execution_policy"]["shared_search_checkpoint_and_mask"] is True
     assert report["execution_policy"]["no_feasible_search"] == "stop_before_export_and_branch_training"
+    assert report["execution_policy"]["inherited_optimizer_state"] == "mapped_adamw_moments_and_step"
+    assert report["execution_policy"]["scratch_optimizer_state"] == "fresh"
     assert report["output_paths"]["export_only"] == str(tmp_path / "run/export_only")
     assert report["training_performed"] is False and report["evaluate_test"] is False
     assert not (tmp_path / "run").exists()
@@ -69,7 +72,8 @@ def test_resolved_budget_and_output_paths_are_explicit(tmp_path):
     ("one_shot.search_epochs", True), ("one_shot.final_epochs", 0),
     ("one_shot.branches", ["inherited"]), ("one_shot.branches", ["scratch", "inherited"]),
     ("one_shot.branches", ["inherited", "scratch", "reset"]),
-    ("one_shot.scratch_initialization", "inherit_bn"), ("one_shot.extra", True),
+    ("one_shot.scratch_initialization", "inherit_bn"),
+    ("one_shot.inherited_optimizer_state", "fresh"), ("one_shot.extra", True),
     ("accuracy_guided.guard.train_bn_calibration_batches", 1),
     ("training_arguments.batchnorm_recalibration.enabled", True),
     ("training_arguments.adaptive_lambda.enabled", False),

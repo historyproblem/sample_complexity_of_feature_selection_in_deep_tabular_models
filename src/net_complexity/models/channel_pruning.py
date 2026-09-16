@@ -8,6 +8,7 @@ import csv
 import gzip
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -518,6 +519,146 @@ def _validate_bottleneck_pair(
         raise ValueError(
             "Source and target ResNet topologies differ; cannot transfer channel weights."
         )
+
+
+@dataclass(frozen=True)
+class ParameterTensorMapping:
+    """Original-coordinate mapping from one gated parameter to one compact parameter.
+
+    ``indices_by_dimension`` contains the exact original channel ids retained on
+    each narrowed tensor dimension.  The same mapping is valid for the model
+    parameter and for every parameter-shaped optimizer state tensor (Adam's
+    ``exp_avg``/``exp_avg_sq`` and optional ``max_exp_avg_sq``).
+    """
+
+    source_name: str
+    target_name: str
+    source_parameter: nn.Parameter
+    target_parameter: nn.Parameter
+    indices_by_dimension: tuple[tuple[int, torch.Tensor], ...] = ()
+
+    def select_source_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tuple(tensor.shape) != tuple(self.source_parameter.shape):
+            raise ValueError(
+                f"State tensor for {self.source_name} has shape {tuple(tensor.shape)}, "
+                f"expected {tuple(self.source_parameter.shape)}."
+            )
+        selected = tensor
+        for dimension, indices in self.indices_by_dimension:
+            if indices.dtype != torch.long or indices.ndim != 1:
+                raise TypeError(
+                    f"Invalid channel-index tensor for {self.target_name} dimension {dimension}."
+                )
+            selected = selected.index_select(dimension, indices.to(selected.device))
+        if tuple(selected.shape) != tuple(self.target_parameter.shape):
+            raise ValueError(
+                f"Mapped tensor for {self.target_name} has shape {tuple(selected.shape)}, "
+                f"expected {tuple(self.target_parameter.shape)}."
+            )
+        return selected
+
+
+def build_gated_to_structural_parameter_mappings(
+    gated_model: nn.Module,
+    structural_model: nn.Module,
+) -> tuple[ParameterTensorMapping, ...]:
+    """Return the complete trainable-parameter mapping for Bottleneck pruning.
+
+    Parameter names alone are insufficient once channel axes are compacted.
+    This manifest binds every compact parameter to its source ``Parameter`` and
+    to the same original-coordinate index lists used by the physical model.
+    Gate parameters intentionally have no compact target and are omitted.
+    """
+    from .feature_selection import MaskedGumbelBottleneckLayer
+    from .pruned_bottleneck import PrunedGumbelBottleneck
+
+    source_backbone = _unwrap_backbone(gated_model)
+    target_backbone = _unwrap_backbone(structural_model)
+    source_blocks = _bottleneck_blocks(source_backbone)
+    target_blocks = _bottleneck_blocks(target_backbone)
+    _validate_bottleneck_pair(source_blocks, target_blocks)
+
+    source_names = {id(parameter): name for name, parameter in gated_model.named_parameters()}
+    target_parameters = dict(structural_model.named_parameters())
+    target_names = {id(parameter): name for name, parameter in target_parameters.items()}
+    mappings: dict[str, ParameterTensorMapping] = {}
+
+    def add(
+        source_parameter: nn.Parameter | None,
+        target_parameter: nn.Parameter | None,
+        *indices_by_dimension: tuple[int, torch.Tensor],
+    ) -> None:
+        if source_parameter is None and target_parameter is None:
+            return
+        if source_parameter is None or target_parameter is None:
+            raise ValueError("Source and structural parameters disagree about an optional tensor.")
+        source_name = source_names.get(id(source_parameter))
+        target_name = target_names.get(id(target_parameter))
+        if source_name is None or target_name is None:
+            raise ValueError("Could not resolve a pruning parameter to its model-qualified name.")
+        if target_name in mappings:
+            raise ValueError(f"Duplicate structural parameter mapping for {target_name}.")
+        mappings[target_name] = ParameterTensorMapping(
+            source_name=source_name,
+            target_name=target_name,
+            source_parameter=source_parameter,
+            target_parameter=target_parameter,
+            indices_by_dimension=tuple(
+                (int(dimension), indices.detach().to(device="cpu", dtype=torch.long).clone())
+                for dimension, indices in indices_by_dimension
+            ),
+        )
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, MaskedGumbelBottleneckLayer):
+            raise TypeError(
+                f"Expected MaskedGumbelBottleneckLayer at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, PrunedGumbelBottleneck):
+            raise TypeError(
+                f"Expected PrunedGumbelBottleneck at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = target.active_indices
+        mid1_indices = target.mid1_active_indices
+        mid2_indices = target.mid2_active_indices
+
+        add(source.conv1.weight, target.conv1.weight, (0, mid1_indices))
+        add(source.conv1.bias, target.conv1.bias, (0, mid1_indices))
+        add(source.batch_norm1.weight, target.batch_norm1.weight, (0, mid1_indices))
+        add(source.batch_norm1.bias, target.batch_norm1.bias, (0, mid1_indices))
+
+        add(source.conv2.weight, target.conv2.weight, (0, mid2_indices), (1, mid1_indices))
+        add(source.conv2.bias, target.conv2.bias, (0, mid2_indices))
+        add(source.batch_norm2.weight, target.batch_norm2.weight, (0, mid2_indices))
+        add(source.batch_norm2.bias, target.batch_norm2.bias, (0, mid2_indices))
+
+        add(source.conv3.weight, target.conv3.weight, (0, output_indices), (1, mid2_indices))
+        add(source.conv3.bias, target.conv3.bias, (0, output_indices))
+        add(source.batch_norm3.weight, target.batch_norm3.weight, (0, output_indices))
+        add(source.batch_norm3.bias, target.batch_norm3.bias, (0, output_indices))
+
+    source_parameters = dict(gated_model.named_parameters())
+    for target_name, target_parameter in target_parameters.items():
+        if target_name in mappings:
+            continue
+        source_parameter = source_parameters.get(target_name)
+        if source_parameter is None:
+            raise ValueError(f"No gated source parameter corresponds to {target_name}.")
+        if tuple(source_parameter.shape) != tuple(target_parameter.shape):
+            raise ValueError(
+                f"Shape-changing parameter {target_name} has no channel mapping: "
+                f"{tuple(source_parameter.shape)} -> {tuple(target_parameter.shape)}."
+            )
+        add(source_parameter, target_parameter)
+
+    if set(mappings) != set(target_parameters):
+        missing = sorted(set(target_parameters) - set(mappings))
+        raise AssertionError(f"Incomplete structural parameter mapping: {missing[:5]}.")
+    return tuple(mappings[name] for name in target_parameters)
 
 
 @torch.no_grad()

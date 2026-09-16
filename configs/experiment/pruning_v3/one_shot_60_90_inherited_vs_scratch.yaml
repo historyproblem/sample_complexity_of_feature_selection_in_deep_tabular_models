@@ -11,6 +11,7 @@ one_shot:
   final_epochs: 90
   branches: [inherited, scratch]
   scratch_initialization: pytorch_default_all_trainable_and_bn
+  inherited_optimizer_state: mapped_adamw_moments_and_step
 dataloaders:
   download_progress: true
 accuracy_guided:

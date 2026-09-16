@@ -37,6 +37,9 @@ EpochEndCallback = Callable[
 ]
 ProgressContext = Mapping[str, Any]
 ModelInitializer = Callable[[nn.Module], None]
+OptimizerInitializer = Callable[
+    [nn.Module, torch.optim.Optimizer], Optional[Mapping[str, Any]]
+]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
@@ -2384,6 +2387,7 @@ def run_training(
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
     model_initializer: ModelInitializer | None = None,
+    optimizer_initializer: OptimizerInitializer | None = None,
     adaptive_lambda_state: Mapping[str, Any] | None = None,
     adaptive_epoch_offset: int = 0,
     adaptive_reference_by_epoch: Mapping[int, float] | None = None,
@@ -2392,6 +2396,10 @@ def run_training(
     runtime_initialized_callback: Callable | None = None,
     exact_resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
+    if optimizer_initializer is not None and exact_resume_checkpoint is not None:
+        raise ValueError(
+            "optimizer_initializer cannot be combined with exact_resume_checkpoint."
+        )
     if (_adaptive_lambda_enabled(config.training_arguments)
             and OmegaConf.select(config, "training_arguments.adaptive_lambda.control_mode") == "accuracy_only"
             and adaptive_reference_by_epoch is None):
@@ -2497,6 +2505,10 @@ def run_training(
     else:
         dataloaders = instantiate(config.dataloaders)
     optimizer, optimizer_build_info = _build_optimizer(config, model)
+    optimizer_initialization = None
+    if optimizer_initializer is not None:
+        initialized = optimizer_initializer(model, optimizer)
+        optimizer_initialization = dict(initialized or {})
     scheduler_state = _build_scheduler(config, optimizer)
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if _is_mlflow_enabled(config) else None
@@ -2523,6 +2535,9 @@ def run_training(
         "trainable": int(trainable_params),
     }
     runtime_snapshot["model_initializer_applied"] = model_initializer is not None
+    runtime_snapshot["optimizer_initializer_applied"] = optimizer_initializer is not None
+    if optimizer_initialization is not None:
+        runtime_snapshot["optimizer_initialization"] = optimizer_initialization
     if baseline_accuracy_reference is not None:
         runtime_snapshot["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),
