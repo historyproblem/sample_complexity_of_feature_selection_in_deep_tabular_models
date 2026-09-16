@@ -37,6 +37,36 @@ def test_only_authorized_full_plan_composes_with_shared_base_contract():
     assert not GlobalHydra.instance().is_initialized()
 
 
+def test_handoff_ablation_config_is_single_axis_and_method_first():
+    cfg = schema.compose_config(schema.HANDOFF_CONFIG_NAME)
+    assert schema.validate_config(cfg) == 150
+    plan = schema.resolved_branch_plan(cfg)
+    assert [branch["id"] for branch in plan] == [
+        "fresh_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_resumed_scheduler__repeat_1",
+        "fresh_optimizer_fresh_scheduler__repeat_2",
+        "mapped_optimizer_fresh_scheduler__repeat_2",
+        "mapped_optimizer_resumed_scheduler__repeat_2",
+    ]
+    assert {branch["model_state"] for branch in plan} == {"selected_surviving_state"}
+    assert cfg.one_shot.search_scheduler_horizon_epochs == 150
+    assert cfg.accuracy_guided.stage_plan[2].restart_policy == "branch_specific_optimizer_scheduler_handoff"
+    assert schema.to_v3_config(cfg).accuracy_guided.stage_plan[2].restart_policy == "adamw_cosine_restart"
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["comparison_axis"] == "optimizer and scheduler state only"
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+    assert report["budget"]["number_of_physical_branches"] == 6
+    assert report["budget"]["total_unique_training_epochs_all_branches"] == 600
+
+
+def test_handoff_ablation_rejects_a_less_informative_execution_order():
+    cfg = schema.compose_config(schema.HANDOFF_CONFIG_NAME)
+    cfg.one_shot.execution_order = "all_repeats_of_method_before_next_method"
+    with pytest.raises(ValueError, match="finish every method"):
+        schema.validate_config(cfg)
+
+
 def test_adapter_does_not_mutate_or_relax_iterative_config():
     cfg = schema.compose_config()
     before = OmegaConf.to_container(cfg, resolve=True)

@@ -14,7 +14,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import evaluate_one_shot_pruning_test as evaluation
-from net_complexity.training.one_shot_pruning_config import compose_config
+from net_complexity.training.one_shot_pruning_config import (
+    HANDOFF_CONFIG_NAME, compose_config, resolved_branch_plan,
+)
 from net_complexity.training.pruning_measurement import mask_hash, state_hash, write_json
 from net_complexity.training.one_shot_pruning import physical_architecture_signature
 
@@ -232,6 +234,57 @@ def test_both_branches_use_one_loader_and_readonly_frozen_forward(pair, monkeypa
     assert before == {path: evaluation.file_hash(path) for path in before}
     with pytest.raises(FileExistsError):
         evaluation.run(args(pair))
+
+
+def test_handoff_ablation_evaluates_six_frozen_branches_in_configured_order(
+        pair, monkeypatch):
+    config = compose_config(HANDOFF_CONFIG_NAME)
+    OmegaConf.save(config, pair / "resolved_config.yaml", resolve=True)
+    config_hash = hashlib.sha256(OmegaConf.to_yaml(config, resolve=True).encode()).hexdigest()
+    source_state = evaluation.read_json(pair / "inherited/branch_state.json")
+    source_checkpoint = torch.load(pair / "inherited/deployment.pt", weights_only=True)
+    plan = resolved_branch_plan(config)
+    for branch_spec in plan:
+        folder = pair / branch_spec["id"]
+        folder.mkdir()
+        state = deepcopy(source_state)
+        checkpoint = deepcopy(source_checkpoint)
+        for artifact in (state, checkpoint):
+            artifact.update({
+                "protocol": config.one_shot.protocol,
+                "branch": branch_spec["id"],
+                "method": branch_spec["method"],
+                "repeat": branch_spec["repeat"],
+                "training_seed": branch_spec["training_seed"],
+                "initialization": "selected_surviving_state",
+                "optimizer_state_initialization": branch_spec["optimizer_state"],
+                "scheduler_state_initialization": branch_spec["scheduler_state"],
+                "optimizer_handoff": (
+                    None if branch_spec["optimizer_state"] == "fresh"
+                    else {"policy": branch_spec["optimizer_state"]}
+                ),
+                "scheduler_handoff": (
+                    None if branch_spec["scheduler_state"] == "fresh_final_stage_cosine"
+                    else {"policy": branch_spec["scheduler_state"]}
+                ),
+            })
+            artifact["provenance"]["resolved_config_sha256"] = config_hash
+        write_json(folder / "branch_state.json", state)
+        torch.save(checkpoint, folder / "deployment.pt")
+
+    data = torch.zeros(10000, 10)
+    dataset = TensorDataset(data, torch.zeros(10000, dtype=torch.long))
+    dataset.targets = [0] * 10000
+    loader = DataLoader(dataset, batch_size=128)
+    monkeypatch.setattr(evaluation.frozen, "build_test_loader", lambda *a: (
+        loader, {"dataset": "CIFAR10", "split": "official_test", "example_count": 10000,
+                 "ordered_data_and_labels_sha256": "synthetic_test_fixture"},
+    ))
+    report = evaluation.run(args(pair, output=pair / "handoff_test"))
+    expected = [branch["id"] for branch in plan]
+    assert report["planned_branches"] == expected
+    assert [row["branch"] for row in report["runs"]] == expected
+    assert len(report["runs"]) == 6
 
 
 def test_checked_in_server_config_resolves_reusable_paths(pair):

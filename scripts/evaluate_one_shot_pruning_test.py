@@ -1,4 +1,4 @@
-"""Evaluate both frozen one-shot physical branches on one official CIFAR-10 test loader.
+"""Evaluate frozen one-shot physical branches on one official CIFAR-10 test loader.
 
 Training outputs are read-only. Checkpoint validation finishes before test data
 is opened; evaluation performs no training, selection, or BN calibration.
@@ -114,13 +114,22 @@ def _validate_validation(metrics):
 
 
 def prepare_branches(run_dir):
-    """Validate both finalized branches and their common frozen search selection."""
-    from net_complexity.training.one_shot_pruning_config import validate_config
+    """Validate finalized branches and their common frozen search selection."""
+    from net_complexity.training.one_shot_pruning_config import (
+        resolved_branch_plan, validate_config,
+    )
     from net_complexity.training.one_shot_pruning import physical_architecture_signature
     run_dir = Path(run_dir).resolve()
     config_path = run_dir / "resolved_config.yaml"
     config = OmegaConf.load(config_path)
     validate_config(config)
+    protocol = str(config.one_shot.protocol)
+    branch_plan = resolved_branch_plan(config)
+    branches = tuple(branch["id"] for branch in branch_plan)
+    branch_specs = {branch["id"]: branch for branch in branch_plan}
+    search_epochs = int(config.one_shot.search_epochs)
+    final_epochs = int(config.one_shot.final_epochs)
+    total_epochs = search_epochs + final_epochs
     require(not config.accuracy_guided.smoke,
             "Synthetic smoke artifacts must never access official test data")
     require(int(config.accuracy_guided.total_epochs) == 150,
@@ -140,32 +149,52 @@ def prepare_branches(run_dir):
             "Missing shared selected checkpoint identity")
     require(all(selection.get(key) == value for key, value in identity.items()),
             "Selection record differs from the frozen shared checkpoint")
-    require(type(selection.get("selected_epoch")) is int and 1 <= selection["selected_epoch"] <= 60
+    require(type(selection.get("selected_epoch")) is int
+            and 1 <= selection["selected_epoch"] <= search_epochs
             and selection["selected_epoch"] == selected.get("epoch")
-            and selection.get("reference_epoch") == 60
+            and selection.get("reference_epoch") == search_epochs
             and selection.get("policy") == "best_feasible_compact",
             "Invalid common search checkpoint selection policy/epoch/reference")
     require(type(selection.get("quality_threshold")) in (int, float)
             and math.isfinite(selection["quality_threshold"]), "Invalid frozen search quality threshold")
-    _validate_ledger(selection.get("search_ledger_consumed"), total=60, search=60)
+    _validate_ledger(selection.get("search_ledger_consumed"), total=search_epochs, search=search_epochs)
     prepared = []
-    for branch in BRANCHES:
+    for branch in branches:
+        branch_spec = branch_specs[branch]
         state_path, checkpoint_path = run_dir / branch / "branch_state.json", run_dir / branch / "deployment.pt"
         state = read_json(state_path)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         for artifact in (state, checkpoint):
-            require(artifact.get("protocol") == PROTOCOL and artifact.get("artifact_type") == "physical_ungated"
+            require(artifact.get("protocol") == protocol and artifact.get("artifact_type") == "physical_ungated"
                     and artifact.get("branch") == branch,
                     f"{branch}: unsupported protocol/type/branch; gated artifacts are never reinterpreted")
             require(all(artifact.get(key) == value for key, value in identity.items()),
                     f"{branch}: shared selected-checkpoint identity differs")
         require(state.get("status") in ("completed", "infeasible"), f"{branch}: deployment is not finalized")
         require(checkpoint.get("status") == state["status"], f"{branch}: deployment status differs")
+        if protocol != PROTOCOL:
+            for artifact in (state, checkpoint):
+                require(artifact.get("method") == branch_spec["method"]
+                        and artifact.get("repeat") == branch_spec["repeat"]
+                        and artifact.get("training_seed") == branch_spec["training_seed"]
+                        and artifact.get("optimizer_state_initialization") == branch_spec["optimizer_state"]
+                        and artifact.get("scheduler_state_initialization") == branch_spec["scheduler_state"],
+                        f"{branch}: configured method/repeat/handoff policy differs")
+                optimizer_handoff = artifact.get("optimizer_handoff")
+                scheduler_handoff = artifact.get("scheduler_handoff")
+                require((optimizer_handoff is None if branch_spec["optimizer_state"] == "fresh"
+                         else isinstance(optimizer_handoff, dict)
+                         and optimizer_handoff.get("policy") == branch_spec["optimizer_state"]),
+                        f"{branch}: optimizer handoff evidence differs")
+                require((scheduler_handoff is None
+                         if branch_spec["scheduler_state"] == "fresh_final_stage_cosine"
+                         else isinstance(scheduler_handoff, dict)
+                         and scheduler_handoff.get("policy") == branch_spec["scheduler_state"]),
+                        f"{branch}: scheduler handoff evidence differs")
         require(state.get("training_initializer_verified") is True
                 and isinstance(state.get("initialization_state_hash"), str) and bool(state["initialization_state_hash"]),
                 f"{branch}: first-forward branch initialization provenance is incomplete")
-        initialization = ("selected_surviving_state" if branch == "inherited"
-                          else "pytorch_default_all_trainable_and_bn")
+        initialization = branch_spec["model_state"]
         require(state.get("initialization") == checkpoint.get("initialization") == initialization
                 and state["initialization_state_hash"] == checkpoint.get("initialization_state_hash")
                 and checkpoint.get("training_initializer_verified") is True,
@@ -181,9 +210,9 @@ def prepare_branches(run_dir):
         require(checkpoint.get("validation") == state.get("validation"), f"{branch}: validation provenance differs")
         _validate_validation(checkpoint["validation"])
         require(state.get("selection_policy") == checkpoint.get("selection_policy") == "best_validation_accuracy"
-                and state.get("reference_epoch") == checkpoint.get("reference_epoch") == 150
+                and state.get("reference_epoch") == checkpoint.get("reference_epoch") == total_epochs
                 and type(state.get("selected_final_epoch")) is int
-                and 1 <= state["selected_final_epoch"] <= 90
+                and 1 <= state["selected_final_epoch"] <= final_epochs
                 and state["selected_final_epoch"] == checkpoint.get("selected_final_epoch"),
                 f"{branch}: final validation selection protocol differs")
         threshold = state.get("quality_threshold")
@@ -195,9 +224,9 @@ def prepare_branches(run_dir):
                 and state["quality_feasible"] == (state["status"] == "completed"),
                 f"{branch}: saved validation quality status/threshold differs")
         require(checkpoint.get("ledger") == state.get("ledger"), f"{branch}: consumed ledger differs")
-        _validate_ledger(checkpoint["ledger"], total=150, search=60)
-        require(state.get("final_training_epochs_executed") == checkpoint.get("final_training_epochs_executed") == 90
-                and state.get("per_branch_total_allocated") == checkpoint.get("per_branch_total_allocated") == 150,
+        _validate_ledger(checkpoint["ledger"], total=total_epochs, search=search_epochs)
+        require(state.get("final_training_epochs_executed") == checkpoint.get("final_training_epochs_executed") == final_epochs
+                and state.get("per_branch_total_allocated") == checkpoint.get("per_branch_total_allocated") == total_epochs,
                 f"{branch}: final physical training allocation differs")
         require(all(checkpoint["ledger"][key] > selection["search_ledger_consumed"][key]
                     for key in ("optimizer_updates", "consumed_training_examples")),
@@ -239,7 +268,13 @@ def prepare_branches(run_dir):
             require(cost[key] == state.get("final_cost", {}).get(key), f"{branch}: physical cost differs: {key}")
         require(state_hash(model.state_dict()) == expected_hash, f"{branch}: model loading/cost check mutated state")
         prepared.append((model, {
-            "job": branch, "branch": branch, "pilot_version": 3, "training_protocol": PROTOCOL,
+            "job": branch, "branch": branch, "method": branch_spec["method"],
+            "repeat": branch_spec["repeat"], "training_seed": branch_spec["training_seed"],
+            "optimizer_state_initialization": branch_spec["optimizer_state"],
+            "scheduler_state_initialization": branch_spec["scheduler_state"],
+            "initialization": initialization,
+            "initialization_state_hash": checkpoint["initialization_state_hash"],
+            "pilot_version": 3, "training_protocol": protocol,
             "artifact_type": "physical_ungated", "checkpoint": str(checkpoint_path),
             "checkpoint_sha256": file_hash(checkpoint_path), "state_sha256": file_hash(state_path),
             "config_sha256": file_hash(config_path), "selection_sha256": file_hash(selection_path),
@@ -255,13 +290,20 @@ def prepare_branches(run_dir):
             "physical_parameters": cost["physical_total_parameters"],
             "conv_linear_macs_per_image": cost["conv_linear_macs_per_image"],
         }))
-    first, second = prepared[0][1], prepared[1][1]
+    first = prepared[0][1]
     for key in ("pruning_mask", "mask_hash", "architecture_hash", "normalization_metadata", "selection_provenance", "physical_parameters",
                 "conv_linear_macs_per_image", "ledger", "validation_quality_threshold",
                 "validation_reference_epoch", "final_selection_policy", *identity):
-        require(first[key] == second[key], f"Physical branches do not share the required {key}")
-    require(first["validation"]["example_count"] == second["validation"]["example_count"],
+        require(all(first[key] == record[key] for _, record in prepared[1:]),
+                f"Physical branches do not share the required {key}")
+    require(all(first["validation"]["example_count"] == record["validation"]["example_count"]
+                for _, record in prepared[1:]),
             "Physical branches used different validation sample counts")
+    if protocol != PROTOCOL:
+        require(all(first["initialization"] == record["initialization"]
+                    and first["initialization_state_hash"] == record["initialization_state_hash"]
+                    for _, record in prepared[1:]),
+                "Handoff-ablation branches do not share identical compact initialization")
     require(selection.get("pruning_mask") == first["pruning_mask"], "Committed mask differs from selected common mask")
     require(selection.get("mask_hash") == first["mask_hash"], "Committed mask hash differs from selection")
     return prepared
@@ -276,17 +318,19 @@ def run(args):
         raise RuntimeError("CUDA unavailable; use the GPU server or explicitly pass --device cpu.")
     prepared = prepare_branches(run_dir)
     if args.check_only:
-        print("Both frozen branches verified. Official test data not loaded; no outputs written.")
+        print(f"{len(prepared)} frozen branches verified. Official test data not loaded; no outputs written.")
         return None
+    protocol = prepared[0][1]["training_protocol"]
+    branches = [record["branch"] for _, record in prepared]
     loader, dataset = frozen.build_test_loader(args.data, args.batch_size, args.num_workers, args.device, args.download)
     require(dataset.get("example_count") == 10000 and dataset.get("dataset") == "CIFAR10"
             and dataset.get("split") == "official_test", "Expected the full official CIFAR-10 test set")
     output.mkdir(parents=True, exist_ok=False)
     report = {"status": "running", "source_run": str(run_dir), "protocol": "frozen_one_shot_branches_test_v1",
-        "training_protocol": PROTOCOL, "comparison_scope": "exploratory", "test_evaluated": False,
+        "training_protocol": protocol, "comparison_scope": "exploratory", "test_evaluated": False,
         "training_performed": False, "bn_recalibration": False, "test_based_selection": False,
         "started_at_utc": datetime.now(timezone.utc).isoformat(), "dataset": dataset,
-        "planned_branches": list(BRANCHES), "device": str(args.device), "precision": "fp32",
+        "planned_branches": branches, "device": str(args.device), "precision": "fp32",
         "batch_size": args.batch_size, "python": sys.version, "torch": str(torch.__version__),
         "evaluation_script_sha256": file_hash(__file__), "runs": []}
     write_json(output / "evaluation_plan.json", {**report, "selected_deployments": [row for _, row in prepared]})
@@ -320,7 +364,7 @@ def run(args):
         raise
     finally:
         write_json(output / "test_summary.json", report)
-    if report["status"] == "completed" and len(report["runs"]) == 2:
+    if report["status"] == "completed" and branches == list(BRANCHES):
         by_branch = {row["branch"]: row["test"]["accuracy"] for row in report["runs"]}
         delta = 100 * (by_branch["inherited"] - by_branch["scratch"])
         print(f"[official-test] inherited-minus-scratch={delta:+.2f} pp", flush=True)

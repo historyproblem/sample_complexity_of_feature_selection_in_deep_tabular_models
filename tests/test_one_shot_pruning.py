@@ -13,7 +13,14 @@ from torch import nn
 from net_complexity.models.channel_pruning import build_structurally_pruned_model_from_config
 from net_complexity.models.pruning_budget import gates, select_learned_closed
 from net_complexity.training.one_shot_pruning import build_physical_branches, run_one_shot_pruning
-from net_complexity.training.one_shot_pruning_config import to_v3_config, validate_config
+from net_complexity.training.one_shot_pruning_config import (
+    FRESH_SCHEDULER,
+    MAPPED_OPTIMIZER,
+    RESUMED_SCHEDULER,
+    resolved_branch_plan,
+    to_v3_config,
+    validate_config,
+)
 from net_complexity.training.pruning_audit import build_structural
 from net_complexity.training.pruning_measurement import isolated_diagnostic_rng, mask_hash, state_hash
 from net_complexity.training.pruning_synthetic import make_synthetic_config
@@ -45,6 +52,37 @@ def one_shot_fixture(directory, *, learned_closed=True, reject_after=None):
         dict(id="final_recovery", kind="recovery", epochs=2, commit_allowed=False,
              selected_checkpoint=None, restart_policy="adamw_cosine_restart"),
     ]
+    validate_config(cfg)
+    return cfg
+
+
+def handoff_ablation_fixture(directory):
+    cfg = one_shot_fixture(directory, learned_closed=True)
+    OmegaConf.update(cfg, "one_shot", {
+        "protocol": "pruning_v3_optimizer_scheduler_handoff_60_90",
+        "search_epochs": 3,
+        "final_epochs": 2,
+        "search_scheduler_horizon_epochs": 5,
+        "execution_order": "all_methods_once_then_repeats",
+        "methods": [
+            {"id": "fresh_optimizer_fresh_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": "fresh", "scheduler_state": FRESH_SCHEDULER},
+            {"id": "mapped_optimizer_fresh_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": MAPPED_OPTIMIZER, "scheduler_state": FRESH_SCHEDULER},
+            {"id": "mapped_optimizer_resumed_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": MAPPED_OPTIMIZER, "scheduler_state": RESUMED_SCHEDULER},
+        ],
+        "repeats": [
+            {"id": "repeat_1", "training_seed": 42},
+            {"id": "repeat_2", "training_seed": 43},
+        ],
+    }, merge=False, force_add=True)
+    cfg.accuracy_guided.stage_plan[2].restart_policy = (
+        "branch_specific_optimizer_scheduler_handoff"
+    )
     validate_config(cfg)
     return cfg
 
@@ -196,7 +234,7 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
     assert inherited["optimizer_state_initialization"] == "mapped_adamw_moments_and_step"
     assert inherited["optimizer_handoff"]["source_step_min"] == selected_step
     assert inherited["optimizer_handoff"]["source_step_max"] == selected_step
-    assert inherited["optimizer_handoff"]["scheduler_state_transferred"] is False
+    assert inherited["optimizer_handoff"]["scope"] == "optimizer_parameter_state_only"
     assert scratch["optimizer_state_initialization"] == "fresh"
     assert scratch["optimizer_handoff"] is None
     exported = torch.load(output / "export_only/deployment.pt", map_location="cpu", weights_only=True)
@@ -216,6 +254,64 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
     assert Path(cfg.accuracy_guided.initializer.path).read_bytes() == initializer_before
     with pytest.raises(FileExistsError):
         run_one_shot_pruning(cfg, output)
+
+
+def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):
+    cfg = handoff_ablation_fixture(tmp_path / "inputs")
+    plan = resolved_branch_plan(cfg)
+    result = run_one_shot_pruning(cfg, tmp_path / "run")
+    expected_order = [branch["id"] for branch in plan]
+    assert list(result["branches"]) == expected_order
+    assert expected_order == [
+        "fresh_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_resumed_scheduler__repeat_1",
+        "fresh_optimizer_fresh_scheduler__repeat_2",
+        "mapped_optimizer_fresh_scheduler__repeat_2",
+        "mapped_optimizer_resumed_scheduler__repeat_2",
+    ]
+
+    selected = torch.load(
+        tmp_path / "run/selected_checkpoint.pt", map_location="cpu", weights_only=True,
+    )
+    selected_step = {int(state["step"])
+                     for state in selected["optimizer_state_dict"]["state"].values()}.pop()
+    selected_scheduler_step = int(selected["scheduler_step_count"])
+    assert selected["scheduler_state_dict"]["T_max"] == 5
+    initial_hashes = set()
+
+    for branch_spec in plan:
+        name = branch_spec["id"]
+        record = result["branches"][name]
+        initial_hashes.add(record["initialization_state_hash"])
+        assert record["training_seed"] == branch_spec["training_seed"]
+        assert record["initialization"] == "selected_surviving_state"
+        first_path = next((tmp_path / "run" / name).rglob("epoch_0001.pt"))
+        first = torch.load(first_path, map_location="cpu", weights_only=True)
+        optimizer_steps = {int(state["step"])
+                           for state in first["optimizer_state_dict"]["state"].values()}
+        expected_optimizer_step = (
+            2 if branch_spec["optimizer_state"] == "fresh" else selected_step + 2
+        )
+        assert optimizer_steps == {expected_optimizer_step}
+        if branch_spec["scheduler_state"] == FRESH_SCHEDULER:
+            assert first["scheduler_state_dict"]["T_max"] == 2
+            assert first["scheduler_step_count"] == 1
+            assert first["scheduler_state_dict"]["last_epoch"] == 1
+            assert record["scheduler_handoff"] is None
+        else:
+            assert first["scheduler_state_dict"]["T_max"] == 5
+            assert first["scheduler_step_count"] == selected_scheduler_step + 1
+            assert first["scheduler_state_dict"]["last_epoch"] == selected_scheduler_step + 1
+            assert record["scheduler_handoff"]["policy"] == RESUMED_SCHEDULER
+            assert record["scheduler_handoff"]["source_group_count"] == 2
+            assert record["scheduler_handoff"]["target_group_count"] == 1
+
+    assert len(initial_hashes) == 1
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 15
+    assert result["compute_ledger"]["branch_final_training_epochs"] == {
+        name: 2 for name in expected_order
+    }
 
 
 def test_no_feasible_shared_search_never_starts_a_recovery_branch(tmp_path):

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 import torch.nn as nn
@@ -144,6 +144,7 @@ def transfer_adamw_state_to_structural(
         )
 
     return {
+        "scope": "optimizer_parameter_state_only",
         "policy": "mapped_adamw_moments_and_step",
         "parameter_tensors_transferred": len(mapped_target_parameters),
         "parameter_state_tensors_transferred": mapped_state_tensors,
@@ -152,7 +153,79 @@ def transfer_adamw_state_to_structural(
         "source_gate_parameter_names_discarded": discarded_names,
         "source_step_min": min(steps),
         "source_step_max": max(steps),
-        "scheduler_state_transferred": False,
-        "scheduler_policy": "restart_for_compact_stage",
         "parameter_group_hyperparameters_transferred": False,
+    }
+
+
+def transfer_cosine_scheduler_state(
+    source_state_dict: Mapping[str, Any],
+    source_step_count: int,
+    target_scheduler_state: Any,
+    *,
+    source_group_index: int = 0,
+) -> dict[str, Any]:
+    """Continue the source base-group cosine on a compact one-group optimizer.
+
+    Search has a second optimizer group for gate parameters, while the compact
+    model has no gates.  Scheduler lists therefore cannot be loaded verbatim:
+    the base group's initial/current learning rates are selected explicitly and
+    the gate group's entries are discarded.
+    """
+    if target_scheduler_state is None:
+        raise ValueError("Scheduler handoff requires an enabled target scheduler.")
+    scheduler = target_scheduler_state.scheduler
+    if not isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR):
+        raise TypeError(
+            "Scheduler handoff requires CosineAnnealingLR, got "
+            f"{type(scheduler).__name__}."
+        )
+    source = deepcopy(dict(source_state_dict))
+    required = {"T_max", "eta_min", "base_lrs", "last_epoch", "_last_lr"}
+    missing = required - set(source)
+    if missing:
+        raise ValueError(f"Source cosine state is missing {sorted(missing)}.")
+    base_lrs = list(source["base_lrs"])
+    last_lrs = list(source["_last_lr"])
+    if len(base_lrs) != len(last_lrs) or not 0 <= source_group_index < len(base_lrs):
+        raise ValueError("Source cosine learning-rate groups are inconsistent.")
+    target_groups = scheduler.optimizer.param_groups
+    if len(target_groups) != 1:
+        raise ValueError(
+            "Compact cosine handoff expects exactly one non-gate optimizer group."
+        )
+    if int(source["T_max"]) != int(scheduler.T_max):
+        raise ValueError(
+            f"Cosine horizon differs: source T_max={source['T_max']}, "
+            f"target T_max={scheduler.T_max}."
+        )
+    if float(source["eta_min"]) != float(scheduler.eta_min):
+        raise ValueError("Source and target cosine eta_min differ.")
+    base_lr = float(base_lrs[source_group_index])
+    current_lr = float(last_lrs[source_group_index])
+    if abs(float(scheduler.base_lrs[0]) - base_lr) > 1e-15:
+        raise ValueError("Source and target base learning rates differ.")
+    if int(source["last_epoch"]) != int(source_step_count):
+        raise ValueError(
+            "Source cosine last_epoch and recorded scheduler_step_count differ."
+        )
+
+    source["base_lrs"] = [base_lr]
+    source["_last_lr"] = [current_lr]
+    scheduler.load_state_dict(source)
+    target_groups[0]["initial_lr"] = base_lr
+    target_groups[0]["lr"] = current_lr
+    target_scheduler_state.step_count = int(source_step_count)
+    return {
+        "policy": "continue_selected_checkpoint_cosine",
+        "source_group_index": int(source_group_index),
+        "source_group_count": len(base_lrs),
+        "target_group_count": len(target_groups),
+        "gate_scheduler_group_discarded": len(base_lrs) > len(target_groups),
+        "T_max": int(scheduler.T_max),
+        "eta_min": float(scheduler.eta_min),
+        "last_epoch": int(scheduler.last_epoch),
+        "step_count": int(target_scheduler_state.step_count),
+        "base_lr": base_lr,
+        "current_lr": current_lr,
+        "optimizer_group_lr_updated": True,
     }

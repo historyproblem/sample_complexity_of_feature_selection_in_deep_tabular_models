@@ -1,9 +1,8 @@
-"""One shared adaptive search, one learned architecture, inherited/scratch finals.
+"""One shared adaptive search and ordered compact-model comparison branches.
 
 The iterative algorithm is not invoked or changed. All optimization uses the
-existing engine.  The inherited branch receives the selected search
-checkpoint's sliced AdamW moments/steps; scratch starts with empty AdamW state.
-Both physical branches deliberately restart their compact-stage cosine schedule.
+existing engine. Branch policy explicitly controls model, AdamW and cosine
+state, including the optimizer/scheduler handoff ablation protocol.
 """
 from __future__ import annotations
 
@@ -28,9 +27,22 @@ from .accuracy_guided_pruning import atomic_checkpoint, select_checkpoint_record
 from .cyclic_aig import _configure_run_history, _set_num_epochs
 from .engine import _build_optimizer, run_training
 from .interruption import cooperative_signals, TrainingInterrupted
-from .one_shot_pruning_config import PROTOCOL, to_v3_config, validate_config, validate_inputs
+from .one_shot_pruning_config import (
+    FRESH_SCHEDULER,
+    HANDOFF_PROTOCOL,
+    MAPPED_OPTIMIZER,
+    PROTOCOL,
+    RESUMED_SCHEDULER,
+    resolved_branch_plan,
+    to_v3_config,
+    validate_config,
+    validate_inputs,
+)
 from .one_shot_progress import epoch_progress, phase_progress, progress_message
-from .optimizer_handoff import transfer_adamw_state_to_structural
+from .optimizer_handoff import (
+    transfer_adamw_state_to_structural,
+    transfer_cosine_scheduler_state,
+)
 from .pruning_audit import build_structural, committed_equivalence, load_adaptive_reference
 from .pruning_measurement import (
     compare_predictors, deployment_cost, evaluate_deployment, gated_export_equivalence,
@@ -99,6 +111,46 @@ def build_physical_branches(config, selected_carrier, mask, selection_identity):
     return inherited, scratch, report
 
 
+def build_planned_physical_branches(config, selected_carrier, mask, selection_identity):
+    """Build every planned branch without allowing optimizer policy to affect weights."""
+    plan = resolved_branch_plan(config)
+    if str(config.one_shot.protocol) == PROTOCOL:
+        inherited, scratch, report = build_physical_branches(
+            config, selected_carrier, mask, selection_identity,
+        )
+        return {"inherited": inherited, "scratch": scratch}, report
+
+    before = state_hash(selected_carrier.state_dict())
+    if selection_identity.get("mask_hash") != mask_hash(mask):
+        raise ValueError("Selection identity mask hash differs from the shared physical mask.")
+    if selection_identity.get("selected_model_state_hash") != before:
+        raise ValueError("Selection identity model hash differs from the selected checkpoint tensors.")
+    with isolated_diagnostic_rng():
+        template = build_structural(to_v3_config(config), selected_carrier, mask).cpu()
+    if state_hash(selected_carrier.state_dict()) != before:
+        raise AssertionError("Constructing planned branches changed the selected checkpoint.")
+    if gates(template):
+        raise AssertionError("Physical handoff branches must contain no gates.")
+    architecture = physical_architecture_signature(template)
+    architecture_hash = hashlib.sha256(
+        json.dumps(architecture, sort_keys=True).encode()
+    ).hexdigest()
+    initial_hash = state_hash(template.state_dict())
+    models = {branch["id"]: deepcopy(template) for branch in plan}
+    report = {**selection_identity, "architecture_hash": architecture_hash}
+    for branch in plan:
+        model = models[branch["id"]]
+        if physical_architecture_signature(model) != architecture:
+            raise AssertionError("Planned handoff branch architecture differs.")
+        if state_hash(model.state_dict()) != initial_hash:
+            raise AssertionError("Planned handoff branches do not share identical initial model state.")
+        report[branch["id"]] = {
+            "initialization": "selected_surviving_state",
+            "initialization_state_hash": initial_hash,
+        }
+    return models, report
+
+
 def _atomic_copy(source, destination):
     destination = Path(destination)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
@@ -107,11 +159,13 @@ def _atomic_copy(source, destination):
 
 
 def run_one_shot_pruning(config, output_root):
-    """Execute 60 shared search epochs and two independent 90-epoch final stages."""
+    """Execute one shared search and the configured ordered compact branches."""
     total = validate_config(config)
     with phase_progress("one-shot", "validating reference inputs"):
         inputs = validate_inputs(config)
     cfg = to_v3_config(config)
+    protocol = str(config.one_shot.protocol)
+    branch_plan = resolved_branch_plan(config)
     search_epochs, final_epochs = int(config.one_shot.search_epochs), int(config.one_shot.final_epochs)
     reference = load_adaptive_reference(cfg.accuracy_guided.reference.history_path, total)
     output_root = Path(output_root).resolve()
@@ -149,7 +203,7 @@ def run_one_shot_pruning(config, output_root):
         "source_weights": "shared_zero_epoch_initializer_only", "dense_reference_weights_loaded": False}
     search_ledger = dict(global_training_epoch=0, search_epochs_consumed=0,
                          optimizer_updates=0, consumed_training_examples=0)
-    state = {"protocol": PROTOCOL, "status": "running", "test_evaluated": False,
+    state = {"protocol": protocol, "status": "running", "test_evaluated": False,
         "provenance": provenance, "per_branch_total_allocated": total,
         "shared_search_ledger": search_ledger, "stages": {}, "selection": None,
         "export_only": None, "branches": {}, "compute_ledger": {}}
@@ -181,10 +235,20 @@ def run_one_shot_pruning(config, output_root):
         identity=None,
         held_state=None,
         optimizer_initializer=None,
+        scheduler_initializer=None,
+        optimizer_state_policy="fresh",
+        scheduler_state_policy=FRESH_SCHEDULER,
+        scheduler_horizon=None,
+        training_seed=None,
     ):
         stage_started = time.perf_counter()
         stage_cfg = deepcopy(cfg)
         _set_num_epochs(stage_cfg, epochs)
+        if scheduler_horizon is not None:
+            OmegaConf.update(stage_cfg, "scheduler.T_max", int(scheduler_horizon), merge=False)
+        if training_seed is not None:
+            OmegaConf.update(stage_cfg, "seed", int(training_seed), merge=False)
+            OmegaConf.update(stage_cfg, "dataloaders.loader_seed", int(training_seed), merge=False)
         offset = ledger["global_training_epoch"]
         stage_cfg.training_arguments.global_epoch_offset = offset
         stage_cfg.model.lambda_coef = 0.0 if structural else cfg.model.lambda_coef
@@ -203,10 +267,11 @@ def run_one_shot_pruning(config, output_root):
         record = {"epochs_allocated": epochs, "global_epoch_offset": offset, "ledger": ledger,
             "optimizer": OmegaConf.to_container(stage_cfg.optimizer, resolve=True),
             "scheduler": OmegaConf.to_container(stage_cfg.scheduler, resolve=True),
-            "optimizer_state_initialization": (
-                "mapped_adamw_moments_and_step" if optimizer_initializer is not None else "fresh"
-            ),
-            "scheduler_state_initialization": "fresh",
+            "training_seed": int(stage_cfg.seed),
+            "loader_seed": int(stage_cfg.dataloaders.loader_seed),
+            "optimizer_state_initialization": optimizer_state_policy,
+            "scheduler_state_initialization": scheduler_state_policy,
+            "scheduler_horizon_epochs": int(stage_cfg.scheduler.T_max),
             "initialization_state_hash": initial_hash, "training_initializer_verified": False,
             "epoch_events": []}
         state["stages"][name] = record
@@ -228,6 +293,11 @@ def run_one_shot_pruning(config, output_root):
             record["optimizer_handoff"] = deepcopy(handoff)
             return handoff
 
+        def initialize_scheduler(model, optimizer, scheduler_state):
+            handoff = scheduler_initializer(model, optimizer, scheduler_state)
+            record["scheduler_handoff"] = deepcopy(handoff)
+            return handoff
+
         def epoch_end(epoch, train, valid, model, optimizer, history):
             record["epoch_events"].append({"epoch": epoch, "ledger": deepcopy(ledger),
                 "validation": {"accuracy": valid["valid_accuracy"], "ce_loss": valid["valid_ce_loss"]},
@@ -238,6 +308,8 @@ def run_one_shot_pruning(config, output_root):
         kwargs = {"training_ledger": ledger, "runtime_initialized_callback": initialized}
         if optimizer_initializer is not None:
             kwargs["optimizer_initializer"] = initialize_optimizer
+        if scheduler_initializer is not None:
+            kwargs["scheduler_initializer"] = initialize_scheduler
         if not structural:
             kwargs.update(adaptive_epoch_offset=0, adaptive_reference_by_epoch=reference)
         with phase_progress(name, f"training {epochs} epochs on {device}; state={output_root / 'one_shot_state.json'}",
@@ -263,7 +335,21 @@ def run_one_shot_pruning(config, output_root):
     persist()
     try:
         with cooperative_signals():
-            paths, _ = train_stage("shared_search", carrier, {}, search_epochs, search_ledger, structural=False)
+            search_scheduler_horizon = (
+                int(config.one_shot.search_scheduler_horizon_epochs)
+                if protocol == HANDOFF_PROTOCOL else search_epochs
+            )
+            paths, _ = train_stage(
+                "shared_search",
+                carrier,
+                {},
+                search_epochs,
+                search_ledger,
+                structural=False,
+                scheduler_horizon=search_scheduler_horizon,
+                scheduler_state_policy="new_search_cosine",
+                training_seed=seed,
+            )
             candidates = []
             with phase_progress("selection", f"checking {len(paths)} search checkpoints by validation and physical size"):
                 for index, path in enumerate(paths, 1):
@@ -287,8 +373,13 @@ def run_one_shot_pruning(config, output_root):
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:
                 raise ValueError("Selected search checkpoint has no optimizer_state_dict for handoff.")
-            selected_optimizer, _ = _build_optimizer(cfg, selected_carrier)
-            selected_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            selected_optimizer = None
+            if any(branch["optimizer_state"] == MAPPED_OPTIMIZER for branch in branch_plan):
+                selected_optimizer, _ = _build_optimizer(cfg, selected_carrier)
+                selected_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if any(branch["scheduler_state"] == RESUMED_SCHEDULER for branch in branch_plan):
+                if "scheduler_state_dict" not in checkpoint or "scheduler_step_count" not in checkpoint:
+                    raise ValueError("Selected search checkpoint has no scheduler state for handoff.")
             mask = selected["pruning_mask"]
             selected_hash = file_hash(selected["path"])
             identity = {"selected_checkpoint_id": f"shared_search:epoch_{selected['epoch']:04d}:{selected_hash[:16]}",
@@ -302,30 +393,33 @@ def run_one_shot_pruning(config, output_root):
             state["selection"] = selection
             write_json(output_root / "selection.json", selection)
             progress_message("selection", f"selected {identity['selected_checkpoint_id']}; physical_parameters={selected['physical_cost']}")
-            inherited, scratch, initialization = build_physical_branches(config, selected_carrier, mask, identity)
-            if sum(p.numel() for p in inherited.parameters()) != selected["physical_cost"]:
+            branch_models, initialization = build_planned_physical_branches(
+                config, selected_carrier, mask, identity,
+            )
+            export_model = branch_models[branch_plan[0]["id"]]
+            if sum(p.numel() for p in export_model.parameters()) != selected["physical_cost"]:
                 raise AssertionError("Selected cost estimate differs from the actual compact tensors.")
             export_dir = output_root / "export_only"
             export_dir.mkdir()
             source_hash = state_hash(selected_carrier.state_dict())
-            physical_hash = state_hash(inherited.state_dict())
+            physical_hash = state_hash(export_model.state_dict())
             # This compares the actual selected gated predictor, with its original
             # runtime/mask, to the exported model. The transfer check is separate.
             with phase_progress("export_only", "frozen validation comparison before training or BN recalibration"):
-                comparison = compare_predictors(inherited, selected_carrier, data.valid_dataloader, device)
+                comparison = compare_predictors(export_model, selected_carrier, data.valid_dataloader, device)
             report = {**identity, "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                 "status": "measured", "training_epochs": 0, "bn_calibration_batches": 0,
                 "gated_validation": comparison["carry_carrier"], "physical_validation": comparison["physical"],
                 "logits_comparison": comparison["carry_vs_physical"], "diagnostic_overhead": comparison["overhead"],
                 "selector": selected["selector"], "physical_state_hash": physical_hash,
-                "physical_cost": deployment_cost(inherited, image_shape=image_shape),
+                "physical_cost": deployment_cost(export_model, image_shape=image_shape),
                 "search_carrier_cost": deployment_cost(selected_carrier, image_shape=image_shape),
                 "search_carrier_scope": "full-width gated carrier, not a compact model"}
             state["export_only"] = report
             write_json(export_dir / "diagnostics.json", report)
             try:
                 with phase_progress("export_only", "checking physical Conv/BN transfer equivalence"):
-                    report["transfer_equivalence"] = committed_equivalence(selected_carrier, inherited, mask, sample,
+                    report["transfer_equivalence"] = committed_equivalence(selected_carrier, export_model, mask, sample,
                         device, report_path=export_dir / "transfer_equivalence.json")
             except Exception as exc:
                 report.update(status="technical_transfer_failure", non_equivalence_reason=str(exc))
@@ -338,13 +432,14 @@ def run_one_shot_pruning(config, output_root):
                 if not opened and i not in disabled.get(name, set())]
             report["blocked_closed_survivors_opened_by_export"] = blocked_closed
             try:
-                report["gated_equivalence"] = gated_export_equivalence(selected_carrier, inherited, sample, device)
+                report["gated_equivalence"] = gated_export_equivalence(selected_carrier, export_model, sample, device)
                 report["gated_equivalent_on_checked_batch"] = True
             except AssertionError as exc:
                 report.update(gated_equivalent_on_checked_batch=False,
                     non_equivalence_reason="blocked_closed_survivors_opened" if blocked_closed else "gated_export_function_difference",
                     gated_equivalence_error=str(exc))
-            if source_hash != state_hash(selected_carrier.state_dict()) or physical_hash != state_hash(inherited.state_dict()):
+            if (source_hash != state_hash(selected_carrier.state_dict())
+                    or physical_hash != state_hash(export_model.state_dict())):
                 raise AssertionError("Export diagnostics modified weights or BN state.")
             report["weights_and_bn_unchanged"] = True
             if not report["gated_equivalent_on_checked_batch"] and not blocked_closed:
@@ -352,31 +447,36 @@ def run_one_shot_pruning(config, output_root):
             write_json(export_dir / "diagnostics.json", report)
             if report["status"] == "technical_gated_export_failure":
                 raise RuntimeError("Unexplained gated/physical export mismatch; see export_only/diagnostics.json")
-            atomic_checkpoint(export_dir / "deployment.pt", {**identity, "protocol": PROTOCOL,
-                "artifact_type": "physical_ungated", "model_state_dict": inherited.state_dict(),
+            atomic_checkpoint(export_dir / "deployment.pt", {**identity, "protocol": protocol,
+                "artifact_type": "physical_ungated", "model_state_dict": export_model.state_dict(),
                 "model_state_hash": physical_hash, "pruning_mask": mask, "training_epochs": 0,
                 "bn_calibration_batches": 0, "normalization_metadata": normalization})
             persist()
             progress_message("export_only", f"diagnostics saved: {export_dir / 'diagnostics.json'}")
             held_controller = checkpoint["epoch_event"]["controller_after_feedback"]
-            for name, model in (("inherited", inherited), ("scratch", scratch)):
+            for branch_spec in branch_plan:
+                name = branch_spec["id"]
+                model = branch_models[name]
                 branch_dir = output_root / name
                 branch_dir.mkdir()
                 ledger = deepcopy(search_ledger)
-                branch = {**identity, "protocol": PROTOCOL, "artifact_type": "physical_ungated", "branch": name,
+                branch = {**identity, "protocol": protocol,
+                    "artifact_type": "physical_ungated", "branch": name,
+                    "method": branch_spec["method"], "repeat": branch_spec["repeat"],
+                    "training_seed": branch_spec["training_seed"],
                     "status": "running", "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                     "initialization_state_hash": initialization[name]["initialization_state_hash"],
                     "initialization": initialization[name]["initialization"], "ledger": ledger,
-                    "optimizer_state_initialization": (
-                        "mapped_adamw_moments_and_step" if name == "inherited" else "fresh"
-                    ),
-                    "scheduler_state_initialization": "fresh",
+                    "optimizer_state_initialization": branch_spec["optimizer_state"],
+                    "scheduler_state_initialization": branch_spec["scheduler_state"],
                     "normalization_metadata": normalization, "provenance": provenance, "test_evaluated": False}
                 state["branches"][name] = branch
                 atomic_checkpoint(branch_dir / "initial_state.pt", {**branch,
                     "model_state_dict": model.cpu().state_dict(), "model_state_hash": state_hash(model.state_dict())})
                 optimizer_initializer = None
-                if name == "inherited":
+                if branch_spec["optimizer_state"] == MAPPED_OPTIMIZER:
+                    if selected_optimizer is None:
+                        raise AssertionError("Mapped optimizer branch has no selected source optimizer.")
                     def optimizer_initializer(target_model, target_optimizer):
                         return transfer_adamw_state_to_structural(
                             selected_carrier,
@@ -384,6 +484,18 @@ def run_one_shot_pruning(config, output_root):
                             target_model,
                             target_optimizer,
                         )
+                scheduler_initializer = None
+                if branch_spec["scheduler_state"] == RESUMED_SCHEDULER:
+                    def scheduler_initializer(target_model, target_optimizer, target_scheduler_state):
+                        return transfer_cosine_scheduler_state(
+                            checkpoint["scheduler_state_dict"],
+                            checkpoint["scheduler_step_count"],
+                            target_scheduler_state,
+                        )
+                scheduler_horizon = (
+                    total if branch_spec["scheduler_state"] == RESUMED_SCHEDULER
+                    else final_epochs
+                )
                 paths, stage_record = train_stage(
                     name,
                     model,
@@ -394,6 +506,11 @@ def run_one_shot_pruning(config, output_root):
                     identity=identity,
                     held_state=held_controller,
                     optimizer_initializer=optimizer_initializer,
+                    scheduler_initializer=scheduler_initializer,
+                    optimizer_state_policy=branch_spec["optimizer_state"],
+                    scheduler_state_policy=branch_spec["scheduler_state"],
+                    scheduler_horizon=scheduler_horizon,
+                    training_seed=branch_spec["training_seed"],
                 )
                 final_candidates = []
                 with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
@@ -418,6 +535,7 @@ def run_one_shot_pruning(config, output_root):
                     selected_final_checkpoint=str(final_selected["path"]), selected_final_epoch=final_selected["epoch"],
                     training_initializer_verified=stage_record["training_initializer_verified"],
                     optimizer_handoff=stage_record.get("optimizer_handoff"),
+                    scheduler_handoff=stage_record.get("scheduler_handoff"),
                     final_training_epochs_executed=final_epochs, per_branch_total_allocated=total,
                     selection_policy=final_selection["policy"], reference_epoch=total)
                 atomic_checkpoint(branch_dir / "deployment.pt", {**branch, "model_state_dict": deployed.state_dict()})
@@ -427,7 +545,7 @@ def run_one_shot_pruning(config, output_root):
             if any(branch["ledger"]["global_training_epoch"] != total for branch in state["branches"].values()):
                 raise AssertionError("Each branch must consume its complete attributed search+final budget.")
             state["status"] = "completed"
-            write_json(output_root / "comparison.json", {"protocol": PROTOCOL, **identity,
+            write_json(output_root / "comparison.json", {"protocol": protocol, **identity,
                 "architecture_hash": initialization["architecture_hash"],
                 "validation": {name: branch["validation"] for name, branch in state["branches"].items()},
                 "quality_feasible": {name: branch["quality_feasible"] for name, branch in state["branches"].items()},

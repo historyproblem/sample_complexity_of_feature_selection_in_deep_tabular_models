@@ -1,4 +1,4 @@
-"""Separate strict adapter for the authorized shared-search inherited/scratch run.
+"""Strict adapters for shared-search compact-model comparison protocols.
 
 The iterative protocol schema and runtime remain untouched. One-shot execution
 has an explicit terminal no-feasible-search policy and no iterative rollback.
@@ -17,13 +17,19 @@ from .accuracy_guided_config import (
 )
 
 PROTOCOL = "pruning_v3_one_shot_60_90"
+HANDOFF_PROTOCOL = "pruning_v3_optimizer_scheduler_handoff_60_90"
 CONFIG_NAME = "experiment/pruning_v3/one_shot_60_90_inherited_vs_scratch"
+HANDOFF_CONFIG_NAME = "experiment/pruning_v3/optimizer_scheduler_handoff_60_90_repeats2"
 OUTPUT_NAME = "one_shot_60_90_inherited_vs_scratch"
+HANDOFF_OUTPUT_NAME = "optimizer_scheduler_handoff_60_90_repeats2"
+MAPPED_OPTIMIZER = "mapped_adamw_moments_and_step"
+FRESH_SCHEDULER = "fresh_final_stage_cosine"
+RESUMED_SCHEDULER = "continue_selected_checkpoint_cosine"
 
 
 def _require(condition, message):
     if not condition:
-        raise ValueError(f"Invalid {PROTOCOL} configuration: {message}")
+        raise ValueError(f"Invalid one-shot pruning configuration: {message}")
 
 
 def dense_source_paths(source):
@@ -66,7 +72,12 @@ def to_v3_config(config):
     """Copy the shared engine/reference schema, never mutate the caller's config."""
     plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else dict(config)
     _require(isinstance(plain, dict) and "one_shot" in plain, "one_shot mapping is required")
-    plain.pop("one_shot")
+    one = plain.pop("one_shot")
+    if one.get("protocol") == HANDOFF_PROTOCOL:
+        # The shared v3 validator predates per-branch state policies and accepts
+        # only its historical restart token. The one-shot adapter validates the
+        # truthful public token before normalizing this private compatibility copy.
+        plain["accuracy_guided"]["stage_plan"][2]["restart_policy"] = "adamw_cosine_restart"
     return OmegaConf.create(plain)
 
 
@@ -74,19 +85,59 @@ def validate_config(config):
     plain = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
     _require(isinstance(plain, dict), "root must be a mapping")
     one = plain.get("one_shot")
-    fields = {
-        "protocol", "search_epochs", "final_epochs", "branches",
-        "scratch_initialization", "inherited_optimizer_state",
-    }
     _require(isinstance(one, dict), "one_shot mapping is required")
-    _require(set(one) == fields,
-             f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
-    _require(one["protocol"] == PROTOCOL, "unsupported one-shot protocol")
-    _require(one["branches"] == ["inherited", "scratch"], "exactly inherited and scratch branches required")
-    _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",
-             "scratch must reinitialize every trainable parameter and BN state")
-    _require(one["inherited_optimizer_state"] == "mapped_adamw_moments_and_step",
-             "inherited branch must map AdamW moments and step from the selected search checkpoint")
+    protocol = one.get("protocol")
+    if protocol == PROTOCOL:
+        fields = {
+            "protocol", "search_epochs", "final_epochs", "branches",
+            "scratch_initialization", "inherited_optimizer_state",
+        }
+        _require(set(one) == fields,
+                 f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
+        _require(one["branches"] == ["inherited", "scratch"],
+                 "exactly inherited and scratch branches required")
+        _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",
+                 "scratch must reinitialize every trainable parameter and BN state")
+        _require(one["inherited_optimizer_state"] == MAPPED_OPTIMIZER,
+                 "inherited branch must map AdamW moments and step from the selected search checkpoint")
+    elif protocol == HANDOFF_PROTOCOL:
+        fields = {
+            "protocol", "search_epochs", "final_epochs",
+            "search_scheduler_horizon_epochs", "execution_order", "methods", "repeats",
+        }
+        _require(set(one) == fields,
+                 f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
+        expected_methods = [
+            {"id": "fresh_optimizer_fresh_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": "fresh", "scheduler_state": FRESH_SCHEDULER},
+            {"id": "mapped_optimizer_fresh_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": MAPPED_OPTIMIZER, "scheduler_state": FRESH_SCHEDULER},
+            {"id": "mapped_optimizer_resumed_scheduler",
+             "model_state": "selected_surviving_state",
+             "optimizer_state": MAPPED_OPTIMIZER, "scheduler_state": RESUMED_SCHEDULER},
+        ]
+        _require(one["methods"] == expected_methods,
+                 "handoff methods must be the three ordered single-change policies")
+        _require(one["execution_order"] == "all_methods_once_then_repeats",
+                 "execution order must finish every method before later repeats")
+        _require(plain["accuracy_guided"]["stage_plan"][2]["restart_policy"]
+                 == "branch_specific_optimizer_scheduler_handoff",
+                 "final recovery restart policy must defer to the explicit method list")
+        expected_repeats = [
+            {"id": "repeat_1", "training_seed": 42},
+            {"id": "repeat_2", "training_seed": 43},
+        ]
+        _require(one["repeats"] == expected_repeats,
+                 "the authorized paired plan uses repeat seeds 42 then 43")
+        _require(type(one["search_epochs"]) is int and type(one["final_epochs"]) is int,
+                 "search_epochs and final_epochs must be integers")
+        _require(one["search_scheduler_horizon_epochs"]
+                 == one["search_epochs"] + one["final_epochs"],
+                 "continued cosine requires a search scheduler horizon equal to the 150-epoch budget")
+    else:
+        _require(False, "unsupported one-shot protocol")
     for field in ("search_epochs", "final_epochs"):
         _require(type(one[field]) is int and one[field] > 0, f"{field} must be a positive integer")
     shared = to_v3_config(config)
@@ -107,6 +158,31 @@ def validate_config(config):
     # The base validator already checks the disabled engine recalibration/warmup,
     # quality-only controller, initial-width normalization, gates and no test access.
     return total
+
+
+def resolved_branch_plan(config):
+    """Expand the checked-in branch order into concrete, auditable runs."""
+    validate_config(config)
+    one = OmegaConf.to_container(config.one_shot, resolve=True)
+    if one["protocol"] == PROTOCOL:
+        return [
+            {"id": "inherited", "method": "inherited", "repeat": "repeat_1",
+             "training_seed": int(config.seed), "model_state": "selected_surviving_state",
+             "optimizer_state": one["inherited_optimizer_state"],
+             "scheduler_state": FRESH_SCHEDULER},
+            {"id": "scratch", "method": "scratch", "repeat": "repeat_1",
+             "training_seed": int(config.seed), "model_state": one["scratch_initialization"],
+             "optimizer_state": "fresh", "scheduler_state": FRESH_SCHEDULER},
+        ]
+    return [
+        {"id": f"{method['id']}__{repeat['id']}", "method": method["id"],
+         "repeat": repeat["id"], "training_seed": repeat["training_seed"],
+         "model_state": method["model_state"],
+         "optimizer_state": method["optimizer_state"],
+         "scheduler_state": method["scheduler_state"]}
+        for repeat in one["repeats"]
+        for method in one["methods"]
+    ]
 
 
 def _reference_origin_info(config, result):
@@ -152,10 +228,13 @@ def validate_inputs(config):
 
 
 def output_paths(config, output_root=None):
+    protocol = str(config.one_shot.protocol)
+    output_name = HANDOFF_OUTPUT_NAME if protocol == HANDOFF_PROTOCOL else OUTPUT_NAME
     root = (Path(output_root) if output_root is not None
-            else Path(config.run_history.root_dir) / OUTPUT_NAME).resolve()
+            else Path(config.run_history.root_dir) / output_name).resolve()
+    branch_ids = [branch["id"] for branch in resolved_branch_plan(config)]
     return {"root": str(root), **{name: str(root / name)
-            for name in ("shared_search", "export_only", "inherited", "scratch")}}
+            for name in ("shared_search", "export_only", *branch_ids)}}
 
 
 def resolved_one_shot(config, *, check_inputs=True, output_root=None):
@@ -164,6 +243,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     if check_inputs:
         shared["inputs"] = _reference_origin_info(config, shared["inputs"])
     one = OmegaConf.to_container(config.one_shot, resolve=True)
+    branches = resolved_branch_plan(config)
     paths = output_paths(config, output_root)
     # Do not expose the inherited iterative guard as this runner's actual policy.
     execution = {
@@ -173,36 +253,65 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         "export_diagnostics": "before_branch_training; eval/no_grad; weights_and_bn_unchanged",
         "export_diagnostic_quality": "measure opening/export jumps without calibration or training",
         "bn_calibration_batches": 0,
-        "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
-        "scratch_initialization": one["scratch_initialization"],
-        "inherited_optimizer_state": one["inherited_optimizer_state"],
-        "scratch_optimizer_state": "fresh",
-        "branch_scheduler": "independent new cosine schedule for final_epochs",
+        "branch_plan": branches,
         "branch_gate_penalty": 0,
         "quality_failure": "record_infeasible_keep_shared_architecture; no iterative rollback",
         "iterative_recovery_guard_executed": False,
         "final_test": "separate frozen physical evaluation; never training or selection",
     }
-    return {**shared, "protocol": PROTOCOL, "shared_method_protocol": shared["protocol"],
+    if one["protocol"] == PROTOCOL:
+        execution.update({
+            "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
+            "scratch_initialization": one["scratch_initialization"],
+            "inherited_optimizer_state": one["inherited_optimizer_state"],
+            "scratch_optimizer_state": "fresh",
+            "branch_scheduler": "independent new cosine schedule for final_epochs",
+        })
+        handoff = {"source": "one selected adaptive search checkpoint and learned mask",
+                   "inherited": execution["inherited_initialization"],
+                   "scratch": execution["scratch_initialization"],
+                   "gate_reentry": None, "controller_rebase": None,
+                   "optimizer": {
+                       "inherited": execution["inherited_optimizer_state"],
+                       "scratch": execution["scratch_optimizer_state"],
+                       "scheduler": execution["branch_scheduler"],
+                   }}
+        budget = {"shared_search_epochs_executed_once": one["search_epochs"],
+                  "physical_training_epochs_per_branch": one["final_epochs"],
+                  "per_branch_budget_including_shared_search": total,
+                  "total_unique_training_epochs_both_branches": one["search_epochs"] + 2 * one["final_epochs"],
+                  "selection_does_not_rewind_consumed_budget": True}
+    else:
+        execution.update({
+            "all_model_initialization": "selected search Conv/BN tensors sliced into one shared compact architecture",
+            "search_scheduler": (
+                f"CosineAnnealingLR(T_max={one['search_scheduler_horizon_epochs']}) so selected "
+                "checkpoint state can be continued without crossing a stage-local cosine minimum"
+            ),
+            "comparison_axis": "optimizer and scheduler state only",
+            "paired_recovery_seeds": [repeat["training_seed"] for repeat in one["repeats"]],
+            "execution_order": [branch["id"] for branch in branches],
+        })
+        handoff = {"source": "one selected adaptive search checkpoint and learned mask",
+                   "model_state": "identical selected surviving state for every branch",
+                   "gate_reentry": None, "controller_rebase": None,
+                   "methods": one["methods"]}
+        budget = {"shared_search_epochs_executed_once": one["search_epochs"],
+                  "physical_training_epochs_per_branch": one["final_epochs"],
+                  "per_branch_budget_including_shared_search": total,
+                  "number_of_physical_branches": len(branches),
+                  "total_unique_training_epochs_all_branches": (
+                      one["search_epochs"] + len(branches) * one["final_epochs"]),
+                  "selection_does_not_rewind_consumed_budget": True}
+    return {**shared, "protocol": one["protocol"], "shared_method_protocol": shared["protocol"],
+            "stage_plan": OmegaConf.to_container(config.accuracy_guided.stage_plan, resolve=True),
             "resolved_config": OmegaConf.to_container(config, resolve=True),
             "one_shot": one, "execution_policy": execution,
-            "handoff": {"source": "one selected adaptive search checkpoint and learned mask",
-                        "inherited": execution["inherited_initialization"],
-                        "scratch": execution["scratch_initialization"],
-                        "gate_reentry": None, "controller_rebase": None,
-                        "optimizer": {
-                            "inherited": execution["inherited_optimizer_state"],
-                            "scratch": execution["scratch_optimizer_state"],
-                            "scheduler": execution["branch_scheduler"],
-                        }},
+            "handoff": handoff,
             "execution_graph": {"shared": [{"id": "shared_search", "epochs": one["search_epochs"]},
                                              {"id": "export_only", "epochs": 0}],
-                                "physical_branches": [{"id": name, "epochs": one["final_epochs"]}
-                                                      for name in one["branches"]]},
-            "budget": {"shared_search_epochs_executed_once": one["search_epochs"],
-                       "physical_training_epochs_per_branch": one["final_epochs"],
-                       "per_branch_budget_including_shared_search": total,
-                       "total_unique_training_epochs_both_branches": one["search_epochs"] + 2 * one["final_epochs"],
-                       "selection_does_not_rewind_consumed_budget": True},
+                                "physical_branches": [{**branch, "epochs": one["final_epochs"]}
+                                                      for branch in branches]},
+            "budget": budget,
             "output_paths": paths, "output_exists": Path(paths["root"]).exists(),
             "existing_output_policy": "refuse_overwrite_or_resume"}

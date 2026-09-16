@@ -1,4 +1,4 @@
-"""One shared adaptive search, then inherited/scratch compact training branches."""
+"""One shared adaptive search, then configured compact comparison branches."""
 from __future__ import annotations
 
 import argparse
@@ -54,7 +54,10 @@ def _new_reference_preview(config, reference_output, output, *, prepare_only):
         "selection_data": "validation", "test_evaluated": False,
         "existing_output_policy": "refuse_overwrite_or_resume",
     }
-    pruning_epochs = report["budget"]["total_unique_training_epochs_both_branches"]
+    pruning_epochs = report["budget"].get(
+        "total_unique_training_epochs_both_branches",
+        report["budget"].get("total_unique_training_epochs_all_branches"),
+    )
     report["budget"].update({
         "dense_reference_training_epochs": dense_epochs,
         "total_unique_training_epochs_including_reference": dense_epochs + pruning_epochs,
@@ -90,7 +93,7 @@ def main(argv=None):
     source.add_argument("--prepare-reference", type=Path, metavar="PATH",
                         help="Create a NEW shared seed42 initializer and train only its dense150 validation reference in PATH")
     source.add_argument("--from-scratch", action="store_true",
-                        help="Create a NEW shared seed42 initializer, train its dense150 reference, then run shared search60 and inherited/scratch90")
+                        help="Create a NEW shared seed42 initializer, train its dense150 reference, then run the configured search and compact branches")
     parser.add_argument("--reference-output", type=Path,
                         help=f"New reference directory for --from-scratch (default: {DEFAULT_REFERENCE_OUTPUT})")
     parser.add_argument("--test-config", type=Path, default=DEFAULT_TEST_CONFIG,
@@ -178,7 +181,7 @@ def main(argv=None):
         }
         write_json(output / "clean_clone_state.json", clean_clone_state)
     if result.get("status") == "completed":
-        progress_message("official-test", "evaluating frozen inherited and scratch deployments")
+        progress_message("official-test", "evaluating all finalized frozen deployments")
         test_report = _run_official_test(output, args.test_config)
         result["official_test_evaluation"] = {
             "status": test_report["status"], "test_evaluated": test_report["test_evaluated"],
