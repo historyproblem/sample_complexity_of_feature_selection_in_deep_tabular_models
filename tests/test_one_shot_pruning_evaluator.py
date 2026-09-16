@@ -198,7 +198,7 @@ def test_finalized_infeasible_branch_keeps_honest_quality_status(pair):
     assert prepared[1][1]["quality_feasible"] is False
 
 
-def test_both_branches_use_one_loader_and_readonly_frozen_forward(pair, monkeypatch):
+def test_both_branches_use_one_loader_and_readonly_frozen_forward(pair, monkeypatch, capsys):
     before = {path: evaluation.file_hash(path) for path in pair.rglob("*") if path.is_file()}
     data = torch.zeros(10000, 10)
     data[:9000, 0] = 4
@@ -224,6 +224,33 @@ def test_both_branches_use_one_loader_and_readonly_frozen_forward(pair, monkeypa
         assert row["model_state_unchanged"] and row["bn_counters_unchanged"]
         with np.load(pair / "one_shot_test_evaluation" / row["predictions"], allow_pickle=False) as arrays:
             assert arrays["index"][-1] == 9999 and arrays["prediction"][-1] == 1
+    console = capsys.readouterr().out
+    assert "[official-test] inherited: accuracy=90.00%" in console
+    assert "[official-test] scratch: accuracy=90.00%" in console
+    assert "inherited-minus-scratch=+0.00 pp" in console
+    assert "test_summary.json" in console
     assert before == {path: evaluation.file_hash(path) for path in before}
     with pytest.raises(FileExistsError):
         evaluation.run(args(pair))
+
+
+def test_checked_in_server_config_resolves_reusable_paths(pair):
+    resolved = evaluation.evaluation_args_from_config(
+        evaluation.DEFAULT_CONFIG, run_dir=pair, data=pair / "cached-data", device="cpu",
+        output=pair / "configured-test", num_workers=0)
+    assert resolved.run_dir == pair.resolve()
+    assert resolved.data == (pair / "cached-data").resolve()
+    assert resolved.output == (pair / "configured-test").resolve()
+    assert resolved.device == "cpu"
+    assert resolved.batch_size == 128 and resolved.num_workers == 0
+    assert resolved.download is False and resolved.check_only is False
+
+
+def test_checked_in_config_cli_supports_artifact_only_preflight(pair, monkeypatch, capsys):
+    monkeypatch.setattr(evaluation.frozen, "build_test_loader", lambda *a: pytest.fail("official test accessed"))
+    assert evaluation.main([
+        "--config", str(evaluation.DEFAULT_CONFIG), "--run-dir", str(pair),
+        "--device", "cpu", "--check-only",
+    ]) is None
+    assert "Official test data not loaded" in capsys.readouterr().out
+    assert not (pair / "test_evaluation").exists()

@@ -25,6 +25,15 @@ from net_complexity.training.one_shot_pruning_config import (
 from net_complexity.training.one_shot_progress import phase_progress, progress_message
 
 DEFAULT_REFERENCE_OUTPUT = Path("outputs/runs/one_shot_dense_reference_seed42")
+DEFAULT_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test.yaml"
+
+
+def _run_official_test(output, config_path):
+    """Evaluate only finalized frozen deployments and persist the official test report."""
+    import evaluate_one_shot_pruning_test as evaluation
+    args = evaluation.evaluation_args_from_config(
+        config_path, run_dir=output, output=output / "test_evaluation")
+    return evaluation.run(args)
 
 
 def _new_reference_preview(config, reference_output, output, *, prepare_only):
@@ -84,6 +93,8 @@ def main(argv=None):
                         help="Create a NEW shared seed42 initializer, train its dense150 reference, then run shared search60 and inherited/scratch90")
     parser.add_argument("--reference-output", type=Path,
                         help=f"New reference directory for --from-scratch (default: {DEFAULT_REFERENCE_OUTPUT})")
+    parser.add_argument("--test-config", type=Path, default=DEFAULT_TEST_CONFIG,
+                        help="Official-test inference profile run automatically after frozen deployments are finalized")
     parser.add_argument("--dry-run", action="store_true", help="Resolve paths/contracts without training, CUDA, or dataset construction")
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
@@ -112,6 +123,12 @@ def main(argv=None):
         report = (_new_reference_preview(config, reference_output, output,
                                          prepare_only=args.prepare_reference is not None)
                   if new_reference else resolved_one_shot(config, output_root=args.output))
+        report["official_test_evaluation"] = {
+            "automatic_after_frozen_deployments": args.prepare_reference is None,
+            "config": str(args.test_config.expanduser().resolve()),
+            "output": str((output / "test_evaluation").resolve()),
+            "training": False, "batchnorm_updates": False, "selection": False,
+        }
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
         return report
     progress_message("one-shot", f"device={config.device}; seed={config.seed}; output={output}")
@@ -134,11 +151,12 @@ def main(argv=None):
     with phase_progress("runtime", "loading one-shot training code"):
         from net_complexity.training.one_shot_pruning import run_one_shot_pruning
     result = run_one_shot_pruning(config, output)
+    clean_clone_state = None
     if args.from_scratch:
         from net_complexity.training.pruning_measurement import write_json
         reference_epochs = reference_state["reference_training_epochs_actually_executed"]
         pruning_epochs = result["compute_ledger"]["actual_training_epochs_executed"]
-        write_json(output / "clean_clone_state.json", {
+        clean_clone_state = {
             "protocol": "pruning_v3_clean_clone", "status": result["status"],
             "reference": {
                 "root": str(reference_output),
@@ -157,7 +175,25 @@ def main(argv=None):
             "per_pruning_branch_total_allocated": result["per_branch_total_allocated"],
             "reference_cost_is_external_to_pruning_branch_budget": True,
             "test_evaluated": bool(reference_state["test_evaluated"] or result["test_evaluated"]),
-        })
+        }
+        write_json(output / "clean_clone_state.json", clean_clone_state)
+    if result.get("status") == "completed":
+        progress_message("official-test", "evaluating frozen inherited and scratch deployments")
+        test_report = _run_official_test(output, args.test_config)
+        result["official_test_evaluation"] = {
+            "status": test_report["status"], "test_evaluated": test_report["test_evaluated"],
+            "summary": str(output / "test_evaluation/test_summary.json"),
+            "comparison": str(output / "test_evaluation/test_comparison.csv"),
+        }
+        if clean_clone_state is not None:
+            clean_clone_state["test_evaluated"] = bool(test_report["test_evaluated"])
+            clean_clone_state["test_evaluation"] = result["official_test_evaluation"]
+            write_json(output / "clean_clone_state.json", clean_clone_state)
+    else:
+        result["official_test_evaluation"] = {
+            "status": "not_run", "test_evaluated": False,
+            "reason": f"no finalized branch pair: one-shot status={result.get('status', 'unknown')}",
+        }
     progress_message("one-shot", f"finished: status={result.get('status', 'returned')}; results={output}")
     return result
 

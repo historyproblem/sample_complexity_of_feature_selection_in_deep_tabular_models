@@ -15,6 +15,7 @@ import json
 import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -29,9 +30,45 @@ from net_complexity.training.pruning_measurement import deployment_cost, mask_ha
 
 PROTOCOL = "pruning_v3_one_shot_60_90"
 BRANCHES = ("inherited", "scratch")
+DEFAULT_CONFIG = ROOT / "configs/evaluation/one_shot_test.yaml"
 require = frozen.require
 read_json = frozen.read_json
 file_hash = frozen.file_hash
+
+
+def evaluation_args_from_config(config_path=DEFAULT_CONFIG, **overrides):
+    """Resolve the checked-in server inference profile with explicit overrides."""
+    path = Path(config_path).expanduser().resolve()
+    raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    require(isinstance(raw, dict) and set(raw) == {"one_shot_test"},
+            "Test config must contain exactly the one_shot_test mapping")
+    values = raw["one_shot_test"]
+    fields = {"run_dir", "data", "device", "output_subdir", "batch_size", "num_workers", "download"}
+    require(isinstance(values, dict) and set(values) == fields,
+            f"Test config fields differ: unknown={sorted(set(values) - fields)}, "
+            f"missing={sorted(fields - set(values))}")
+    for key, value in overrides.items():
+        if value is not None:
+            require(key in fields | {"output", "check_only"}, f"Unknown test override: {key}")
+            values[key] = value
+    run_dir = Path(values["run_dir"]).expanduser()
+    data = Path(values["data"]).expanduser()
+    if not run_dir.is_absolute():
+        run_dir = ROOT / run_dir
+    if not data.is_absolute():
+        data = ROOT / data
+    output = values.get("output")
+    output = Path(output).expanduser() if output is not None else run_dir / str(values["output_subdir"])
+    if not output.is_absolute():
+        output = ROOT / output
+    batch_size, num_workers = int(values["batch_size"]), int(values["num_workers"])
+    require(batch_size > 0 and num_workers >= 0, "Use positive batch_size and nonnegative num_workers")
+    return SimpleNamespace(
+        run_dir=run_dir.resolve(), data=data.resolve(), device=str(values["device"]),
+        output=output.resolve(), batch_size=batch_size, num_workers=num_workers,
+        download=bool(values["download"]), check_only=bool(values.get("check_only", False)),
+        config_path=path,
+    )
 
 
 def _validate_normalization(config, metadata):
@@ -267,6 +304,9 @@ def run(args):
             report["runs"].append({**record, "test": metrics, "model_state_unchanged": True,
                 "bn_counters_unchanged": True, "predictions": prediction_path.name,
                 "predictions_sha256": file_hash(prediction_path)})
+            print(f"[official-test] {record['branch']}: accuracy={metrics['accuracy']:.2%}; "
+                  f"ce_loss={metrics['ce_loss']:.6f}; "
+                  f"correct={metrics['correct_count']}/{metrics['example_count']}", flush=True)
             report["test_evaluated"] = True
             write_json(output / "test_summary.json", report)
             frozen.write_comparison(output, report["runs"])
@@ -280,25 +320,34 @@ def run(args):
         raise
     finally:
         write_json(output / "test_summary.json", report)
-    print(f"Completed both frozen branches: {output / 'test_comparison.csv'}")
+    if report["status"] == "completed" and len(report["runs"]) == 2:
+        by_branch = {row["branch"]: row["test"]["accuracy"] for row in report["runs"]}
+        delta = 100 * (by_branch["inherited"] - by_branch["scratch"])
+        print(f"[official-test] inherited-minus-scratch={delta:+.2f} pp", flush=True)
+    print(f"[official-test] saved={output / 'test_summary.json'}", flush=True)
     return report
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--data", type=Path, default=Path("data"))
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                        help="Server inference profile; command-line values override it")
+    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument("--data", type=Path)
+    parser.add_argument("--device")
     parser.add_argument("--output", type=Path, help="Fresh output directory; training artifacts stay read-only")
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--download", action="store_true")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--check-only", action="store_true", help="CPU artifact verification, no official test access or writes")
-    args = parser.parse_args()
-    if args.batch_size < 1 or args.num_workers < 0:
-        parser.error("Use positive batch size and nonnegative worker count")
+    cli = parser.parse_args(argv)
+    args = evaluation_args_from_config(
+        cli.config, run_dir=cli.run_dir, data=cli.data, device=cli.device, output=cli.output,
+        batch_size=cli.batch_size, num_workers=cli.num_workers, download=cli.download,
+        check_only=cli.check_only,
+    )
     torch.set_num_threads(min(4, torch.get_num_threads()))
-    run(args)
+    return run(args)
 
 
 if __name__ == "__main__":

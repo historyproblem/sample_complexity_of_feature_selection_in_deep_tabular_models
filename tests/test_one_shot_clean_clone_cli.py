@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from net_complexity.training.one_shot_pruning_config import dense_source_paths
+from net_complexity.training.pruning_measurement import write_json
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import launch_one_shot_pruning as launcher
@@ -160,13 +161,32 @@ def test_reference_preparation_precedes_search_with_exact_generated_paths(
         output.mkdir()
         return pruning_state
 
+    def evaluate(output, config_path):
+        assert output == pruning
+        assert Path(config_path).name == "one_shot_test.yaml"
+        calls.append("official_test")
+        evaluation = output / "test_evaluation"
+        evaluation.mkdir()
+        write_json(evaluation / "test_summary.json", {
+            "status": "completed", "test_evaluated": True,
+            "runs": [
+                {"branch": "inherited", "test": {"accuracy": .94}},
+                {"branch": "scratch", "test": {"accuracy": .93}},
+            ],
+        })
+        return {"status": "completed", "test_evaluated": True}
+
     monkeypatch.setitem(sys.modules, "net_complexity.training.one_shot_reference", SimpleNamespace(prepare_dense_reference=prepare))
     monkeypatch.setitem(sys.modules, "net_complexity.training.one_shot_pruning", SimpleNamespace(run_one_shot_pruning=run))
     monkeypatch.setattr(launcher, "validate_inputs", preflight)
+    monkeypatch.setattr(launcher, "_run_official_test", evaluate)
     args = (["--prepare-reference", str(reference)] if prepare_only else
             ["--from-scratch", "--reference-output", str(reference), "--output", str(pruning)])
     result = launcher.main(args)
-    assert calls == (["prepare"] if prepare_only else ["prepare", "validate", "search_and_branches"])
+    assert calls == (["prepare"] if prepare_only else [
+        "prepare", "validate", "search_and_branches",
+        *(["official_test"] if pruning_status == "completed" else []),
+    ])
     assert result is (reference_state if prepare_only else pruning_state)
     if prepare_only:
         assert not pruning.exists()
@@ -186,7 +206,12 @@ def test_reference_preparation_precedes_search_with_exact_generated_paths(
         }
         assert manifest["per_pruning_branch_total_allocated"] == 150
         assert manifest["reference_cost_is_external_to_pruning_branch_budget"] is True
-        assert manifest["test_evaluated"] is False
+        assert manifest["test_evaluated"] is (pruning_status == "completed")
+        if pruning_status == "completed":
+            assert manifest["test_evaluation"]["status"] == "completed"
+            assert manifest["test_evaluation"]["summary"].endswith("test_evaluation/test_summary.json")
+        else:
+            assert "test_evaluation" not in manifest
 
 
 def test_failed_reference_never_reaches_search(tmp_path, monkeypatch):

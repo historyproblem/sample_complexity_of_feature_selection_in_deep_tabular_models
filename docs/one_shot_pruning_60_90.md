@@ -231,8 +231,8 @@ For the default root
 | `inherited/initial_state.pt`, `scratch/initial_state.pt` | Exact branch initial tensors/BN state and initialization hashes |
 | `inherited/deployment.pt`, `scratch/deployment.pt` | Validation-selected frozen physical deployments |
 | `inherited/branch_state.json`, `scratch/branch_state.json` | Branch provenance, quality and consumed ledger |
-| `comparison.json` | Validation and feasibility summary; official test remains absent |
-| `test_evaluation/` | Separate official-test reports for the explicit evaluator command below |
+| `comparison.json` | Immutable validation and feasibility summary; test does not rewrite checkpoint selection |
+| `test_evaluation/` | Automatically saved official-test report, comparison and per-example predictions |
 
 `clean_clone_state.json` uses measured consumed epochs rather than the allocated
 budget. A completed full combined run records 390; if no feasible search checkpoint
@@ -241,13 +241,26 @@ The individual dense and pruning state files retain their own ledgers. If an
 exception interrupts the combined command, inspect those state files; the final
 combined manifest is written only after the pruning runner returns.
 
-The independent evaluator validates both branch artifacts and their common
-selection before constructing one official test loader. A check-only pass uses
-no test data:
+After both validation-selected physical deployments are frozen, the launcher
+automatically validates their common selection, constructs one official test
+loader, prints both test results to the console and saves them under
+`RUN_DIR/test_evaluation/`. Test inference performs no training, checkpoint
+selection or BatchNorm updates. If evaluation fails, the launcher exits with an
+error while preserving the completed training artifacts and the partial test
+report.
+
+For an already completed run made by older code, the checked-in server profile
+is the one-command inference workaround:
 
 ```sh
-.venv/bin/python scripts/evaluate_one_shot_pruning_test.py --run-dir outputs/runs/one_shot_60_90_inherited_vs_scratch --check-only
-.venv/bin/python scripts/evaluate_one_shot_pruning_test.py --run-dir outputs/runs/one_shot_60_90_inherited_vs_scratch --data data --device cpu --output outputs/runs/one_shot_60_90_inherited_vs_scratch/test_evaluation
+.venv/bin/python scripts/evaluate_one_shot_pruning_test.py \
+  --config configs/evaluation/one_shot_test.yaml \
+  --run-dir outputs/runs/one_shot_60_90_inherited_vs_scratch \
+  --check-only
+
+.venv/bin/python scripts/evaluate_one_shot_pruning_test.py \
+  --config configs/evaluation/one_shot_test.yaml \
+  --run-dir outputs/runs/one_shot_60_90_inherited_vs_scratch
 ```
 
 Official test is never used for search, mask choice or branch checkpoint selection.
@@ -255,9 +268,17 @@ Frozen evaluation performs no training or BN updates and verifies unchanged
 weights/buffers. Synthetic artifacts are refused. Validation accuracy is never
 substituted for missing test accuracy, and comparisons informed by earlier test
 results remain exploratory.
-If `--output` is omitted from the evaluator command, its default is
-`RUN_DIR/one_shot_test_evaluation`; the training launcher never creates either
-test-report directory.
+Command-line `--run-dir`, `--data`, `--device`, `--output`, `--batch-size`,
+`--num-workers` and `--download` values override the checked-in profile. The
+default output is `RUN_DIR/test_evaluation`; an existing output is refused rather
+than overwritten.
+
+The executed analysis notebook can be rebuilt against the same run directory:
+
+```sh
+.venv/bin/python scripts/build_one_shot_pruning_report_notebook.py \
+  --run-dir outputs/runs/one_shot_60_90_inherited_vs_scratch
+```
 
 ## Technical verification
 
