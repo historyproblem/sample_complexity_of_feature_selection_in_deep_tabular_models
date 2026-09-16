@@ -9,10 +9,20 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+if __name__ == "__main__" and not any(flag in sys.argv for flag in ("--dry-run", "--help", "-h")):
+    # This must precede the package import, which can initialize PyTorch.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, OSError, ValueError):
+            pass
+    print("[one-shot] Starting launcher; loading configuration dependencies...", flush=True)
+
 from net_complexity.training.one_shot_pruning_config import (
     CONFIG_NAME, compose_config, dense_source_paths, output_paths, resolved_one_shot,
     validate_config, validate_inputs,
 )
+from net_complexity.training.one_shot_progress import phase_progress, progress_message
 
 DEFAULT_REFERENCE_OUTPUT = Path("outputs/runs/one_shot_dense_reference_seed42")
 
@@ -104,20 +114,25 @@ def main(argv=None):
                   if new_reference else resolved_one_shot(config, output_root=args.output))
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
         return report
+    progress_message("one-shot", f"device={config.device}; seed={config.seed}; output={output}")
     if new_reference:
         _check_new_paths(reference_output, output, prepare_only=args.prepare_reference is not None)
-        from net_complexity.training.one_shot_reference import prepare_dense_reference
+        progress_message("one-shot", f"new dense reference: {reference_output}; epochs={config.accuracy_guided.total_epochs}")
+        with phase_progress("runtime", "loading dense reference training code"):
+            from net_complexity.training.one_shot_reference import prepare_dense_reference
         reference_state = prepare_dense_reference(config, reference_output)
         if args.prepare_reference is not None:
             return reference_state
     if output.exists():
         raise FileExistsError(f"Refusing existing one-shot output: {output}. Use a fresh --output directory.")
     try:
-        validate_inputs(config)
+        with phase_progress("preflight", "checking dense validation reference and zero-epoch initializer"):
+            validate_inputs(config)
     except FileNotFoundError as exc:
         parser.error(str(exc))
     # Preview/preflight cannot import or accidentally invoke the training engine.
-    from net_complexity.training.one_shot_pruning import run_one_shot_pruning
+    with phase_progress("runtime", "loading one-shot training code"):
+        from net_complexity.training.one_shot_pruning import run_one_shot_pruning
     result = run_one_shot_pruning(config, output)
     if args.from_scratch:
         from net_complexity.training.pruning_measurement import write_json
@@ -143,6 +158,7 @@ def main(argv=None):
             "reference_cost_is_external_to_pruning_branch_budget": True,
             "test_evaluated": bool(reference_state["test_evaluated"] or result["test_evaluated"]),
         })
+    progress_message("one-shot", f"finished: status={result.get('status', 'returned')}; results={output}")
     return result
 
 

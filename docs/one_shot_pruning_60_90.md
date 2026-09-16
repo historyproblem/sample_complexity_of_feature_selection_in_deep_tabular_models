@@ -123,6 +123,31 @@ overrides that would bypass the newly generated artifacts. `--reference-output`
 applies only to `--from-scratch`; `--prepare-reference` uses its own path argument.
 No official test data are loaded during reference preparation or pruning training.
 
+Normal launches print a flushed startup message before loading model dependencies.
+The one-shot profile enables torchvision's download progress, and phase messages
+identify dataset preparation, model initialization, training, checkpoint selection,
+export diagnostics and deployment validation. Every 15 seconds, an active phase
+prints elapsed time; during training it also reads the existing optimizer-update,
+training-example and completed-epoch counters. The epoch-end line reports weighted
+validation accuracy/CE and is flushed immediately, including into redirected logs.
+These observers do not run the model, touch tensors, sample RNGs or change training.
+Other dataset profiles retain their previous quiet-download default. Dry-run keeps
+its machine-readable JSON output without progress messages.
+
+A process already running older code cannot acquire the new console reporting.
+Its completed dense epochs are still recorded in
+`outputs/runs/one_shot_dense_reference_seed42/J1_dense_control/pilot_state.json`
+and `global_history.csv`; these files appear after preparation and after the first
+completed epoch respectively. Check them from another terminal without restarting
+training. For example:
+
+```sh
+.venv/bin/python -c 'import json; from pathlib import Path; p=Path("outputs/runs/one_shot_dense_reference_seed42/J1_dense_control/pilot_state.json"); d=json.loads(p.read_text()) if p.exists() else {}; print({k:d.get(k) for k in ("status","global_epochs_completed","total_epochs_allocated","wall_seconds")})'
+```
+
+An absent state file does not establish that the process is stuck: dataset
+download/checking and initial model construction happen before it is created.
+
 The new reference directory uses the existing validated artifact layout:
 
 | Path | Purpose |
@@ -285,6 +310,14 @@ It verifies every shared initializer tensor, weighted epoch history, validation
 selection, real optimizer/cosine state, and refusal of incomplete reference input.
 The full `--from-scratch --dry-run` exited successfully with a planned 390-epoch
 combined budget and no training or output directories.
+
+The console-progress update passed **193 tests in 29.92 seconds** across the
+progress, download-visibility, one-shot runtime/config/evaluator and dataloader
+suites, plus the shared v3 config suite. Checks cover immediate flush before
+dependency import, live read-only ledger updates, cleanup on failure/interruption,
+unchanged RNG/ledger observations, preserved initialization and budgets, and
+valid dry-run JSON. No real CIFAR
+download, full training or GPU execution was performed for this update.
 
 The local verification environment was Python 3.9.6, PyTorch 2.8.0 and pytest 8.4.2
 on CPU (CUDA unavailable). The existing-reference full-profile dry-run completed without training

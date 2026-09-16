@@ -27,6 +27,7 @@ from .cyclic_aig import _configure_run_history, _set_num_epochs
 from .engine import run_training
 from .interruption import cooperative_signals, TrainingInterrupted
 from .one_shot_pruning_config import PROTOCOL, to_v3_config, validate_config, validate_inputs
+from .one_shot_progress import epoch_progress, phase_progress, progress_message
 from .pruning_audit import build_structural, committed_equivalence, load_adaptive_reference
 from .pruning_measurement import (
     compare_predictors, deployment_cost, evaluate_deployment, gated_export_equivalence,
@@ -105,7 +106,8 @@ def _atomic_copy(source, destination):
 def run_one_shot_pruning(config, output_root):
     """Execute 60 shared search epochs and two independent 90-epoch final stages."""
     total = validate_config(config)
-    inputs = validate_inputs(config)
+    with phase_progress("one-shot", "validating reference inputs"):
+        inputs = validate_inputs(config)
     cfg = to_v3_config(config)
     search_epochs, final_epochs = int(config.one_shot.search_epochs), int(config.one_shot.final_epochs)
     reference = load_adaptive_reference(cfg.accuracy_guided.reference.history_path, total)
@@ -115,9 +117,10 @@ def run_one_shot_pruning(config, output_root):
     device, seed = str(cfg.device), int(cfg.seed)
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable; no silent CPU full run.")
-    set_random_seed(seed)
-    carrier = instantiate(cfg.model)
-    initial = torch.load(cfg.accuracy_guided.initializer.path, map_location="cpu", weights_only=True)
+    with phase_progress("shared_search", "loading the zero-epoch initializer into the gated model"):
+        set_random_seed(seed)
+        carrier = instantiate(cfg.model)
+        initial = torch.load(cfg.accuracy_guided.initializer.path, map_location="cpu", weights_only=True)
     if initial.get("trained_epochs") != 0 or initial.get("seed") != seed:
         raise ValueError("Search must start from the reference's matching zero-epoch initializer.")
     mismatch = carrier.load_state_dict(initial["model_state_dict"], strict=False)
@@ -125,7 +128,7 @@ def run_one_shot_pruning(config, output_root):
         raise ValueError(f"Incompatible zero-epoch backbone initializer: {mismatch}")
     del initial
     normalization = get_gate_normalization_metadata(carrier)
-    with isolated_diagnostic_rng():
+    with phase_progress("one-shot", "preparing validation loader and checking split"), isolated_diagnostic_rng():
         data = instantiate(cfg.dataloaders, include_test=False, loader_seed=seed)
         sample = next(iter(data.valid_dataloader))
     split_hash = mask_hash({name: list(getattr(loader.dataset, "indices", range(len(loader.dataset))))
@@ -165,6 +168,7 @@ def run_one_shot_pruning(config, output_root):
         write_json(output_root / "one_shot_state.json", state)
 
     def train_stage(name, source, mask, epochs, ledger, *, structural, identity=None, held_state=None):
+        stage_started = time.perf_counter()
         stage_cfg = deepcopy(cfg)
         _set_num_epochs(stage_cfg, epochs)
         offset = ledger["global_training_epoch"]
@@ -206,11 +210,14 @@ def run_one_shot_pruning(config, output_root):
                 "validation": {"accuracy": valid["valid_accuracy"], "ce_loss": valid["valid_ce_loss"]},
                 "train_L_gate_mean": train["train_L_gate_mean"]})
             persist()
+            epoch_progress(name, epoch, epochs, valid, ledger, time.perf_counter() - stage_started)
 
         kwargs = {"training_ledger": ledger, "runtime_initialized_callback": initialized}
         if not structural:
             kwargs.update(adaptive_epoch_offset=0, adaptive_reference_by_epoch=reference)
-        result = run_training(stage_cfg, model_initializer=initialize, epoch_end_callback=epoch_end, **kwargs)
+        with phase_progress(name, f"training {epochs} epochs on {device}; state={output_root / 'one_shot_state.json'}",
+                            ledger=ledger, total_epochs=epochs):
+            result = run_training(stage_cfg, model_initializer=initialize, epoch_end_callback=epoch_end, **kwargs)
         if result.get("test_metrics") or not result.get("test_evaluation_disabled"):
             raise AssertionError("One-shot training accessed test data.")
         if result["num_epochs_executed"] != epochs or ledger["global_training_epoch"] != offset + epochs:
@@ -233,13 +240,16 @@ def run_one_shot_pruning(config, output_root):
         with cooperative_signals():
             paths, _ = train_stage("shared_search", carrier, {}, search_epochs, search_ledger, structural=False)
             candidates = []
-            for path in paths:
-                model, checkpoint = load_model(path, carrier)
-                mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
-                candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
-                    "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
-                    "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
-                    "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
+            with phase_progress("selection", f"checking {len(paths)} search checkpoints by validation and physical size"):
+                for index, path in enumerate(paths, 1):
+                    model, checkpoint = load_model(path, carrier)
+                    mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
+                    candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
+                        "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                        "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                        "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
+                    if index % 10 == 0 or index == len(paths):
+                        progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
             selected, selection_trace = select_checkpoint_records(candidates, reference[search_epochs],
                 float(cfg.training_arguments.adaptive_lambda.hard_drop), search=True)
             selection_trace["reference_epoch"] = search_epochs
@@ -247,6 +257,7 @@ def run_one_shot_pruning(config, output_root):
                 state.update(status="no_feasible_search", selection=selection_trace)
                 write_json(output_root / "selection.json", selection_trace)
                 persist()
+                progress_message("selection", "no feasible search checkpoint; stopping before export and branch training")
                 return state
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             mask = selected["pruning_mask"]
@@ -261,6 +272,7 @@ def run_one_shot_pruning(config, output_root):
             _atomic_copy(selected["path"], output_root / "selected_checkpoint.pt")
             state["selection"] = selection
             write_json(output_root / "selection.json", selection)
+            progress_message("selection", f"selected {identity['selected_checkpoint_id']}; physical_parameters={selected['physical_cost']}")
             inherited, scratch, initialization = build_physical_branches(config, selected_carrier, mask, identity)
             if sum(p.numel() for p in inherited.parameters()) != selected["physical_cost"]:
                 raise AssertionError("Selected cost estimate differs from the actual compact tensors.")
@@ -270,7 +282,8 @@ def run_one_shot_pruning(config, output_root):
             physical_hash = state_hash(inherited.state_dict())
             # This compares the actual selected gated predictor, with its original
             # runtime/mask, to the exported model. The transfer check is separate.
-            comparison = compare_predictors(inherited, selected_carrier, data.valid_dataloader, device)
+            with phase_progress("export_only", "frozen validation comparison before training or BN recalibration"):
+                comparison = compare_predictors(inherited, selected_carrier, data.valid_dataloader, device)
             report = {**identity, "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                 "status": "measured", "training_epochs": 0, "bn_calibration_batches": 0,
                 "gated_validation": comparison["carry_carrier"], "physical_validation": comparison["physical"],
@@ -282,8 +295,9 @@ def run_one_shot_pruning(config, output_root):
             state["export_only"] = report
             write_json(export_dir / "diagnostics.json", report)
             try:
-                report["transfer_equivalence"] = committed_equivalence(selected_carrier, inherited, mask, sample,
-                    device, report_path=export_dir / "transfer_equivalence.json")
+                with phase_progress("export_only", "checking physical Conv/BN transfer equivalence"):
+                    report["transfer_equivalence"] = committed_equivalence(selected_carrier, inherited, mask, sample,
+                        device, report_path=export_dir / "transfer_equivalence.json")
             except Exception as exc:
                 report.update(status="technical_transfer_failure", non_equivalence_reason=str(exc))
                 write_json(export_dir / "diagnostics.json", report)
@@ -314,6 +328,7 @@ def run_one_shot_pruning(config, output_root):
                 "model_state_hash": physical_hash, "pruning_mask": mask, "training_epochs": 0,
                 "bn_calibration_batches": 0, "normalization_metadata": normalization})
             persist()
+            progress_message("export_only", f"diagnostics saved: {export_dir / 'diagnostics.json'}")
             held_controller = checkpoint["epoch_event"]["controller_after_feedback"]
             for name, model in (("inherited", inherited), ("scratch", scratch)):
                 branch_dir = output_root / name
@@ -330,16 +345,17 @@ def run_one_shot_pruning(config, output_root):
                 paths, stage_record = train_stage(name, model, mask, final_epochs, ledger, structural=True,
                                                   identity=identity, held_state=held_controller)
                 final_candidates = []
-                for path in paths:
-                    payload = torch.load(path, map_location="cpu", weights_only=True)
-                    final_candidates.append({"path": str(path), "epoch": int(payload["epoch"]),
-                        "accuracy": float(payload["metrics"]["valid_accuracy"]),
-                        "ce_loss": float(payload["metrics"]["valid_ce_loss"]), "physical_cost": selected["physical_cost"]})
+                with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
+                    for path in paths:
+                        payload = torch.load(path, map_location="cpu", weights_only=True)
+                        final_candidates.append({"path": str(path), "epoch": int(payload["epoch"]),
+                            "accuracy": float(payload["metrics"]["valid_accuracy"]),
+                            "ce_loss": float(payload["metrics"]["valid_ce_loss"]), "physical_cost": selected["physical_cost"]})
                 final_selected, final_selection = select_checkpoint_records(final_candidates, reference[total],
                     float(cfg.training_arguments.adaptive_lambda.hard_drop), search=False)
                 deployed, _ = load_model(final_selected["path"], model)
                 before = state_hash(deployed.state_dict())
-                with isolated_diagnostic_rng(data.valid_dataloader):
+                with phase_progress(name, "validating selected frozen deployment"), isolated_diagnostic_rng(data.valid_dataloader):
                     validation = evaluate_deployment(deployed, data.valid_dataloader, device)
                 if state_hash(deployed.state_dict()) != before:
                     raise AssertionError("Frozen deployment validation changed state.")
@@ -355,6 +371,7 @@ def run_one_shot_pruning(config, output_root):
                 atomic_checkpoint(branch_dir / "deployment.pt", {**branch, "model_state_dict": deployed.state_dict()})
                 write_json(branch_dir / "branch_state.json", branch)
                 persist()
+                progress_message(name, f"{branch['status']}; validation={validation['accuracy']:.4%}; deployment={branch_dir / 'deployment.pt'}")
             if any(branch["ledger"]["global_training_epoch"] != total for branch in state["branches"].values()):
                 raise AssertionError("Each branch must consume its complete attributed search+final budget.")
             state["status"] = "completed"
@@ -369,4 +386,5 @@ def run_one_shot_pruning(config, output_root):
         state.update(status="interrupted" if isinstance(exc, TrainingInterrupted) else "failed",
                      error=f"{type(exc).__name__}: {exc}")
         persist()
+        progress_message("one-shot", f"{state['status']}: {state['error']}; state={output_root / 'one_shot_state.json'}")
         raise

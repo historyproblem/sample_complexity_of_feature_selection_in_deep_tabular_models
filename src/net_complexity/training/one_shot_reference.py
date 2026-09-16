@@ -22,6 +22,7 @@ from .cyclic_aig import _configure_run_history, _set_num_epochs
 from .engine import run_training
 from .interruption import cooperative_signals, TrainingInterrupted
 from .one_shot_pruning_config import dense_source_paths, to_v3_config, validate_config
+from .one_shot_progress import epoch_progress, phase_progress, progress_message
 from .pruning_measurement import (
     deployment_cost, evaluate_deployment, isolated_diagnostic_rng, mask_hash, state_hash, write_json,
 )
@@ -70,7 +71,7 @@ def prepare_dense_reference(config, output_root):
     runtime = deepcopy(plan)
     _set_num_epochs(runtime, total)
 
-    with isolated_diagnostic_rng():
+    with phase_progress("dense_reference", "preparing dataset: download/cache, split and validation loader"), isolated_diagnostic_rng():
         data = instantiate(config.dataloaders, include_test=False, loader_seed=seed)
         sample = next(iter(data.valid_dataloader))
     train_count, valid_count = len(data.train_dataloader.dataset), len(data.valid_dataloader.dataset)
@@ -81,8 +82,9 @@ def prepare_dense_reference(config, output_root):
 
     # No gate construction before the shared backbone initialization. This is
     # the same plain-backbone initialization procedure as the historical pilot.
-    set_random_seed(seed)
-    source = instantiate(plan.model).cpu()
+    with phase_progress("dense_reference", "creating shared zero-epoch initializer"):
+        set_random_seed(seed)
+        source = instantiate(plan.model).cpu()
     if gates(source):
         raise AssertionError("Dense reference initialization unexpectedly contains gates")
     initial_state = {key: value.detach().cpu().clone() for key, value in source.state_dict().items()}
@@ -97,10 +99,13 @@ def prepare_dense_reference(config, output_root):
         "trained_epochs": 0, "seed": seed, "reference_protocol": REFERENCE_PROTOCOL,
         "origin": "new_shared_seed42_initializer", "prior_checkpoint_loaded": False})
     initializer_file_hash = file_hash(paths["initializer_path"])
+    progress_message("dense_reference", f"zero-epoch initializer saved: {paths['initializer_path']}")
     OmegaConf.save(plan, paths["config_path"], resolve=True)
     OmegaConf.save(runtime, job / "training_config.yaml", resolve=True)
     ledger = dict(global_training_epoch=0, search_epochs_consumed=0,
                   optimizer_updates=0, consumed_training_examples=0)
+    with phase_progress("dense_reference", "measuring initial physical model cost"):
+        initial_cost = deployment_cost(source, image_shape=tuple(sample[0].shape[1:]))
     state = {"root": str(output_root), "status": "running", "reference_protocol": REFERENCE_PROTOCOL,
         "reference_origin": "new_shared_seed42_initializer", "seed": seed,
         "common_init_hash": common_hash, "initializer_file_hash": initializer_file_hash,
@@ -111,7 +116,7 @@ def prepare_dense_reference(config, output_root):
         "reference_kind": "measured_synthetic_dense_reference" if smoke else "measured_dense_validation_reference",
         "reference_training_epochs_actually_executed": 0,
         "reference_training_cost": "external to each 150-epoch pruning branch; explicitly consumed here",
-        "initial_cost": deployment_cost(source, image_shape=tuple(sample[0].shape[1:])),
+        "initial_cost": initial_cost,
         "runtime": {"optimizer": OmegaConf.to_container(runtime.optimizer, resolve=True),
                     "scheduler": OmegaConf.to_container(runtime.scheduler, resolve=True),
                     "gate_count": 0, "lambda_coef": 0.0, "adaptive_controller_enabled": False},
@@ -166,18 +171,22 @@ def prepare_dense_reference(config, output_root):
                     "correct_count": correct, "example_count": examples},
                 "model_state_hash": state_hash(model.state_dict()), "common_init_hash": common_hash})
         persist()
+        epoch_progress("dense_reference", epoch, total, valid, ledger, time.perf_counter() - started)
 
     persist()
     try:
         with cooperative_signals():
-            result = run_training(runtime, model_initializer=initialize, runtime_initialized_callback=initialized,
-                                  training_ledger=ledger, epoch_end_callback=epoch_end)
+            with phase_progress("dense_reference", f"training {total} epochs on {device}; state={paths['state_path']}",
+                                ledger=ledger, total_epochs=total):
+                result = run_training(runtime, model_initializer=initialize, runtime_initialized_callback=initialized,
+                                      training_ledger=ledger, epoch_end_callback=epoch_end)
             if (result["num_epochs_executed"] != total or ledger["global_training_epoch"] != total
                     or len(rows) != total or ledger["search_epochs_consumed"] != 0
                     or not state["training_initializer_verified"]):
                 raise RuntimeError("Incomplete dense reference; the full training budget must be executed")
             if result.get("test_metrics") or not result.get("test_evaluation_disabled"):
                 raise AssertionError("Dense reference training accessed test data")
+            progress_message("dense_reference", "validating selected frozen dense checkpoint")
             selected = torch.load(best_path, map_location="cpu", weights_only=True)
             source.load_state_dict(selected["model_state_dict"], strict=True)
             before = state_hash(source.state_dict())
@@ -199,9 +208,11 @@ def prepare_dense_reference(config, output_root):
             atomic_checkpoint(job / "deployment.pt", {**state,
                 "model_state_dict": source.cpu().state_dict(), "artifact_type": "dense_reference_only"})
             persist()
+            progress_message("dense_reference", f"ready: epoch={state['selected_epoch']}; validation={validation['accuracy']:.4%}; source={output_root}")
             return state
     except Exception as exc:
         state.update(status="interrupted" if isinstance(exc, TrainingInterrupted) else "failed",
                      error=f"{type(exc).__name__}: {exc}")
         persist()
+        progress_message("dense_reference", f"{state['status']}: {state['error']}; state={paths['state_path']}")
         raise

@@ -91,9 +91,9 @@ def _build_cifar_transforms() -> tuple[transforms.Compose, transforms.Compose]:
 
 
 @contextmanager
-def _suppress_torchvision_download_progress():
+def _suppress_torchvision_download_progress(enabled: bool = True):
     original_tqdm = getattr(torchvision_datasets_utils, "tqdm", None)
-    if original_tqdm is None:
+    if not enabled or original_tqdm is None:
         yield
         return
 
@@ -184,6 +184,7 @@ class ClassicCVDataloaders(Dataloaders):
         image_size: int | None = None,
         include_test: bool = True,
         loader_seed: int | None = None,
+        download_progress: bool = False,
     ):
         resolved_num_workers = _resolve_num_workers(num_workers)
         resolved_pin_memory = _resolve_pin_memory(pin_memory)
@@ -220,7 +221,7 @@ class ClassicCVDataloaders(Dataloaders):
             raise ValueError(f"Unknown taskname={taskname!r}. Known tasks: {known_tasks}.")
         train_transform, test_transform = _build_cifar_transforms()
 
-        with _suppress_torchvision_download_progress():
+        with _suppress_torchvision_download_progress(enabled=not download_progress):
             full_train_dataset = task2class[normalized_taskname](
                 root=path_to_data,
                 train=True,
@@ -247,7 +248,7 @@ class ClassicCVDataloaders(Dataloaders):
 
         val_dataset = Subset(full_train_dataset, val_indices)
 
-        with _suppress_torchvision_download_progress():
+        with _suppress_torchvision_download_progress(enabled=not download_progress):
             train_augmented_dataset = task2class[normalized_taskname](
                 root=path_to_data,
                 train=True,

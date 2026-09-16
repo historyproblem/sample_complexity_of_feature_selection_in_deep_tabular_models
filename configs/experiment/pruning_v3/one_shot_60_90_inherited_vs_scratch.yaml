@@ -11,6 +11,8 @@ one_shot:
   final_epochs: 90
   branches: [inherited, scratch]
   scratch_initialization: pytorch_default_all_trainable_and_bn
+dataloaders:
+  download_progress: true
 accuracy_guided:
   guard:
     train_bn_calibration_batches: 0
