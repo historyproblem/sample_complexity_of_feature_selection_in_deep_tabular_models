@@ -1,5 +1,6 @@
 import builtins
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
@@ -14,6 +15,14 @@ from net_complexity.training.accuracy_guided_config import compose_config as com
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import launch_one_shot_pruning as launcher
+
+
+SEARCH_SWEEP = {
+    "search60_soft0p5_crit1p0": (0.005, 0.010),
+    "search60_soft1p0_crit1p5": (0.010, 0.015),
+    "search60_soft0p75_crit1p0": (0.0075, 0.010),
+    "search60_soft1p25_crit1p75": (0.0125, 0.0175),
+}
 
 
 def test_only_authorized_full_plan_composes_with_shared_base_contract():
@@ -58,6 +67,28 @@ def test_handoff_ablation_config_is_single_axis_and_method_first():
     assert report["budget"]["per_branch_budget_including_shared_search"] == 150
     assert report["budget"]["number_of_physical_branches"] == 6
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 600
+
+
+@pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
+@pytest.mark.parametrize("step_mode", ["fixed", "auto"])
+def test_search60_nightly_profiles_are_exact_v3_overrides(stem, drops, step_mode):
+    name = f"experiment/pruning_v3/{stem}_{step_mode}"
+    cfg = schema.compose_config(name)
+    assert schema.validate_config(cfg) == 150
+    adaptive = cfg.training_arguments.adaptive_lambda
+    assert (adaptive.soft_drop, adaptive.hard_drop) == drops
+    assert adaptive.update_every_search_epochs == 1
+    assert adaptive.log_step == ("auto" if step_mode == "auto" else math.log(2.0))
+    assert cfg.model.lambda_coef == cfg.optimizer.lr == 1.0e-3
+    assert cfg.scheduler._target_ == "torch.optim.lr_scheduler.CosineAnnealingLR"
+    assert cfg.scheduler.T_max == 200 and cfg.scheduler.eta_min == 0.0
+    assert cfg.one_shot.search_epochs == 60
+    assert cfg.one_shot.search_scheduler_eta_min == pytest.approx(0.00066443)
+    assert [(stage.kind, stage.epochs) for stage in cfg.accuracy_guided.stage_plan] == [
+        ("search", 60), ("commit", 0), ("recovery", 90),
+    ]
+    assert cfg.run_history.log_channel_history is True
+    assert cfg.training_arguments.evaluate_test is False
 
 
 def test_handoff_ablation_rejects_a_less_informative_execution_order():

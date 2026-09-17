@@ -158,8 +158,8 @@ def _atomic_copy(source, destination):
     temporary.replace(destination)
 
 
-def run_one_shot_pruning(config, output_root):
-    """Execute one shared search and the configured ordered compact branches."""
+def run_one_shot_pruning(config, output_root, *, search_only=False):
+    """Execute one shared search/export and, unless requested otherwise, compact branches."""
     total = validate_config(config)
     with phase_progress("one-shot", "validating reference inputs"):
         inputs = validate_inputs(config)
@@ -203,7 +203,8 @@ def run_one_shot_pruning(config, output_root):
         "source_weights": "shared_zero_epoch_initializer_only", "dense_reference_weights_loaded": False}
     search_ledger = dict(global_training_epoch=0, search_epochs_consumed=0,
                          optimizer_updates=0, consumed_training_examples=0)
-    state = {"protocol": protocol, "status": "running", "test_evaluated": False,
+    state = {"protocol": protocol, "status": "running", "search_only": bool(search_only),
+        "test_evaluated": False,
         "provenance": provenance, "per_branch_total_allocated": total,
         "shared_search_ledger": search_ledger, "stages": {}, "selection": None,
         "export_only": None, "branches": {}, "compute_ledger": {}}
@@ -239,6 +240,7 @@ def run_one_shot_pruning(config, output_root):
         optimizer_state_policy="fresh",
         scheduler_state_policy=FRESH_SCHEDULER,
         scheduler_horizon=None,
+        scheduler_eta_min=None,
         training_seed=None,
     ):
         stage_started = time.perf_counter()
@@ -246,6 +248,8 @@ def run_one_shot_pruning(config, output_root):
         _set_num_epochs(stage_cfg, epochs)
         if scheduler_horizon is not None:
             OmegaConf.update(stage_cfg, "scheduler.T_max", int(scheduler_horizon), merge=False)
+        if scheduler_eta_min is not None:
+            OmegaConf.update(stage_cfg, "scheduler.eta_min", float(scheduler_eta_min), merge=False)
         if training_seed is not None:
             OmegaConf.update(stage_cfg, "seed", int(training_seed), merge=False)
             OmegaConf.update(stage_cfg, "dataloaders.loader_seed", int(training_seed), merge=False)
@@ -339,6 +343,9 @@ def run_one_shot_pruning(config, output_root):
                 int(config.one_shot.search_scheduler_horizon_epochs)
                 if protocol == HANDOFF_PROTOCOL else search_epochs
             )
+            search_scheduler_eta_min = float(
+                getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
+            )
             paths, _ = train_stage(
                 "shared_search",
                 carrier,
@@ -347,6 +354,7 @@ def run_one_shot_pruning(config, output_root):
                 search_ledger,
                 structural=False,
                 scheduler_horizon=search_scheduler_horizon,
+                scheduler_eta_min=search_scheduler_eta_min,
                 scheduler_state_policy="new_search_cosine",
                 training_seed=seed,
             )
@@ -453,6 +461,14 @@ def run_one_shot_pruning(config, output_root):
                 "bn_calibration_batches": 0, "normalization_metadata": normalization})
             persist()
             progress_message("export_only", f"diagnostics saved: {export_dir / 'diagnostics.json'}")
+            if search_only:
+                state["status"] = "search_only_completed"
+                persist()
+                progress_message(
+                    "one-shot",
+                    "search-only run completed after checkpoint selection and physical export; recovery skipped",
+                )
+                return state
             held_controller = checkpoint["epoch_event"]["controller_after_feedback"]
             for branch_spec in branch_plan:
                 name = branch_spec["id"]

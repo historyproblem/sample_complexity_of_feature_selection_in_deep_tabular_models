@@ -116,10 +116,13 @@ def validate_config_v3(config):
               "gap_window", "update_every_search_epochs", "initial_search_warmup", "reentry_samples", "log_step"},
           "adaptive_lambda (legacy rate boost, targets and open-bias recovery are unsupported)")
     _require(a["enabled"] is True and a["control_mode"] == "accuracy_only", "adaptive accuracy-only controller required")
-    _require(all(_number(a[k]) for k in ("alpha_init", "alpha_min", "alpha_max", "soft_drop", "hard_drop", "log_step")),
+    _require(all(_number(a[k]) for k in ("alpha_init", "alpha_min", "alpha_max", "soft_drop", "hard_drop"))
+             and (_number(a["log_step"]) or a["log_step"] == "auto"),
              "controller scalars must be finite numbers")
     _require(0 < a["alpha_min"] <= a["alpha_init"] <= a["alpha_max"], "invalid alpha bounds")
-    _require(0 <= a["soft_drop"] < a["hard_drop"] <= 1 and a["log_step"] > 0, "invalid accuracy drops/log step")
+    _require(0 <= a["soft_drop"] < a["hard_drop"] <= 1
+             and (a["log_step"] == "auto" or a["log_step"] > 0),
+             "invalid accuracy drops/log step")
     for key in ("gap_window", "update_every_search_epochs", "reentry_samples", "initial_search_warmup"):
         _require(type(a[key]) is int and a[key] >= (0 if key == "initial_search_warmup" else 1),
                  f"{key} must be an integer in its valid range")

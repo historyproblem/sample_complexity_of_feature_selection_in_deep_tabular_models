@@ -42,7 +42,6 @@ OptimizerInitializer = Callable[
 ]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
-AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
 AUTO_LOG_STEP_TARGET_LAMBDA = 1e1
 AUTO_LOG_STEP_EPOCH_FRACTION = 1.0 / 3.0
 
@@ -1377,6 +1376,7 @@ def _resolve_adaptive_lambda_log_step_init(
     training_arguments: DictConfig,
     adaptive_cfg: DictConfig,
     *,
+    initial_lambda_coef: float,
     warmup_epochs: int,
     update_every_epochs: int,
 ) -> float:
@@ -1389,6 +1389,15 @@ def _resolve_adaptive_lambda_log_step_init(
         raise ValueError("training_arguments.num_epochs must be > 0 for adaptive_lambda.log_step_init=auto.")
     if update_every_epochs <= 0:
         raise ValueError("adaptive_lambda.update_every_epochs must be >= 1.")
+    if not math.isfinite(initial_lambda_coef) or initial_lambda_coef <= 0.0:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef > 0."
+        )
+    if initial_lambda_coef >= AUTO_LOG_STEP_TARGET_LAMBDA:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef "
+            f"< {AUTO_LOG_STEP_TARGET_LAMBDA:g}."
+        )
 
     target_epoch = float(num_epochs) * AUTO_LOG_STEP_EPOCH_FRACTION
     update_window = target_epoch - float(warmup_epochs)
@@ -1399,7 +1408,7 @@ def _resolve_adaptive_lambda_log_step_init(
             "within the first third of training."
         )
 
-    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / AUTO_LOG_STEP_INITIAL_LAMBDA) / float(update_slots)
+    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / initial_lambda_coef) / float(update_slots)
 
 
 def _build_adaptive_lambda(
@@ -1430,6 +1439,15 @@ def _build_adaptive_lambda(
             raise ValueError(f"accuracy_only rejects unknown/legacy controller options: {sorted(unknown)}")
         if baseline_accuracy_by_epoch is None:
             raise ValueError("accuracy_only requires a supplied immutable validation reference")
+        if _is_auto_log_step(data["log_step"]):
+            auto_cfg = OmegaConf.create({"log_step_init": "auto"})
+            data["log_step"] = _resolve_adaptive_lambda_log_step_init(
+                training_arguments,
+                auto_cfg,
+                initial_lambda_coef=float(initial_lambda_coef),
+                warmup_epochs=int(data["initial_search_warmup"]),
+                update_every_epochs=int(data["update_every_search_epochs"]),
+            )
         kwargs = {key: value for key, value in data.items()
                   if key not in {"enabled", "control_mode", "alpha_init"}}
         return AccuracyOnlyLambdaController(initial_lambda_coef=initial_lambda_coef,
@@ -1455,6 +1473,7 @@ def _build_adaptive_lambda(
     log_step_init = _resolve_adaptive_lambda_log_step_init(
         training_arguments,
         cfg,
+        initial_lambda_coef=float(initial_lambda_coef),
         warmup_epochs=warmup_epochs,
         update_every_epochs=update_every_epochs,
     )

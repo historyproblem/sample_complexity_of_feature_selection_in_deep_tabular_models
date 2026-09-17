@@ -99,6 +99,11 @@ def main(argv=None):
     parser.add_argument("--test-config", type=Path, default=DEFAULT_TEST_CONFIG,
                         help="Official-test inference profile run automatically after frozen deployments are finalized")
     parser.add_argument("--dry-run", action="store_true", help="Resolve paths/contracts without training, CUDA, or dataset construction")
+    parser.add_argument(
+        "--search-only",
+        action="store_true",
+        help="Stop after 60-epoch search, checkpoint selection and physical export; do not run recovery or test",
+    )
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
@@ -126,8 +131,21 @@ def main(argv=None):
         report = (_new_reference_preview(config, reference_output, output,
                                          prepare_only=args.prepare_reference is not None)
                   if new_reference else resolved_one_shot(config, output_root=args.output))
+        if args.search_only:
+            search_epochs = int(config.one_shot.search_epochs)
+            dense_epochs = int(report["budget"].get("dense_reference_training_epochs", 0))
+            report["mode"] = "search_only"
+            report["budget"].update({
+                "recovery_training_epochs_this_command": 0,
+                "pruning_training_epochs_this_command": search_epochs,
+                "total_unique_training_epochs_this_command": dense_epochs + search_epochs,
+            })
+        report["requested_execution"] = {
+            "search_only": bool(args.search_only),
+            "stops_after": "physical_export" if args.search_only else "configured_recovery",
+        }
         report["official_test_evaluation"] = {
-            "automatic_after_frozen_deployments": args.prepare_reference is None,
+            "automatic_after_frozen_deployments": args.prepare_reference is None and not args.search_only,
             "config": str(args.test_config.expanduser().resolve()),
             "output": str((output / "test_evaluation").resolve()),
             "training": False, "batchnorm_updates": False, "selection": False,
@@ -153,7 +171,8 @@ def main(argv=None):
     # Preview/preflight cannot import or accidentally invoke the training engine.
     with phase_progress("runtime", "loading one-shot training code"):
         from net_complexity.training.one_shot_pruning import run_one_shot_pruning
-    result = run_one_shot_pruning(config, output)
+    result = (run_one_shot_pruning(config, output, search_only=True)
+              if args.search_only else run_one_shot_pruning(config, output))
     clean_clone_state = None
     if args.from_scratch:
         from net_complexity.training.pruning_measurement import write_json

@@ -55,6 +55,26 @@ def test_new_reference_preview_needs_no_artifacts_runtime_cuda_or_data(
     assert not list(tmp_path.iterdir())
 
 
+def test_search_only_preview_reports_no_recovery_or_test_cost(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    report = launcher.main([
+        "--config-name", "experiment/pruning_v3/search60_soft0p5_crit1p0_auto",
+        "--from-scratch", "--search-only", "--dry-run",
+    ])
+
+    assert json.loads(capsys.readouterr().out) == report
+    assert report["mode"] == "search_only"
+    assert report["requested_execution"] == {
+        "search_only": True,
+        "stops_after": "physical_export",
+    }
+    assert report["budget"]["pruning_training_epochs_this_command"] == 60
+    assert report["budget"]["recovery_training_epochs_this_command"] == 0
+    assert report["budget"]["total_unique_training_epochs_this_command"] == 210
+    assert report["official_test_evaluation"]["automatic_after_frozen_deployments"] is False
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("args", [
     ["--from-scratch", "--dense-source", "old"],
     ["--from-scratch", "--prepare-reference", "new"],

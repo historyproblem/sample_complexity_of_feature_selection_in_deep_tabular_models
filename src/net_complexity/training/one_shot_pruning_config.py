@@ -88,18 +88,24 @@ def validate_config(config):
     _require(isinstance(one, dict), "one_shot mapping is required")
     protocol = one.get("protocol")
     if protocol == PROTOCOL:
-        fields = {
+        required_fields = {
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        _require(set(one) == fields,
-                 f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
+        optional_fields = {"search_scheduler_eta_min"}
+        _require(required_fields <= set(one) <= required_fields | optional_fields,
+                 f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
+                 f"missing={sorted(required_fields - set(one))}")
         _require(one["branches"] == ["inherited", "scratch"],
                  "exactly inherited and scratch branches required")
         _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",
                  "scratch must reinitialize every trainable parameter and BN state")
         _require(one["inherited_optimizer_state"] == MAPPED_OPTIMIZER,
                  "inherited branch must map AdamW moments and step from the selected search checkpoint")
+        if "search_scheduler_eta_min" in one:
+            eta_min = one["search_scheduler_eta_min"]
+            _require(type(eta_min) in (float, int) and 0 <= eta_min < plain["optimizer"]["lr"],
+                     "search_scheduler_eta_min must be in [0, optimizer.lr)")
     elif protocol == HANDOFF_PROTOCOL:
         fields = {
             "protocol", "search_epochs", "final_epochs",

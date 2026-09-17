@@ -256,6 +256,29 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
         run_one_shot_pruning(cfg, output)
 
 
+def test_search_only_stops_after_selected_checkpoint_and_physical_export(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    OmegaConf.update(cfg, "one_shot.search_scheduler_eta_min", 0.0005, force_add=True)
+    output = tmp_path / "run"
+
+    result = run_one_shot_pruning(cfg, output, search_only=True)
+
+    assert result["status"] == "search_only_completed"
+    assert result["search_only"] is True
+    assert result["branches"] == {}
+    assert result["compute_ledger"]["shared_search_epochs"] == 3
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 3
+    assert result["stages"]["shared_search"]["scheduler"]["T_max"] == 3
+    assert result["stages"]["shared_search"]["scheduler"]["eta_min"] == 0.0005
+    assert (output / "selected_checkpoint.pt").is_file()
+    assert (output / "selection.json").is_file()
+    assert (output / "export_only/deployment.pt").is_file()
+    diagnostics = json.loads((output / "export_only/diagnostics.json").read_text())
+    assert diagnostics["physical_cost"]["physical_total_parameters"] > 0
+    assert not (output / "inherited").exists()
+    assert not (output / "scratch").exists()
+
+
 def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):
     cfg = handoff_ablation_fixture(tmp_path / "inputs")
     plan = resolved_branch_plan(cfg)
