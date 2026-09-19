@@ -35,7 +35,7 @@ model:
   lambda_coef: 0.0001
   bypass_on_zero_lambda: true
   entropy_regularization: plus_negative_entropy
-  entropy_regularization_coef: 0.3
+  entropy_regularization_coef: 0.1
   backbone:
     resnet_block:
       temperature: 1.0
@@ -44,7 +44,25 @@ training_arguments:
   lambda_warmup:
     enabled: false
   adaptive_lambda:
-    enabled: false
+    enabled: true
+    warmup_epochs: 0
+    update_every_epochs: 1
+    acc_window: 3
+    baseline_history_dir: outputs/runs/20260822_142918_resnet_baseline_cifar10
+    lambda_min: 1e-8
+    lambda_max: 100.0
+    log_step_init: 0.22314355131420976
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: true
+    prune_rate_low_per_epoch: 0.02
+    prune_rate_high_per_epoch: 0.07
+    log_step_boost_factor: 2.0
+    log_step_max_boost_level: 2
+    adaptive_log_step_max_epoch: null
+    soft_drop: 0.02
+    hard_drop: 0.04
+    recovery:
+      enabled: false
   batchnorm_recalibration:
     enabled: false
 
@@ -53,14 +71,16 @@ cyclic_channel_pruning:
   max_cycles: 10
   drop_mode: threshold
   g_prob_threshold: 0.1
-  threshold_max_param_fraction: 0.10
-
+  threshold_max_param_fraction: 0.20
   # Epochs per intermediate Gumbel (search) cycle.
-  gumbel_epochs: 60
+  gumbel_epochs: 120
 
-  # Epochs for each intermediate no-regularization, structurally-pruned
-  # recovery pass, run after every cycle's drop decision.
-  recovery_epochs: 20
+  # Epochs per intermediate AIG (search) cycle.
+  aig_epochs: 120
+
+  # Epochs for each intermediate no-regularization recovery pass, run after
+  # every cycle's drop decision (not only at the end).
+  recovery_epochs: 150
 
   # Epochs for the last recovery pass (falls back to recovery_epochs if unset).
   final_epochs: 150
@@ -69,7 +89,7 @@ cyclic_channel_pruning:
 
 mlflow:
   enabled: true
-  experiment_name: feature_selection_experiment
+  experiment_name: iterative_channel_pruning_entropy_regularization_coef_0.1
   run_name: "ablation_ours_iterative_channels_resnet50_cifar10_thr${cyclic_channel_pruning.g_prob_threshold}"
   tags:
     model_type: "ResNet50_Gumbel"
