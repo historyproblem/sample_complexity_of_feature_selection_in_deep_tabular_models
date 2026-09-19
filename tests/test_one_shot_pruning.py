@@ -15,6 +15,7 @@ from net_complexity.models.pruning_budget import gates, select_learned_closed
 from net_complexity.training.one_shot_pruning import build_physical_branches, run_one_shot_pruning
 from net_complexity.training.one_shot_pruning_config import (
     FRESH_SCHEDULER,
+    MAPPED_REPEATS_PROTOCOL,
     MAPPED_OPTIMIZER,
     RESUMED_SCHEDULER,
     resolved_branch_plan,
@@ -277,6 +278,91 @@ def test_search_only_stops_after_selected_checkpoint_and_physical_export(tmp_pat
     assert diagnostics["physical_cost"]["physical_total_parameters"] > 0
     assert not (output / "inherited").exists()
     assert not (output / "scratch").exists()
+
+
+def test_completed_search_can_feed_two_mapped_recoveries_with_fresh_schedulers(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    OmegaConf.update(cfg, "one_shot.search_scheduler_eta_min", 0.0005, force_add=True)
+    search_dir = tmp_path / "search"
+    search_result = run_one_shot_pruning(cfg, search_dir, search_only=True)
+
+    recovery_cfg = deepcopy(cfg)
+    OmegaConf.update(recovery_cfg, "one_shot", {
+        "protocol": MAPPED_REPEATS_PROTOCOL,
+        "search_epochs": 3,
+        "final_epochs": 2,
+        "search_scheduler_horizon_epochs": 3,
+        "search_scheduler_eta_min": 0.0005,
+        "execution_order": "repeat_major",
+        "methods": [{
+            "id": "mapped_optimizer_fresh_scheduler",
+            "model_state": "selected_surviving_state",
+            "optimizer_state": MAPPED_OPTIMIZER,
+            "scheduler_state": FRESH_SCHEDULER,
+        }],
+        "repeats": [
+            {"id": "repeat_1", "training_seed": 42},
+            {"id": "repeat_2", "training_seed": 43},
+        ],
+    }, merge=False, force_add=True)
+    recovery_cfg.accuracy_guided.stage_plan[2].restart_policy = (
+        "branch_specific_optimizer_scheduler_handoff"
+    )
+    validate_config(recovery_cfg)
+
+    recovery_dir = tmp_path / "recovery"
+    result = run_one_shot_pruning(
+        recovery_cfg,
+        recovery_dir,
+        reuse_search_from=search_dir,
+    )
+
+    assert search_result["status"] == "search_only_completed"
+    assert result["status"] == "completed"
+    assert result["reused_search"] == {
+        "source": str(search_dir.resolve()),
+        "source_protocol": "pruning_v3_one_shot_60_90",
+        "source_status": "search_only_completed",
+        "training_epochs_reused": 3,
+        "training_epochs_executed_by_this_command": 0,
+    }
+    assert not (recovery_dir / "shared_search/training").exists()
+    assert list(result["branches"]) == [
+        "mapped_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_fresh_scheduler__repeat_2",
+    ]
+    selected = torch.load(
+        recovery_dir / "selected_checkpoint.pt", map_location="cpu", weights_only=True,
+    )
+    selected_steps = {
+        int(item["step"]) for item in selected["optimizer_state_dict"]["state"].values()
+    }
+    assert len(selected_steps) == 1
+    selected_step = selected_steps.pop()
+    for index, (name, branch) in enumerate(result["branches"].items(), start=42):
+        assert branch["training_seed"] == index
+        assert branch["optimizer_state_initialization"] == MAPPED_OPTIMIZER
+        assert branch["scheduler_state_initialization"] == FRESH_SCHEDULER
+        assert branch["optimizer_handoff"]["source_step_min"] == selected_step
+        assert branch["scheduler_handoff"] is None
+        first = torch.load(
+            next((recovery_dir / name).rglob("epoch_0001.pt")),
+            map_location="cpu",
+            weights_only=True,
+        )
+        assert first["scheduler_state_dict"]["T_max"] == 2
+        assert first["scheduler_step_count"] == 1
+        assert {int(item["step"]) for item in first["optimizer_state_dict"]["state"].values()} == {
+            selected_step + 2
+        }
+    ledger = result["compute_ledger"]
+    assert ledger["shared_search_epochs"] == ledger["reused_search_epochs"] == 3
+    assert ledger["branch_final_training_epochs"] == {
+        "mapped_optimizer_fresh_scheduler__repeat_1": 2,
+        "mapped_optimizer_fresh_scheduler__repeat_2": 2,
+    }
+    assert ledger["attributed_training_epochs_including_reused_search"] == 7
+    assert ledger["actual_training_epochs_executed"] == 4
 
 
 def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):

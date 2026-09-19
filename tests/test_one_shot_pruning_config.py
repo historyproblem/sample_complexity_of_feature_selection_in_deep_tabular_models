@@ -69,6 +69,29 @@ def test_handoff_ablation_config_is_single_axis_and_method_first():
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 600
 
 
+def test_target5m_recovery_config_maps_adamw_and_restarts_cosine_twice():
+    cfg = schema.compose_config(schema.MAPPED_REPEATS_CONFIG_NAME)
+    assert schema.validate_config(cfg) == 150
+    plan = schema.resolved_branch_plan(cfg)
+    assert [branch["id"] for branch in plan] == [
+        "mapped_optimizer_fresh_scheduler__repeat_1",
+        "mapped_optimizer_fresh_scheduler__repeat_2",
+    ]
+    assert [branch["training_seed"] for branch in plan] == [42, 43]
+    assert {branch["optimizer_state"] for branch in plan} == {schema.MAPPED_OPTIMIZER}
+    assert {branch["scheduler_state"] for branch in plan} == {schema.FRESH_SCHEDULER}
+    assert cfg.one_shot.search_scheduler_horizon_epochs == 60
+    assert cfg.one_shot.search_scheduler_eta_min == pytest.approx(0.00066443)
+    assert cfg.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.14)
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["comparison_axis"] == (
+        "recovery seed only; mapped optimizer and fresh scheduler fixed"
+    )
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+    assert report["budget"]["total_unique_training_epochs_all_branches"] == 240
+
+
 @pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
 @pytest.mark.parametrize("step_mode", ["fixed", "auto"])
 def test_search60_nightly_profiles_are_exact_v3_overrides(stem, drops, step_mode):

@@ -158,8 +158,10 @@ def _atomic_copy(source, destination):
     temporary.replace(destination)
 
 
-def run_one_shot_pruning(config, output_root, *, search_only=False):
+def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search_from=None):
     """Execute one shared search/export and, unless requested otherwise, compact branches."""
+    if search_only and reuse_search_from is not None:
+        raise ValueError("search_only and reuse_search_from are mutually exclusive")
     total = validate_config(config)
     with phase_progress("one-shot", "validating reference inputs"):
         inputs = validate_inputs(config)
@@ -201,6 +203,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False):
         "resolved_config_sha256": hashlib.sha256(OmegaConf.to_yaml(config, resolve=True).encode()).hexdigest(),
         "torch_version": str(torch.__version__), "device": device,
         "source_weights": "shared_zero_epoch_initializer_only", "dense_reference_weights_loaded": False}
+    if reuse_search_from is not None:
+        provenance["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())
     search_ledger = dict(global_training_epoch=0, search_epochs_consumed=0,
                          optimizer_updates=0, consumed_training_examples=0)
     state = {"protocol": protocol, "status": "running", "search_only": bool(search_only),
@@ -213,13 +217,23 @@ def run_one_shot_pruning(config, output_root, *, search_only=False):
     def persist():
         finals = {name: max(0, record["ledger"]["global_training_epoch"] - search_epochs)
                   for name, record in state["branches"].items()}
+        reused_search_epochs = (search_ledger["global_training_epoch"]
+                                if reuse_search_from is not None else 0)
+        executed_search_epochs = search_ledger["global_training_epoch"] - reused_search_epochs
+        executed_search_updates = search_ledger["optimizer_updates"] if reuse_search_from is None else 0
+        executed_search_examples = (search_ledger["consumed_training_examples"]
+                                    if reuse_search_from is None else 0)
         state["compute_ledger"] = {"shared_search_epochs": search_ledger["global_training_epoch"],
+            "reused_search_epochs": reused_search_epochs,
             "branch_final_training_epochs": finals,
-            "actual_training_epochs_executed": search_ledger["global_training_epoch"] + sum(finals.values()),
-            "actual_optimizer_updates": search_ledger["optimizer_updates"] + sum(
+            "attributed_training_epochs_including_reused_search": (
+                search_ledger["global_training_epoch"] + sum(finals.values())
+            ),
+            "actual_training_epochs_executed": executed_search_epochs + sum(finals.values()),
+            "actual_optimizer_updates": executed_search_updates + sum(
                 record["ledger"]["optimizer_updates"] - search_ledger["optimizer_updates"]
                 for record in state["branches"].values()),
-            "actual_consumed_training_examples": search_ledger["consumed_training_examples"] + sum(
+            "actual_consumed_training_examples": executed_search_examples + sum(
                 record["ledger"]["consumed_training_examples"] - search_ledger["consumed_training_examples"]
                 for record in state["branches"].values())}
         state["wall_seconds"] = time.perf_counter() - started
@@ -339,45 +353,110 @@ def run_one_shot_pruning(config, output_root, *, search_only=False):
     persist()
     try:
         with cooperative_signals():
-            search_scheduler_horizon = (
-                int(config.one_shot.search_scheduler_horizon_epochs)
-                if protocol == HANDOFF_PROTOCOL else search_epochs
-            )
-            search_scheduler_eta_min = float(
-                getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
-            )
-            paths, _ = train_stage(
-                "shared_search",
-                carrier,
-                {},
-                search_epochs,
-                search_ledger,
-                structural=False,
-                scheduler_horizon=search_scheduler_horizon,
-                scheduler_eta_min=search_scheduler_eta_min,
-                scheduler_state_policy="new_search_cosine",
-                training_seed=seed,
-            )
-            candidates = []
-            with phase_progress("selection", f"checking {len(paths)} search checkpoints by validation and physical size"):
-                for index, path in enumerate(paths, 1):
-                    model, checkpoint = load_model(path, carrier)
-                    mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
-                    candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
-                        "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
-                        "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
-                        "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
-                    if index % 10 == 0 or index == len(paths):
-                        progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
-            selected, selection_trace = select_checkpoint_records(candidates, reference[search_epochs],
-                float(cfg.training_arguments.adaptive_lambda.hard_drop), search=True)
-            selection_trace["reference_epoch"] = search_epochs
-            if selection_trace["no_feasible_search"]:
-                state.update(status="no_feasible_search", selection=selection_trace)
-                write_json(output_root / "selection.json", selection_trace)
-                persist()
-                progress_message("selection", "no feasible search checkpoint; stopping before export and branch training")
-                return state
+            if reuse_search_from is None:
+                search_scheduler_horizon = (
+                    int(config.one_shot.search_scheduler_horizon_epochs)
+                    if protocol == HANDOFF_PROTOCOL else search_epochs
+                )
+                search_scheduler_eta_min = float(
+                    getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
+                )
+                paths, _ = train_stage(
+                    "shared_search",
+                    carrier,
+                    {},
+                    search_epochs,
+                    search_ledger,
+                    structural=False,
+                    scheduler_horizon=search_scheduler_horizon,
+                    scheduler_eta_min=search_scheduler_eta_min,
+                    scheduler_state_policy="new_search_cosine",
+                    training_seed=seed,
+                )
+                candidates = []
+                with phase_progress("selection", f"checking {len(paths)} search checkpoints by validation and physical size"):
+                    for index, path in enumerate(paths, 1):
+                        model, checkpoint = load_model(path, carrier)
+                        mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
+                        candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
+                            "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                            "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                            "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
+                        if index % 10 == 0 or index == len(paths):
+                            progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
+                selected, selection_trace = select_checkpoint_records(candidates, reference[search_epochs],
+                    float(cfg.training_arguments.adaptive_lambda.hard_drop), search=True)
+                selection_trace["reference_epoch"] = search_epochs
+                if selection_trace["no_feasible_search"]:
+                    state.update(status="no_feasible_search", selection=selection_trace)
+                    write_json(output_root / "selection.json", selection_trace)
+                    persist()
+                    progress_message("selection", "no feasible search checkpoint; stopping before export and branch training")
+                    return state
+            else:
+                source_root = Path(reuse_search_from).expanduser().resolve()
+                source_state_path = source_root / "one_shot_state.json"
+                source_selection_path = source_root / "selection.json"
+                source_diagnostics_path = source_root / "export_only/diagnostics.json"
+                source_checkpoint_path = source_root / "selected_checkpoint.pt"
+                required = (source_state_path, source_selection_path,
+                            source_diagnostics_path, source_checkpoint_path)
+                missing = [str(path) for path in required if not path.is_file()]
+                if missing:
+                    raise FileNotFoundError("Reusable search is incomplete; missing: " + ", ".join(missing))
+                source_state = json.loads(source_state_path.read_text())
+                source_selection = json.loads(source_selection_path.read_text())
+                source_diagnostics = json.loads(source_diagnostics_path.read_text())
+                if source_state.get("status") != "search_only_completed":
+                    raise ValueError("Reusable search must have status=search_only_completed")
+                source_provenance = source_state.get("provenance", {})
+                if source_provenance.get("split_indices_hash") != split_hash:
+                    raise ValueError("Reusable search used a different train/validation split")
+                source_initializer_hash = source_provenance.get("inputs", {}).get(
+                    "initializer_model_state_hash"
+                )
+                if source_initializer_hash != inputs.get("initializer_model_state_hash"):
+                    raise ValueError("Reusable search used a different zero-epoch initializer")
+                if int(source_state.get("shared_search_ledger", {}).get("search_epochs_consumed", -1)) != search_epochs:
+                    raise ValueError("Reusable search did not complete the configured search budget")
+                if file_hash(source_checkpoint_path) != source_selection.get("selected_checkpoint_hash"):
+                    raise ValueError("Reusable selected checkpoint hash differs from selection.json")
+                source_mask = source_selection.get("pruning_mask")
+                if not isinstance(source_mask, dict) or mask_hash(source_mask) != source_selection.get("mask_hash"):
+                    raise ValueError("Reusable search mask differs from selection.json identity")
+                source_payload = torch.load(source_checkpoint_path, map_location="cpu", weights_only=True)
+                if int(source_payload.get("epoch", -1)) != int(source_selection.get("selected_epoch", -2)):
+                    raise ValueError("Reusable checkpoint epoch differs from selection.json")
+                source_ledger = source_selection.get("search_ledger_consumed")
+                if not isinstance(source_ledger, dict):
+                    raise ValueError("Reusable selection has no consumed search ledger")
+                search_ledger.update(deepcopy(source_ledger))
+                state["stages"]["shared_search"] = {
+                    **deepcopy(source_state["stages"]["shared_search"]),
+                    "reused_from": str(source_root),
+                    "training_performed_by_this_command": False,
+                }
+                selected = {
+                    "epoch": int(source_selection["selected_epoch"]),
+                    "path": str(source_checkpoint_path),
+                    "accuracy": float(source_diagnostics["gated_validation"]["accuracy"]),
+                    "ce_loss": float(source_diagnostics["gated_validation"]["ce_loss"]),
+                    "physical_cost": int(source_diagnostics["physical_cost"]["physical_total_parameters"]),
+                    "pruning_mask": source_mask,
+                    "selector": source_diagnostics["selector"],
+                }
+                selection_trace = deepcopy(source_selection["trace"])
+                state["reused_search"] = {
+                    "source": str(source_root),
+                    "source_protocol": source_state.get("protocol"),
+                    "source_status": source_state["status"],
+                    "training_epochs_reused": search_epochs,
+                    "training_epochs_executed_by_this_command": 0,
+                }
+                progress_message(
+                    "shared_search",
+                    f"reusing completed search selection from {source_root}; epoch={selected['epoch']}",
+                )
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:
                 raise ValueError("Selected search checkpoint has no optimizer_state_dict for handoff.")
@@ -397,6 +476,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False):
                 "quality_threshold": selection_trace["quality_threshold"], "reference_epoch": search_epochs,
                 "policy": "best_feasible_compact", "trace": selection_trace,
                 "search_ledger_consumed": deepcopy(search_ledger)}
+            if reuse_search_from is not None:
+                selection["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())
             _atomic_copy(selected["path"], output_root / "selected_checkpoint.pt")
             state["selection"] = selection
             write_json(output_root / "selection.json", selection)

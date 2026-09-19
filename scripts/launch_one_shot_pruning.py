@@ -104,6 +104,12 @@ def main(argv=None):
         action="store_true",
         help="Stop after 60-epoch search, checkpoint selection and physical export; do not run recovery or test",
     )
+    parser.add_argument(
+        "--reuse-search",
+        type=Path,
+        metavar="PATH",
+        help="Reuse a completed search-only run and execute only its configured physical recovery branches",
+    )
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
@@ -111,7 +117,11 @@ def main(argv=None):
         parser.error("--reference-output requires --from-scratch; use --prepare-reference PATH for preparation alone")
     if args.prepare_reference is not None and args.output is not None:
         parser.error("--output is for one-shot results; --prepare-reference PATH creates only the reference")
+    if args.search_only and args.reuse_search is not None:
+        parser.error("--search-only and --reuse-search are mutually exclusive")
     new_reference = args.from_scratch or args.prepare_reference is not None
+    if new_reference and args.reuse_search is not None:
+        parser.error("--reuse-search requires an existing --dense-source; it cannot create a new reference")
     reference_output = ((args.prepare_reference if args.prepare_reference is not None
                          else args.reference_output or DEFAULT_REFERENCE_OUTPUT).expanduser().resolve()
                         if new_reference else None)
@@ -140,10 +150,23 @@ def main(argv=None):
                 "pruning_training_epochs_this_command": search_epochs,
                 "total_unique_training_epochs_this_command": dense_epochs + search_epochs,
             })
-        report["requested_execution"] = {
+        if args.reuse_search is not None:
+            final_epochs = int(config.one_shot.final_epochs)
+            branches = len(report["execution_policy"]["branch_plan"])
+            report["mode"] = "reuse_search_then_recovery"
+            report["reused_search"] = str(args.reuse_search.expanduser().resolve())
+            report["budget"].update({
+                "search_training_epochs_this_command": 0,
+                "recovery_training_epochs_this_command": branches * final_epochs,
+                "total_unique_training_epochs_this_command": branches * final_epochs,
+            })
+        requested_execution = {
             "search_only": bool(args.search_only),
             "stops_after": "physical_export" if args.search_only else "configured_recovery",
         }
+        if args.reuse_search is not None:
+            requested_execution["reuse_search"] = str(args.reuse_search.expanduser().resolve())
+        report["requested_execution"] = requested_execution
         report["official_test_evaluation"] = {
             "automatic_after_frozen_deployments": args.prepare_reference is None and not args.search_only,
             "config": str(args.test_config.expanduser().resolve()),
@@ -171,8 +194,12 @@ def main(argv=None):
     # Preview/preflight cannot import or accidentally invoke the training engine.
     with phase_progress("runtime", "loading one-shot training code"):
         from net_complexity.training.one_shot_pruning import run_one_shot_pruning
-    result = (run_one_shot_pruning(config, output, search_only=True)
-              if args.search_only else run_one_shot_pruning(config, output))
+    if args.reuse_search is not None:
+        result = run_one_shot_pruning(config, output, reuse_search_from=args.reuse_search)
+    elif args.search_only:
+        result = run_one_shot_pruning(config, output, search_only=True)
+    else:
+        result = run_one_shot_pruning(config, output)
     clean_clone_state = None
     if args.from_scratch:
         from net_complexity.training.pruning_measurement import write_json
