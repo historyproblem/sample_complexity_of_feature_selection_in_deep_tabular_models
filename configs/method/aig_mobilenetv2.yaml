@@ -1,0 +1,25 @@
+# @package _global_
+#
+# MobileNetV2 flavour of configs/method/aig.yaml — this project's own AIG
+# variant (AIGRegularizationLoss, plus the entropy_regularization mechanism
+# enabled per-experiment), as opposed to the paper's target-rate loss in
+# aig_target_rate_mobilenetv2.yaml.
+#
+# Gates live only on blocks with a skip connection; see
+# aig_target_rate_mobilenetv2.yaml for the rationale.
+
+model:
+  bypass_on_zero_lambda: false
+  # disabled | plus_negative_entropy | minus_negative_entropy
+  entropy_regularization: disabled
+  entropy_regularization_coef: 1.0
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.AIGRegularizationLoss
+    norm: l2
+  backbone:
+    block:
+      _target_: net_complexity.wrappers.AIGInvertedResidual
+      _partial_: true
+      gate_regularization: l2_gate

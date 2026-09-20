@@ -1,0 +1,31 @@
+# @package _global_
+#
+# Classic ConvNet-AIG baseline (Veit & Belongie, IJCV 2020) — MobileNetV2
+# flavour of configs/method/aig_target_rate.yaml. Same AIGTargetRateLoss
+# (Eq. 10) and the same AIGBlockGate; only the gated block type differs,
+# since MobileNetV2 takes its block factory as `block` (torchvision's
+# argument name) rather than ResNet's `resnet_block`.
+#
+# Only inverted-residual blocks with a skip connection (stride == 1 and
+# in_channels == out_channels) carry a gate — a closed gate must degenerate
+# to identity, which is only well-defined there. For the stock MobileNetV2
+# table that is 10 of the 17 blocks.
+#
+# Note: no backbone_weight_init override here (see
+# configs/model/mobilenetv2_tinyimagenet200.yaml for why the paper-style
+# init is wrong for depthwise convs).
+
+model:
+  bypass_on_zero_lambda: false
+  lambda_coef: 2.0  # lambda used by the paper for its own ConvNet-AIG experiments
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  regularization_loss:
+    _target_: net_complexity.wrappers.AIGTargetRateLoss
+    target_rate: 0.5
+    always_on_blocks: []
+  backbone:
+    block:
+      _target_: net_complexity.wrappers.AIGInvertedResidual
+      _partial_: true
+      gate_regularization: l2_gate

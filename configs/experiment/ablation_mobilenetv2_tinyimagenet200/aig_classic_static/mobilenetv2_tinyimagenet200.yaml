@@ -1,0 +1,57 @@
+# @package _global_
+#
+# Classic-AIG "static" baseline on MobileNetV2/TinyImageNet200 — post-hoc,
+# structurally pruned version of a trained aig_classic run, giving an
+# accuracy-vs-params/FLOPs point comparable with DepGraph and "ours".
+#
+# Blocks whose average validation gate probability (valid_g_prob_*, read
+# from that run's summary.json) falls below g_prob_threshold are physically
+# removed; every surviving block's AIG gate is bypassed to always-on, so the
+# model fine-tuned below is fully static. For MobileNetV2 a removed block
+# collapses to a parameter-free identity — a gated block always has
+# stride == 1 and in == out, so there is no downsample projection to keep.
+#
+# Required override before running:
+#   aig_static_pruning.source_run_dir=outputs/runs/<your aig_classic mobilenetv2 run for the target t>
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200/aig_classic_static/mobilenetv2_tinyimagenet200 \
+#       aig_static_pruning.source_run_dir=outputs/runs/<run>
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: mobilenetv2_tinyimagenet200
+  - /method: aig_target_rate_mobilenetv2
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+  backbone:
+    block:
+      temperature: 1.0
+
+aig_static_pruning:
+  enabled: true
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  g_prob_threshold: 0.5
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_aig_classic_static_mobilenetv2_tinyimagenet200_thr${aig_static_pruning.g_prob_threshold}"
+  tags:
+    model_type: "MobileNetV2_AIG_Static"
+    method: "aig_classic_static"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_aig_classic_static_mobilenetv2_tinyimagenet200"
+    g_prob_threshold: "${aig_static_pruning.g_prob_threshold}"

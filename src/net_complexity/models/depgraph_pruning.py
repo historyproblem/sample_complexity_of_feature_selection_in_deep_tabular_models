@@ -265,8 +265,21 @@ def build_depgraph_pruned_model_from_config(
     if target_speedup <= 1.0:
         raise ValueError("depgraph_pruning.target_speedup must be > 1.0.")
 
+    # Never prune the classifier head — its output width is the class count.
+    # ResNet/CIFARResNet call it `fc`/`linear`; MobileNetV2 calls it
+    # `classifier` (an nn.Sequential ending in the nn.Linear), so append the
+    # Linear itself rather than the container.
     ignored_layers = []
     classifier_head = getattr(backbone, "fc", None) or getattr(backbone, "linear", None)
+    if classifier_head is None:
+        head_container = getattr(backbone, "classifier", None)
+        if isinstance(head_container, nn.Linear):
+            classifier_head = head_container
+        elif head_container is not None:
+            classifier_head = next(
+                (module for module in head_container.modules() if isinstance(module, nn.Linear)),
+                None,
+            )
     if classifier_head is not None:
         ignored_layers.append(classifier_head)
 

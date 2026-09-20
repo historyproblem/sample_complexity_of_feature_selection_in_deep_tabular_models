@@ -1,0 +1,33 @@
+# @package _global_
+#
+# TinyImageNet-200 fed at ImageNet resolution: Resize(256) -> CenterCrop(224).
+#
+# TinyImageNet images are natively 64x64, which leaves ImageNet-designed
+# backbones with a tiny final feature map (MobileNetV2 at stride-2 stem gets
+# 2x2). Upscaling to the standard 224x224 restores the 7x7 map the
+# architecture was designed around and makes ImageNet-pretrained weights
+# directly usable.
+#
+# Note the trade-offs vs. tinyimagenet200_best_practice.yaml (native 64x64):
+#   * ~12x the pixels per image, so markedly slower and more memory-hungry;
+#     drop batch_size if you hit OOM.
+#   * Setting resize/center_crop replaces the native-size RandomCrop
+#     augmentation — only the horizontal flip is left on the train pipeline.
+#     For a stronger train recipe (e.g. RandomResizedCrop) pass an explicit
+#     dataloaders.train_transform; see configs/data/README-style notes in
+#     net_complexity.data.dataloaders._build_tinyimagenet_transforms.
+#   * Pair it with a model preset built for 224 inputs — for MobileNetV2 that
+#     is configs/model/mobilenetv2_tinyimagenet200_224.yaml (stock stride-2
+#     stem), not the 64x64 preset.
+
+dataloaders:
+  _target_: net_complexity.dataloaders.ClassicCVDataloaders
+  path_to_data: ${hydra:runtime.cwd}/data/tiny-imagenet-200
+  batch_size: 128
+  taskname: tinyimagenet200
+  num_classes: 200
+  image_size: 64
+  resize: 256
+  center_crop: 224
+  valid_ratio: 0.1
+  seed: 42

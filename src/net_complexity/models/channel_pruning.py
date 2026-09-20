@@ -198,6 +198,23 @@ _BOTTLENECK_GATE_SPEC_KEY = {
     "mid2_gumbel_layer": "mid2",
 }
 
+# MobileNetV2: blocks live in `features` and expose up to two gates — the
+# residual-output gate every residual block has, plus the optional
+# internal-width gate (MaskedGumbelInvertedResidual(gate_internal_width=True),
+# which non-residual blocks can have too).
+# "backbone.features.3.gumbel_layer"     -> ("features.3", "output")
+# "backbone.features.3.mid_gumbel_layer" -> ("features.3", "mid")
+_MOBILENET_LAYER_NAME_RE = re.compile(
+    r"(?:backbone\.)?(?P<key>features\.\d+)\.(?P<gate>gumbel_layer|mid_gumbel_layer)$"
+)
+
+_MOBILENET_GATE_SPEC_KEY = {
+    "gumbel_layer": "output",
+    "mid_gumbel_layer": "mid",
+}
+
+_MOBILENET_BACKBONE_TARGETS = ("MobileNetV2", "MobileNetV2TinyImageNet200")
+
 _NUM_BLOCKS_BY_TARGET = {
     "CIFARResNet20": [3, 3, 3],
     "CIFARResNet32": [5, 5, 5],
@@ -272,8 +289,110 @@ def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
         )
 
 
+def _mask_dict_to_mobilenet_pruning_spec(
+    mask_dict: dict[str, list[int]],
+) -> dict[str, dict[str, list[int]]]:
+    """Convert channel_history layer-name keys to PrunedMobileNetV2 pruning_spec keys.
+
+    MobileNetV2 counterpart of ``_mask_dict_to_bottleneck_pruning_spec``: the
+    gate module path ``backbone.features.3.gumbel_layer`` becomes the block
+    address ``features.3``, grouped per block into ``{"output": [...],
+    "mid": [...]}`` (only non-empty boundaries are included). MobileNetV2
+    needs one internal key where the Bottleneck needs two, because
+    ``depthwise`` preserves channel identity — see
+    ``MaskedGumbelInvertedResidual``.
+    """
+    spec: dict[str, dict[str, list[int]]] = defaultdict(dict)
+    for layer_name, channels in mask_dict.items():
+        m = _MOBILENET_LAYER_NAME_RE.search(layer_name)
+        if m:
+            spec[m.group("key")][_MOBILENET_GATE_SPEC_KEY[m.group("gate")]] = channels
+    return dict(spec)
+
+
 def _is_bottleneck_backbone_target(backbone_target: str) -> bool:
     return any(name in backbone_target for name in _BOTTLENECK_LAYER_LIST_BY_TARGET)
+
+
+def _is_mobilenet_backbone_target(backbone_target: str) -> bool:
+    return any(name in backbone_target for name in _MOBILENET_BACKBONE_TARGETS)
+
+
+def build_pruned_mobilenet_model(
+    config: DictConfig,
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
+) -> nn.Module:
+    """Build a ``PrunedMobileNetV2`` wrapped in ``ClassificationFeatureSelectionWrapper``.
+
+    MobileNetV2 counterpart of ``build_pruned_bottleneck_model``: takes the
+    pruning spec directly (``{"features.N": [channel_indices]}``) so the
+    iterative channel-pruning cycle can hand it over in memory.
+    """
+    from .feature_selection import ClassificationFeatureSelectionWrapper
+    from .pruned_mobilenet_v2 import PrunedMobileNetV2
+
+    num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 1000)
+    in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
+    width_mult = float(OmegaConf.select(config, "model.backbone.width_mult") or 1.0)
+    round_nearest = int(OmegaConf.select(config, "model.backbone.round_nearest") or 8)
+    dropout_cfg = OmegaConf.select(config, "model.backbone.dropout")
+    dropout = 0.2 if dropout_cfg is None else float(dropout_cfg)
+
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+    stem_stride_cfg = OmegaConf.select(config, "model.backbone.stem_stride")
+    if stem_stride_cfg is not None:
+        stem_stride = int(stem_stride_cfg)
+    else:
+        # MobileNetV2TinyImageNet200 defaults to a stride-1 stem; the plain
+        # MobileNetV2 keeps torchvision's stride-2 stem.
+        stem_stride = 1 if "TinyImageNet200" in backbone_target else 2
+
+    setting_cfg = OmegaConf.select(config, "model.backbone.inverted_residual_setting")
+    inverted_residual_setting = (
+        OmegaConf.to_container(setting_cfg, resolve=True) if setting_cfg is not None else None
+    )
+
+    backbone = PrunedMobileNetV2(
+        pruning_spec=pruning_spec,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        width_mult=width_mult,
+        inverted_residual_setting=inverted_residual_setting,
+        round_nearest=round_nearest,
+        dropout=dropout,
+        stem_stride=stem_stride,
+    )
+
+    lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)
+    criterion_cfg = OmegaConf.select(config, "model.criterion")
+    criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
+
+    total_disabled = _count_disabled_channels(pruning_spec)
+    print(
+        f"[channel_pruning] Structural pruning applied (MobileNetV2): "
+        f"{len(pruning_spec)} blocks affected, "
+        f"{total_disabled} channels removed from residual branches."
+    )
+
+    return ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=lambda_coef,
+        criterion=criterion,
+        regularization_loss=lambda m: 0,
+    )
+
+
+def _count_disabled_channels(
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
+) -> int:
+    """Total channels in a pruning spec, for both the flat and nested value shapes."""
+    total = 0
+    for value in pruning_spec.values():
+        if isinstance(value, dict):
+            total += sum(len(channels) for channels in value.values())
+        else:
+            total += len(value)
+    return total
 
 
 def build_pruned_bottleneck_model(
@@ -326,7 +445,7 @@ def build_pruned_bottleneck_model(
     criterion_cfg = OmegaConf.select(config, "model.criterion")
     criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
-    total_disabled = sum(len(v) for v in pruning_spec.values())
+    total_disabled = _count_disabled_channels(pruning_spec)
     print(
         f"[channel_pruning] Structural pruning applied (Bottleneck): "
         f"{len(pruning_spec)} blocks affected, "
@@ -398,8 +517,8 @@ def build_structurally_pruned_model_from_config(
     Reads the channel mask (from channel_history file or explicit YAML),
     converts it to a per-block pruning_spec, and constructs a fresh model
     whose residual branches are physically narrowed to the active channels.
-    Dispatches to the CIFARResNet (BasicBlock) or Bottleneck (ResNet50/101/152)
-    builder based on ``model.backbone._target_``.
+    Dispatches to the CIFARResNet (BasicBlock), Bottleneck (ResNet50/101/152)
+    or MobileNetV2 builder based on ``model.backbone._target_``.
 
     The returned model has the same interface as the standard training model:
     forward(X, y) -> ClassifModelOutput.
@@ -415,6 +534,15 @@ def build_structurally_pruned_model_from_config(
                 "the pruned model will be equivalent to the full model."
             )
         return build_pruned_bottleneck_model(config, pruning_spec)
+
+    if _is_mobilenet_backbone_target(backbone_target):
+        pruning_spec = _mask_dict_to_mobilenet_pruning_spec(mask_dict)
+        if not pruning_spec:
+            print(
+                "[channel_pruning] WARNING: no prunable layers found in mask - "
+                "the pruned model will be equivalent to the full model."
+            )
+        return build_pruned_mobilenet_model(config, pruning_spec)
 
     pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
     if not pruning_spec:

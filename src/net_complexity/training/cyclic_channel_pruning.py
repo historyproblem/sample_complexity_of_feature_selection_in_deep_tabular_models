@@ -197,7 +197,12 @@ def _cap_channels_to_drop_by_param_budget(
 # a "." separator in the module path, so ".gumbel_layer" never matches a
 # "...mid1_gumbel_layer"/"...mid2_gumbel_layer" path), so check order here
 # doesn't matter.
-_GATE_SUFFIXES = (".gumbel_layer", ".mid1_gumbel_layer", ".mid2_gumbel_layer")
+_GATE_SUFFIXES = (
+    ".gumbel_layer",
+    ".mid1_gumbel_layer",
+    ".mid2_gumbel_layer",
+    ".mid_gumbel_layer",  # MobileNetV2's single internal-width gate
+)
 
 
 def _resolve_block(model, block_path: str):
@@ -228,6 +233,20 @@ def _channel_param_cost(model, layer_name: str) -> int:
         one freed output row of conv2 (weight + bias) + batch_norm2 affine,
         plus the corresponding input column of conv3 (weight only, same
         reasoning as above).
+
+    A MobileNetV2 ``MaskedGumbelInvertedResidual`` has its own two gates:
+
+      ``.gumbel_layer`` (output, ``branch.project``'s output before the
+        identity sum): one freed output row of ``project`` + ``project_bn``
+        affine — the same role conv3/batch_norm3 play in a Bottleneck.
+      ``.mid_gumbel_layer`` (internal width): one freed output row of
+        ``branch.expand`` + its BN affine, the matching ``branch.depthwise``
+        channel (kh*kw weights, since groups == hidden_dim gives one kernel
+        per channel) + its BN affine, and the corresponding input column of
+        ``branch.project``.
+
+    MobileNetV2 has no mid1/mid2 split: ``depthwise`` preserves channel
+    identity, so expand-out, depthwise and project-in are one coupled group.
     """
     for suffix in _GATE_SUFFIXES:
         if layer_name.endswith(suffix):
@@ -237,6 +256,38 @@ def _channel_param_cost(model, layer_name: str) -> int:
         raise ValueError(
             f"_channel_param_cost: unrecognized channel-gate module path {layer_name!r} "
             f"(expected one of the suffixes {_GATE_SUFFIXES})."
+        )
+
+    if not hasattr(block, "conv3"):
+        # MobileNetV2 inverted-residual block.
+        project = block.branch.project
+        if suffix == ".gumbel_layer":
+            cost = int(project.in_channels)  # weight: [out, in, 1, 1] -> in per out-channel
+            if project.bias is not None:
+                cost += 1
+            cost += 2  # branch.project_bn weight + bias per channel
+            return cost
+
+        if suffix == ".mid_gumbel_layer":
+            expand_conv, expand_bn = block.branch.expand[0], block.branch.expand[1]
+            depthwise_conv = block.branch.depthwise[0]
+            kh, kw = depthwise_conv.kernel_size
+            cost = int(expand_conv.in_channels)  # expand's freed output row
+            if expand_conv.bias is not None:
+                cost += 1
+            cost += 2 * int(expand_bn.affine)  # expand BN weight + bias
+            # depthwise has groups == channels, so one kernel per channel.
+            cost += kh * kw
+            if depthwise_conv.bias is not None:
+                cost += 1
+            cost += 2  # depthwise BN weight + bias
+            cost += int(project.out_channels)  # project's freed input column
+            return cost
+
+        raise ValueError(
+            f"_channel_param_cost: gate {layer_name!r} has no MobileNetV2 analogue — "
+            "a MobileNetV2 block exposes .gumbel_layer (residual output) and "
+            ".mid_gumbel_layer (internal width), not the Bottleneck mid1/mid2 split."
         )
 
     if suffix == ".gumbel_layer":

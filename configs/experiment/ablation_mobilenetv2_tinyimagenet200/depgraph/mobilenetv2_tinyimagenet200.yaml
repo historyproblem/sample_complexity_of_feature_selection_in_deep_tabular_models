@@ -1,0 +1,68 @@
+# @package _global_
+#
+# DepGraph structural-pruning baseline (Fang et al., CVPR 2023) on
+# MobileNetV2/TinyImageNet200 — group-L2-norm importance by default.
+# Override depgraph_pruning.importance for the other criteria
+# (magnitude_l1 | random | bn_scale | lamp), matching the ResNet variants.
+#
+# Prunes a *plain*-trained checkpoint (no gates), then fine-tunes the
+# physically narrowed model through the normal training loop. The classifier
+# head is excluded from pruning automatically (MobileNetV2 names it
+# `classifier`, handled in depgraph_pruning.py).
+#
+# Required override before running:
+#   depgraph_pruning.source_run_dir=outputs/runs/<your plain_baseline mobilenetv2 run>
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200/depgraph/mobilenetv2_tinyimagenet200 \
+#       depgraph_pruning.source_run_dir=outputs/runs/<run>
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: mobilenetv2_tinyimagenet200
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+scheduler:
+  T_max: 75
+
+training_arguments:
+  num_epochs: 75
+
+depgraph_pruning:
+  enabled: true
+  source_checkpoint: null
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  importance: magnitude_l2
+  sparsity_learning: false
+  target_speedup: 2.0
+  global_pruning: true
+  iterative_steps: 75
+  example_input_size: [3, 64, 64]
+  random_seed: 42
+
+mlflow:
+  enabled: true
+  experiment_name: depgraph
+  run_name: "depgraph_mobilenetv2_tinyimagenet200_${depgraph_pruning.importance}_speedup${depgraph_pruning.target_speedup}"
+  tags:
+    model_type: "MobileNetV2_DepGraph"
+    method: "depgraph"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_depgraph_mobilenetv2_tinyimagenet200"
+    importance: "${depgraph_pruning.importance}"
+    sparsity_learning: "false"
+    target_speedup: "${depgraph_pruning.target_speedup}"

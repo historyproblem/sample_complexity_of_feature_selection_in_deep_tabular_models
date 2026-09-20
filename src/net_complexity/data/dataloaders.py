@@ -76,17 +76,49 @@ def _normalize_taskname(taskname: str) -> str:
     return str(taskname).replace("-", "").replace("_", "").upper()
 
 
-def _build_cifar_transforms() -> tuple[transforms.Compose, transforms.Compose]:
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
+def _geometric_prefix(
+    resize: int | list[int] | None,
+    center_crop: int | list[int] | None,
+) -> list:
+    """Build the optional ``Resize`` -> ``CenterCrop`` prefix shared by all pipelines.
+
+    Set from the config as ``dataloaders.resize`` / ``dataloaders.center_crop``.
+    The classic ImageNet evaluation preset is ``resize: 256, center_crop: 224``;
+    it is what lets a 64x64 dataset like TinyImageNet-200 be fed to a model
+    designed for 224x224 inputs.
+    """
+    ops: list = []
+    if resize is not None:
+        ops.append(transforms.Resize(resize))
+    if center_crop is not None:
+        ops.append(transforms.CenterCrop(center_crop))
+    return ops
+
+
+def _build_cifar_transforms(
+    resize: int | list[int] | None = None,
+    center_crop: int | list[int] | None = None,
+) -> tuple[transforms.Compose, transforms.Compose]:
+    """CIFAR/MNIST train and eval pipelines.
+
+    With no ``resize``/``center_crop`` this is the stock recipe
+    (RandomCrop(32, padding=4) + flip for train, bare normalize for eval).
+    When a geometric prefix is requested it *replaces* RandomCrop — that crop
+    assumes the dataset's native 32x32 size — leaving the horizontal flip as
+    the train-time augmentation. Pass a full ``train_transform`` if you want
+    something stronger (e.g. RandomResizedCrop).
+    """
+    prefix = _geometric_prefix(resize, center_crop)
+    tail = [
         transforms.ToTensor(),
         transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD),
-    ])
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=CIFAR10_MEAN, std=CIFAR10_STD),
-    ])
+    ]
+    train_geometry = prefix if prefix else [transforms.RandomCrop(32, padding=4)]
+
+    train_transform = transforms.Compose(
+        [*train_geometry, transforms.RandomHorizontalFlip(), *tail]
+    )
+    test_transform = transforms.Compose([*prefix, *tail])
     return train_transform, test_transform
 
 
@@ -110,18 +142,50 @@ def _suppress_torchvision_download_progress():
 
 def _build_tinyimagenet_transforms(
     image_size: int = 64,
+    resize: int | list[int] | None = None,
+    center_crop: int | list[int] | None = None,
 ) -> tuple[transforms.Compose, transforms.Compose]:
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(image_size, padding=8),
-        transforms.RandomHorizontalFlip(p=0.5),
+    """TinyImageNet-200 train and eval pipelines.
+
+    With no ``resize``/``center_crop`` this is the stock recipe at the
+    dataset's native 64x64 (RandomCrop(image_size, padding=8) + flip for
+    train). A geometric prefix — typically ``resize: 256, center_crop: 224``
+    — replaces RandomCrop, since that crop is tied to the native size. See
+    ``_build_cifar_transforms`` for the same trade-off note.
+    """
+    prefix = _geometric_prefix(resize, center_crop)
+    tail = [
         transforms.ToTensor(),
         transforms.Normalize(mean=TINYIMAGENET200_MEAN, std=TINYIMAGENET200_STD),
-    ])
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=TINYIMAGENET200_MEAN, std=TINYIMAGENET200_STD),
-    ])
+    ]
+    train_geometry = prefix if prefix else [transforms.RandomCrop(image_size, padding=8)]
+
+    train_transform = transforms.Compose(
+        [*train_geometry, transforms.RandomHorizontalFlip(p=0.5), *tail]
+    )
+    test_transform = transforms.Compose([*prefix, *tail])
     return train_transform, test_transform
+
+
+def _resolve_transform(override, default: transforms.Compose):
+    """Use an explicit ``train_transform``/``eval_transform`` override if given.
+
+    Accepts anything Hydra can build: a ready ``transforms.Compose``, a list
+    of transform objects (wrapped in a Compose here), or any callable. ``None``
+    falls back to the dataset's built-in pipeline.
+    """
+    if override is None:
+        return default
+    if isinstance(override, transforms.Compose):
+        return override
+    if isinstance(override, (list, tuple)):
+        return transforms.Compose(list(override))
+    if callable(override):
+        return override
+    raise TypeError(
+        "train_transform/eval_transform must be a torchvision Compose, a list of "
+        f"transforms, or a callable; got {type(override).__name__}."
+    )
 
 
 def _read_nonempty_lines(path: Path) -> list[str]:
@@ -182,7 +246,28 @@ class ClassicCVDataloaders(Dataloaders):
         seed: int = 42,
         num_classes: int | None = None,
         image_size: int | None = None,
+        resize: int | list[int] | None = None,
+        center_crop: int | list[int] | None = None,
+        train_transform=None,
+        eval_transform=None,
     ):
+        """
+        Args:
+            resize: Optional ``transforms.Resize`` size prepended to both the
+                train and eval pipelines. ``resize: 256`` with
+                ``center_crop: 224`` is the classic ImageNet evaluation
+                preset — what lets a 64x64 dataset feed a model designed for
+                224x224 inputs.
+            center_crop: Optional ``transforms.CenterCrop`` size, applied
+                right after ``resize``. Setting either one replaces the
+                dataset's native-size RandomCrop augmentation (see
+                ``_build_cifar_transforms``); the horizontal flip is kept.
+            train_transform: Full override of the train pipeline (a
+                ``transforms.Compose``, a list of transforms, or any
+                callable). Takes precedence over ``resize``/``center_crop``.
+            eval_transform: Full override of the valid/test pipeline, same
+                accepted shapes as ``train_transform``.
+        """
         resolved_num_workers = _resolve_num_workers(num_workers)
         resolved_pin_memory = _resolve_pin_memory(pin_memory)
 
@@ -198,6 +283,10 @@ class ClassicCVDataloaders(Dataloaders):
                 seed=seed,
                 num_classes=num_classes,
                 image_size=64 if image_size is None else image_size,
+                resize=resize,
+                center_crop=center_crop,
+                train_transform=train_transform,
+                eval_transform=eval_transform,
             )
             return
 
@@ -214,19 +303,23 @@ class ClassicCVDataloaders(Dataloaders):
         if normalized_taskname not in task2class:
             known_tasks = ", ".join(sorted([*task2class, "TINYIMAGENET200"]))
             raise ValueError(f"Unknown taskname={taskname!r}. Known tasks: {known_tasks}.")
-        train_transform, test_transform = _build_cifar_transforms()
+        default_train_transform, default_eval_transform = _build_cifar_transforms(
+            resize=resize, center_crop=center_crop
+        )
+        resolved_train_transform = _resolve_transform(train_transform, default_train_transform)
+        resolved_eval_transform = _resolve_transform(eval_transform, default_eval_transform)
 
         with _suppress_torchvision_download_progress():
             full_train_dataset = task2class[normalized_taskname](
                 root=path_to_data,
                 train=True,
-                transform=test_transform,
+                transform=resolved_eval_transform,
                 download=True
             )
             test_dataset = task2class[normalized_taskname](
                 root=path_to_data,
                 train=False,
-                transform=test_transform,
+                transform=resolved_eval_transform,
                 download=True
             )
 
@@ -247,7 +340,7 @@ class ClassicCVDataloaders(Dataloaders):
             train_augmented_dataset = task2class[normalized_taskname](
                 root=path_to_data,
                 train=True,
-                transform=train_transform,
+                transform=resolved_train_transform,
                 download=True
             )
         train_dataset = Subset(train_augmented_dataset, train_indices)
@@ -291,6 +384,10 @@ class ClassicCVDataloaders(Dataloaders):
         seed: int,
         num_classes: int | None,
         image_size: int,
+        resize: int | list[int] | None = None,
+        center_crop: int | list[int] | None = None,
+        train_transform=None,
+        eval_transform=None,
     ) -> None:
         tiny_root = Path(path_to_data).expanduser()
         wnids_path = tiny_root / "wnids.txt"
@@ -321,7 +418,11 @@ class ClassicCVDataloaders(Dataloaders):
                 f"but wnids.txt contains {len(wnids)} classes."
             )
         class_to_idx = {wnid: class_idx for class_idx, wnid in enumerate(wnids)}
-        train_transform, test_transform = _build_tinyimagenet_transforms(image_size=image_size)
+        default_train_transform, default_eval_transform = _build_tinyimagenet_transforms(
+            image_size=image_size, resize=resize, center_crop=center_crop
+        )
+        resolved_train_transform = _resolve_transform(train_transform, default_train_transform)
+        resolved_eval_transform = _resolve_transform(eval_transform, default_eval_transform)
 
         train_samples, valid_samples = self._build_tinyimagenet_train_valid_samples(
             train_root=train_root,
@@ -339,17 +440,17 @@ class ClassicCVDataloaders(Dataloaders):
 
         train_dataset = TinyImageNetDataset(
             train_samples,
-            transform=train_transform,
+            transform=resolved_train_transform,
             class_to_idx=class_to_idx,
         )
         valid_dataset = TinyImageNetDataset(
             valid_samples,
-            transform=test_transform,
+            transform=resolved_eval_transform,
             class_to_idx=class_to_idx,
         )
         test_dataset = TinyImageNetDataset(
             test_samples,
-            transform=test_transform,
+            transform=resolved_eval_transform,
             class_to_idx=class_to_idx,
         )
 

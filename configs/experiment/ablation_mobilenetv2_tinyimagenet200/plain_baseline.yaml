@@ -1,0 +1,49 @@
+# @package _global_
+#
+# Plain (ungated, unpruned) MobileNetV2 on TinyImageNet-200.
+#
+# This is the reference point the whole MobileNetV2 ablation family needs:
+#   * depgraph/mobilenetv2_tinyimagenet200.yaml prunes THIS run's checkpoint
+#     (depgraph_pruning.source_run_dir=<this run dir>);
+#   * ours_iterative_*/... use this run's per-epoch accuracy history as the
+#     adaptive-lambda baseline (training_arguments.adaptive_lambda.
+#     baseline_history_dir=<this run dir>);
+#   * it is the "no pruning at all" accuracy/params/FLOPs point in the
+#     comparison table.
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200/plain_baseline
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: mobilenetv2_tinyimagenet200
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+scheduler:
+  T_max: 150
+
+training_arguments:
+  num_epochs: 150
+
+mlflow:
+  enabled: true
+  experiment_name: mobilenetv2_baseline
+  run_name: "baseline_mobilenetv2_tinyimagenet200"
+  tags:
+    model_type: "MobileNetV2"
+    method: "plain"
+    dataset: "tinyimagenet200"
+    recipe: "baseline_mobilenetv2_tinyimagenet200"

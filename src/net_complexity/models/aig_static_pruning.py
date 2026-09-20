@@ -46,6 +46,10 @@ from omegaconf import DictConfig
 
 _G_PROB_PREFIX = "valid_g_prob_"
 
+# Block containers ``layer_skipping`` can address as ``<container>.<index>``:
+# ResNet/CIFARResNet stages (``layerN``) and MobileNetV2's ``features``.
+_BLOCK_CONTAINER_PREFIXES = ("layer", "features")
+
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> tuple[Path, Path, str]:
     source_run_dir = getattr(cfg, "source_run_dir", None)
@@ -65,7 +69,9 @@ def _extract_layer_g_probs(valid_metrics) -> dict[str, float]:
     """Return {layer_name: mean_keep_probability} from a valid_metrics mapping.
 
     Strips the "backbone." prefix so keys look like "layer1.0", matching
-    layer_skipping's disabled_layers format. Mirrors
+    layer_skipping's disabled_layers format; MobileNetV2 gates sit one level
+    deeper (``backbone.features.3.gate``), so a trailing ``.gate`` is
+    stripped too, leaving ``features.3``. Mirrors
     training.cyclic_aig._extract_layer_g_probs, duplicated locally to keep
     this module (like the rest of net_complexity.models) independent of
     net_complexity.training.
@@ -77,7 +83,9 @@ def _extract_layer_g_probs(valid_metrics) -> dict[str, float]:
         layer_name = key[len(_G_PROB_PREFIX):]
         if layer_name.startswith("backbone."):
             layer_name = layer_name[len("backbone."):]
-        if layer_name.startswith("layer"):
+        if layer_name.endswith(".gate"):
+            layer_name = layer_name[: -len(".gate")]
+        if layer_name.startswith(_BLOCK_CONTAINER_PREFIXES):
             result[layer_name] = float(value)
     return result
 

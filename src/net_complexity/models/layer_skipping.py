@@ -26,6 +26,12 @@ Config format::
 Layer naming follows the CIFARResNet convention: ``layerN.B`` where N is
 the stage index (1-3) and B is the zero-based block index within that stage.
 For ResNet20 each stage has 3 blocks (B in {0, 1, 2}).
+
+The same ``<container>.<index>`` form addresses MobileNetV2 blocks as
+``features.N`` (N is the index inside ``MobileNetV2.features``); there only
+residual blocks — ``stride == 1 and inp == oup``, i.e. the gateable ones —
+can be dropped, and a pruned block collapses to a parameter-free identity
+since it has no downsample projection to keep.
 """
 
 from __future__ import annotations
@@ -39,6 +45,11 @@ from .feature_selection import (
     PrunedCIFARBasicBlock,
     SkippedBottleneck,
     SkippedCIFARBasicBlock,
+)
+from .mobilenet_v2 import (
+    InvertedResidual,
+    PrunedInvertedResidual,
+    SkippedInvertedResidual,
 )
 from .resnet import Bottleneck
 
@@ -144,10 +155,32 @@ def _replace_block(backbone: nn.Module, key: str, mode: str) -> bool:
         )
         return True
 
+    elif isinstance(old_block, InvertedResidual):
+        # MobileNetV2: only residual blocks (stride 1, in == out) can be
+        # removed — a non-residual block changes shape, so dropping it would
+        # break the next block's input width. Unlike Bottleneck there is no
+        # downsample projection to keep, so a pruned block is pure identity.
+        if not old_block.use_res_connect:
+            print(
+                f"[layer_skipping] Warning: block at '{key}' is a non-residual "
+                f"InvertedResidual (stride={old_block.stride}, inp={old_block.inp}, "
+                f"oup={old_block.oup}) — cannot be dropped, ignored."
+            )
+            return False
+
+        new_block = PrunedInvertedResidual() if mode == "prune" else SkippedInvertedResidual(old_block)
+        layer[block_idx] = new_block
+        print(
+            f"[layer_skipping] '{key}': {'pruned' if mode == 'prune' else 'skipped'} "
+            f"(inp={old_block.inp}, oup={old_block.oup}, stride={old_block.stride})"
+        )
+        return True
+
     else:
         print(
             f"[layer_skipping] Warning: block at '{key}' is "
-            f"{type(old_block).__name__}, not CIFARBasicBlock or Bottleneck — ignored."
+            f"{type(old_block).__name__}, not CIFARBasicBlock, Bottleneck or "
+            "InvertedResidual — ignored."
         )
         return False
 

@@ -1,0 +1,25 @@
+# @package _global_
+#
+# Plain MobileNetV2 for TinyImageNet-200 (64x64, 200 classes).
+#
+# MobileNetV2TinyImageNet200 defaults to stem_stride=1: the stock stride-2
+# stem plus the stock stage strides would take 64x64 down to a 2x2 final
+# feature map, so the stem stride is dropped to leave 4x4 instead — the same
+# small-input adaptation resnet50_tinyimagenet200.yaml makes via
+# stem_stride: 1 / use_maxpool: false.
+#
+# backbone_weight_init stays "default" on purpose: the wrapper's
+# paper_kaiming_normal init computes fan = kh*kw*out_channels, which ignores
+# conv groups and would therefore badly mis-scale MobileNetV2's depthwise
+# convs. MobileNetV2 already applies a group-aware kaiming-normal (fan_out)
+# init in its own constructor.
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.MobileNetV2TinyImageNet200
+    num_classes: 200
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 1
+    dropout: 0.2
