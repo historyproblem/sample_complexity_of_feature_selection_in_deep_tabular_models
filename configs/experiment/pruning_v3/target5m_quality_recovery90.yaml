@@ -1,0 +1,65 @@
+# @package _global_
+# Validation-only quality recovery for the compact model selected by the completed
+# target5m 60-epoch search. The launcher requires --reuse-search, so this command
+# executes exactly one new 90-epoch physical-model training branch.
+#
+# Keep every setting fixed and vary only optimizer.lr. Recommended first sweep:
+#   0.0003, 0.001 (default), 0.002
+# Give every candidate a different --output and pass --skip-test. Select the
+# winner by validation, then run official frozen test inference only once.
+defaults:
+  - /accuracy_guided_gates_v3
+  - _self_
+
+one_shot:
+  protocol: pruning_v3_quality_recovery_single_60_90
+  search_epochs: 60
+  final_epochs: 90
+  reuse_search_required: true
+  search_scheduler_horizon_epochs: 60
+  # The search is reused, not rerun. Zero keeps low recovery-LR overrides valid
+  # if this resolved config is inspected by the shared scheduler validator.
+  search_scheduler_eta_min: 0.0
+  execution_order: single
+  methods:
+    - id: fresh_optimizer_fresh_scheduler
+      model_state: selected_surviving_state
+      optimizer_state: fresh
+      scheduler_state: fresh_final_stage_cosine
+  repeats:
+    - {id: repeat_1, training_seed: 42}
+
+optimizer:
+  # The 1e-3 baseline gave the strongest validation result in the earlier
+  # optimizer/scheduler handoff study. Override only this field for the sweep.
+  lr: 0.001
+
+scheduler:
+  eta_min: 0.0
+
+dataloaders:
+  download_progress: true
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.14
+  guard:
+    train_bn_calibration_batches: 0
+  stage_plan:
+    - {id: shared_search, kind: search, epochs: 60, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: export_only, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: final_recovery, kind: recovery, epochs: 90, commit_allowed: false, selected_checkpoint: null, restart_policy: branch_specific_optimizer_scheduler_handoff}
+
+training_arguments:
+  adaptive_lambda:
+    enabled: true
+    soft_drop: 0.0125
+    hard_drop: 0.0175
+    update_every_search_epochs: 1
+    log_step: auto
+
+mlflow:
+  run_name: target5m_quality_recovery90
+
+run_history:
+  run_name: target5m_quality_recovery90

@@ -110,6 +110,11 @@ def main(argv=None):
         metavar="PATH",
         help="Reuse a completed search-only run and execute only its configured physical recovery branches",
     )
+    parser.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="Do not run official test inference; use for validation-only hyperparameter tuning",
+    )
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
@@ -127,6 +132,8 @@ def main(argv=None):
                         if new_reference else None)
     config = compose_config(args.config_name, args.override,
                             dense_source=reference_output if new_reference else args.dense_source)
+    if bool(getattr(config.one_shot, "reuse_search_required", False)) and args.reuse_search is None:
+        parser.error(f"{args.config_name} requires --reuse-search PATH; it is a 90-epoch recovery-only profile")
     output = Path(output_paths(config, args.output)["root"])
     if new_reference:
         validate_config(config)
@@ -168,7 +175,10 @@ def main(argv=None):
             requested_execution["reuse_search"] = str(args.reuse_search.expanduser().resolve())
         report["requested_execution"] = requested_execution
         report["official_test_evaluation"] = {
-            "automatic_after_frozen_deployments": args.prepare_reference is None and not args.search_only,
+            "automatic_after_frozen_deployments": (
+                args.prepare_reference is None and not args.search_only and not args.skip_test
+            ),
+            "disabled_for_validation_only_tuning": bool(args.skip_test),
             "config": str(args.test_config.expanduser().resolve()),
             "output": str((output / "test_evaluation").resolve()),
             "training": False, "batchnorm_updates": False, "selection": False,
@@ -226,7 +236,7 @@ def main(argv=None):
             "test_evaluated": bool(reference_state["test_evaluated"] or result["test_evaluated"]),
         }
         write_json(output / "clean_clone_state.json", clean_clone_state)
-    if result.get("status") == "completed":
+    if result.get("status") == "completed" and not args.skip_test:
         progress_message("official-test", "evaluating all finalized frozen deployments")
         test_report = _run_official_test(output, args.test_config)
         result["official_test_evaluation"] = {
@@ -241,7 +251,9 @@ def main(argv=None):
     else:
         result["official_test_evaluation"] = {
             "status": "not_run", "test_evaluated": False,
-            "reason": f"no finalized branch pair: one-shot status={result.get('status', 'unknown')}",
+            "reason": ("disabled by --skip-test for validation-only tuning"
+                       if args.skip_test and result.get("status") == "completed"
+                       else f"no finalized branch pair: one-shot status={result.get('status', 'unknown')}"),
         }
     progress_message("one-shot", f"finished: status={result.get('status', 'returned')}; results={output}")
     return result

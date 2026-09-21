@@ -92,6 +92,31 @@ def test_target5m_recovery_config_maps_adamw_and_restarts_cosine_twice():
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 240
 
 
+def test_target5m_quality_recovery_is_one_fresh_90_epoch_branch():
+    cfg = schema.compose_config(schema.QUALITY_RECOVERY_CONFIG_NAME)
+    assert schema.validate_config(cfg) == 150
+    assert cfg.one_shot.reuse_search_required is True
+    assert cfg.optimizer.lr == pytest.approx(0.001)
+    assert cfg.one_shot.search_scheduler_eta_min == 0
+    plan = schema.resolved_branch_plan(cfg)
+    assert plan == [{
+        "id": "fresh_optimizer_fresh_scheduler__repeat_1",
+        "method": "fresh_optimizer_fresh_scheduler",
+        "repeat": "repeat_1",
+        "training_seed": 42,
+        "model_state": "selected_surviving_state",
+        "optimizer_state": "fresh",
+        "scheduler_state": schema.FRESH_SCHEDULER,
+    }]
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["comparison_axis"] == (
+        "recovery learning rate; inherited compact weights, fresh optimizer and fresh scheduler"
+    )
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+    assert report["budget"]["number_of_physical_branches"] == 1
+    assert report["budget"]["total_unique_training_epochs_all_branches"] == 150
+
+
 @pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
 @pytest.mark.parametrize("step_mode", ["fixed", "auto"])
 def test_search60_nightly_profiles_are_exact_v3_overrides(stem, drops, step_mode):
