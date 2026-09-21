@@ -1,0 +1,34 @@
+# @package _global_
+# One 60-epoch adaptive search aimed at an approximately 5M-parameter physical
+# export. Run this profile with --search-only: the selected gated checkpoint is
+# retained for provenance, while export_only/deployment.pt is the compact model.
+defaults:
+  - /experiment/pruning_v3/one_shot_60_90_inherited_vs_scratch
+  - _self_
+
+one_shot:
+  # Keep a nonzero search-end LR so the selected checkpoint can later be used
+  # for mapped-optimizer recovery without changing this search experiment.
+  search_scheduler_eta_min: 0.00066443
+
+accuracy_guided:
+  eligibility:
+    # This permits the learned-closed selector to cross 5M. The all-boundary
+    # floor at this ratio is about 4.39M; it is a safety floor, not a quota.
+    min_keep_ratio: 0.14
+
+training_arguments:
+  adaptive_lambda:
+    enabled: true
+    # Aggressive but still validation-controlled: adaptive lambda backs off
+    # according to the immutable dense validation reference.
+    soft_drop: 0.0125
+    hard_drop: 0.0175
+    update_every_search_epochs: 1
+    log_step: auto
+
+mlflow:
+  run_name: target5m_search60_single
+
+run_history:
+  run_name: target5m_search60_single
