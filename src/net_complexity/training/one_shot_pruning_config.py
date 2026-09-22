@@ -251,7 +251,11 @@ def validate_inputs(config):
     validate_config(config)
     quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
     try:
-        kwargs = {"allow_optimizer_lr_difference": True} if quality_recovery else {}
+        kwargs = ({
+            "allow_optimizer_lr_difference": True,
+            "allow_scheduler_eta_min_difference": True,
+            "allow_label_smoothing_difference": True,
+        } if quality_recovery else {})
         return _reference_origin_info(config, _validate_v3_inputs(to_v3_config(config), **kwargs))
     except FileNotFoundError:
         paths = {**dict(config.accuracy_guided.reference),
@@ -297,6 +301,8 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         to_v3_config(config),
         check_inputs=check_inputs,
         allow_optimizer_lr_difference=quality_recovery,
+        allow_scheduler_eta_min_difference=quality_recovery,
+        allow_label_smoothing_difference=quality_recovery,
     )
     if check_inputs:
         shared["inputs"] = _reference_origin_info(config, shared["inputs"])
@@ -351,7 +357,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
                 f"CosineAnnealingLR(T_max={one['search_scheduler_horizon_epochs']}); recovery uses a fresh cosine"),
             "comparison_axis": (
                 "optimizer and scheduler state only" if continued_search_scheduler
-                else "recovery learning rate; inherited compact weights, fresh optimizer and fresh scheduler"
+                else "recovery LR, cosine eta_min, or label smoothing; inherited compact weights and fresh state"
                 if quality_recovery
                 else "recovery seed only; mapped optimizer and fresh scheduler fixed"
             ),

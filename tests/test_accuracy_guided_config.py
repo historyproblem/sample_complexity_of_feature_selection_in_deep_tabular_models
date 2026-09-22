@@ -108,18 +108,52 @@ def test_compatible_inputs_verified_read_only(input_config):
     assert {p: p.read_bytes() for p in paths} == before
 
 
-def test_reference_optimizer_lr_exception_is_explicit_and_narrow(input_config):
+def test_reference_recovery_exceptions_are_explicit_and_narrow(input_config):
     input_config.optimizer.lr = 0.002
+    input_config.scheduler.eta_min = 0.00025
+    OmegaConf.update(input_config, "model.criterion.label_smoothing", 0.10, force_add=True)
     with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
         validate_inputs(input_config)
 
-    report = validate_inputs(input_config, allow_optimizer_lr_difference=True)
+    report = validate_inputs(
+        input_config,
+        allow_optimizer_lr_difference=True,
+        allow_scheduler_eta_min_difference=True,
+        allow_label_smoothing_difference=True,
+    )
     assert report["status"] == "ready"
-    assert report["reference_compatibility_allowed_differences"] == ["optimizer.lr"]
+    assert report["reference_compatibility_allowed_differences"] == [
+        "optimizer.lr", "scheduler.eta_min", "model.criterion.label_smoothing",
+    ]
 
     input_config.optimizer.weight_decay = 0.001
     with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
-        validate_inputs(input_config, allow_optimizer_lr_difference=True)
+        validate_inputs(
+            input_config,
+            allow_optimizer_lr_difference=True,
+            allow_scheduler_eta_min_difference=True,
+            allow_label_smoothing_difference=True,
+        )
+
+    input_config.optimizer.weight_decay = 0.0005
+    input_config.scheduler.T_max = 199
+    with pytest.raises(ValueError, match="reference compatibility differs: scheduler"):
+        validate_inputs(
+            input_config,
+            allow_optimizer_lr_difference=True,
+            allow_scheduler_eta_min_difference=True,
+            allow_label_smoothing_difference=True,
+        )
+
+    input_config.scheduler.T_max = 200
+    OmegaConf.update(input_config, "model.criterion.reduction", "sum", force_add=True)
+    with pytest.raises(ValueError, match="reference compatibility differs: model.criterion"):
+        validate_inputs(
+            input_config,
+            allow_optimizer_lr_difference=True,
+            allow_scheduler_eta_min_difference=True,
+            allow_label_smoothing_difference=True,
+        )
 
 
 @pytest.mark.parametrize("mutation", ["missing", "nan", "short_curve", "trained_init", "source_split", "test_reference"])

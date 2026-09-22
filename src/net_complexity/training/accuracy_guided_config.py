@@ -166,18 +166,26 @@ def _reference_curve(path, total):
     return rows
 
 
-def inspect_inputs(config, *, load_initializer=True, allow_optimizer_lr_difference=False):
+def inspect_inputs(
+        config, *, load_initializer=True, allow_optimizer_lr_difference=False,
+        allow_scheduler_eta_min_difference=False, allow_label_smoothing_difference=False):
     """Report missing paths; validate existing inputs without changing any file."""
     total = validate_config_v3(config)
     cfg = OmegaConf.to_container(config, resolve=True)
     p = cfg["accuracy_guided"]
     paths = {**p["reference"], "initializer_path": p["initializer"]["path"]}
     missing = [key for key, value in paths.items() if value is None or not Path(value).is_file()]
+    allowed_differences = []
+    if allow_optimizer_lr_difference:
+        allowed_differences.append("optimizer.lr")
+    if allow_scheduler_eta_min_difference:
+        allowed_differences.append("scheduler.eta_min")
+    if allow_label_smoothing_difference:
+        allowed_differences.append("model.criterion.label_smoothing")
     result = {"status": "blocked_missing_inputs" if missing else "ready", "missing_inputs": missing,
               "paths": {key: str(Path(value).resolve()) if value else None for key, value in paths.items()},
               "sha256": {key: file_hash(value) for key, value in paths.items() if value and Path(value).is_file()},
-              "reference_compatibility_allowed_differences": (
-                  ["optimizer.lr"] if allow_optimizer_lr_difference else []),
+              "reference_compatibility_allowed_differences": allowed_differences,
               "reference_split": "validation", "reference_training_cost": "external; not charged to this new model"}
     if "history_path" not in missing:
         curve = _reference_curve(paths["history_path"], total)
@@ -207,7 +215,7 @@ def inspect_inputs(config, *, load_initializer=True, allow_optimizer_lr_differen
         source = OmegaConf.load(paths["config_path"])
         for key in ("dataloaders.train_val_ratio", "dataloaders.seed", "dataloaders.loader_seed",
                     "dataloaders.batch_size", "dataloaders.taskname", "dataloaders._target_", "optimizer",
-                    "scheduler", "model.backbone.num_classes", "model.backbone._target_",
+                    "scheduler", "model.criterion", "model.backbone.num_classes", "model.backbone._target_",
                     "model.backbone.stem_kernel_size", "model.backbone.stem_stride", "model.backbone.stem_padding",
                     "model.backbone.use_maxpool"):
             source_value, config_value = OmegaConf.select(source, key), OmegaConf.select(config, key)
@@ -220,6 +228,22 @@ def inspect_inputs(config, *, load_initializer=True, allow_optimizer_lr_differen
                          "reference compatibility optimizer requires lr")
                 source_value.pop("lr")
                 config_value.pop("lr")
+            elif key == "scheduler" and allow_scheduler_eta_min_difference:
+                source_value = OmegaConf.to_container(source_value, resolve=True)
+                config_value = OmegaConf.to_container(config_value, resolve=True)
+                _require(isinstance(source_value, dict) and isinstance(config_value, dict),
+                         "reference compatibility scheduler must be a mapping")
+                _require("eta_min" in source_value and "eta_min" in config_value,
+                         "reference compatibility scheduler requires eta_min")
+                source_value.pop("eta_min")
+                config_value.pop("eta_min")
+            elif key == "model.criterion" and allow_label_smoothing_difference:
+                source_value = OmegaConf.to_container(source_value, resolve=True)
+                config_value = OmegaConf.to_container(config_value, resolve=True)
+                _require(isinstance(source_value, dict) and isinstance(config_value, dict),
+                         "reference compatibility criterion must be a mapping")
+                source_value.pop("label_smoothing", None)
+                config_value.pop("label_smoothing", None)
             _require(source_value == config_value, f"reference compatibility differs: {key}")
         _require(any(OmegaConf.select(metric, "_target_") == "net_complexity.metrics.classification.Accuracy"
                      and OmegaConf.select(metric, "return_counts") is True for metric in source.metrics.valid_metrics),
@@ -256,18 +280,24 @@ def code_provenance(root=ROOT):
         return {"commit": None, "dirty_diff_sha256": None, "status": "vcs_metadata_unavailable"}
 
 
-def validate_inputs(config, *, allow_optimizer_lr_difference=False):
+def validate_inputs(
+        config, *, allow_optimizer_lr_difference=False,
+        allow_scheduler_eta_min_difference=False, allow_label_smoothing_difference=False):
     """Training preflight: missing/incompatible reference never triggers training."""
     result = inspect_inputs(
         config,
         allow_optimizer_lr_difference=allow_optimizer_lr_difference,
+        allow_scheduler_eta_min_difference=allow_scheduler_eta_min_difference,
+        allow_label_smoothing_difference=allow_label_smoothing_difference,
     )
     if result["missing_inputs"]:
         raise FileNotFoundError(f"Blocked: required immutable reference/initializer inputs missing: {result['missing_inputs']}")
     return result
 
 
-def resolved_v3(config, *, check_inputs=True, allow_optimizer_lr_difference=False):
+def resolved_v3(
+        config, *, check_inputs=True, allow_optimizer_lr_difference=False,
+        allow_scheduler_eta_min_difference=False, allow_label_smoothing_difference=False):
     total = validate_config_v3(config)
     cfg = OmegaConf.to_container(config, resolve=True)
     p, a = cfg["accuracy_guided"], cfg["training_arguments"]["adaptive_lambda"]
@@ -291,6 +321,8 @@ def resolved_v3(config, *, check_inputs=True, allow_optimizer_lr_difference=Fals
                 inspect_inputs(
                     config,
                     allow_optimizer_lr_difference=allow_optimizer_lr_difference,
+                    allow_scheduler_eta_min_difference=allow_scheduler_eta_min_difference,
+                    allow_label_smoothing_difference=allow_label_smoothing_difference,
                 )
                 if check_inputs else {"status": "not_inspected"}
             ),

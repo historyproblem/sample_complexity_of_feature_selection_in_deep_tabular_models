@@ -110,11 +110,19 @@ def test_target5m_quality_recovery_is_one_fresh_90_epoch_branch():
     }]
     report = schema.resolved_one_shot(cfg, check_inputs=False)
     assert report["execution_policy"]["comparison_axis"] == (
-        "recovery learning rate; inherited compact weights, fresh optimizer and fresh scheduler"
+        "recovery LR, cosine eta_min, or label smoothing; inherited compact weights and fresh state"
     )
     assert report["budget"]["per_branch_budget_including_shared_search"] == 150
     assert report["budget"]["number_of_physical_branches"] == 1
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 150
+
+    tuned = schema.compose_config(schema.QUALITY_RECOVERY_CONFIG_NAME, overrides=[
+        "scheduler.eta_min=0.00025",
+        "+model.criterion.label_smoothing=0.10",
+    ])
+    assert schema.validate_config(tuned) == 150
+    assert tuned.scheduler.eta_min == pytest.approx(0.00025)
+    assert tuned.model.criterion.label_smoothing == pytest.approx(0.10)
 
 
 @pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
@@ -381,16 +389,20 @@ def _relocated_synthetic_inputs(
     return cfg, source, paths
 
 
-def test_quality_recovery_reference_check_allows_only_lr_sweep(tmp_path):
+def test_quality_recovery_reference_check_allows_only_declared_recovery_axes(tmp_path):
     cfg, _, _ = _relocated_synthetic_inputs(
         tmp_path,
         config_name=schema.QUALITY_RECOVERY_CONFIG_NAME,
     )
     cfg.optimizer.lr = 0.002
+    cfg.scheduler.eta_min = 0.00025
+    OmegaConf.update(cfg, "model.criterion.label_smoothing", 0.10, force_add=True)
 
     result = schema.validate_inputs(cfg)
     assert result["status"] == "ready"
-    assert result["reference_compatibility_allowed_differences"] == ["optimizer.lr"]
+    assert result["reference_compatibility_allowed_differences"] == [
+        "optimizer.lr", "scheduler.eta_min", "model.criterion.label_smoothing",
+    ]
     assert schema.resolved_one_shot(cfg)["inputs"]["status"] == "ready"
 
     cfg.optimizer.weight_decay = 0.001

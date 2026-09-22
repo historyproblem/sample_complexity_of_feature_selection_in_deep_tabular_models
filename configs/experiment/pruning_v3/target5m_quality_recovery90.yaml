@@ -3,8 +3,9 @@
 # target5m 60-epoch search. The launcher requires --reuse-search, so this command
 # executes exactly one new 90-epoch physical-model training branch.
 #
-# Keep every setting fixed and vary only optimizer.lr. Recommended first sweep:
-#   0.0003, 0.001 (default), 0.002
+# Supported recovery-only ablation axes are optimizer.lr, scheduler.eta_min,
+# and model.criterion.label_smoothing. Keep all non-target axes fixed.
+# Recommended first LR sweep: 0.0003, 0.001 (default), 0.002.
 # Give every candidate a different --output and pass --skip-test. Select the
 # winner by validation, then run official frozen test inference only once.
 defaults:
@@ -31,7 +32,7 @@ one_shot:
 
 optimizer:
   # The 1e-3 baseline gave the strongest validation result in the earlier
-  # optimizer/scheduler handoff study. Override only this field for the sweep.
+  # optimizer/scheduler handoff study.
   lr: 0.001
 
 scheduler:

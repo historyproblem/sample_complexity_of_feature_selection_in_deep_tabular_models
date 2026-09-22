@@ -17,6 +17,7 @@ from net_complexity.training.one_shot_pruning_config import (
     FRESH_SCHEDULER,
     MAPPED_REPEATS_PROTOCOL,
     MAPPED_OPTIMIZER,
+    QUALITY_RECOVERY_PROTOCOL,
     RESUMED_SCHEDULER,
     resolved_branch_plan,
     to_v3_config,
@@ -363,6 +364,63 @@ def test_completed_search_can_feed_two_mapped_recoveries_with_fresh_schedulers(t
     }
     assert ledger["attributed_training_epochs_including_reused_search"] == 7
     assert ledger["actual_training_epochs_executed"] == 4
+
+
+def test_quality_recovery_applies_label_smoothing_and_nonzero_cosine_floor(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    search_dir = tmp_path / "search"
+    run_one_shot_pruning(cfg, search_dir, search_only=True)
+
+    recovery_cfg = deepcopy(cfg)
+    OmegaConf.update(recovery_cfg, "one_shot", {
+        "protocol": QUALITY_RECOVERY_PROTOCOL,
+        "search_epochs": 3,
+        "final_epochs": 2,
+        "reuse_search_required": True,
+        "search_scheduler_horizon_epochs": 3,
+        "search_scheduler_eta_min": 0.0,
+        "execution_order": "single",
+        "methods": [{
+            "id": "fresh_optimizer_fresh_scheduler",
+            "model_state": "selected_surviving_state",
+            "optimizer_state": "fresh",
+            "scheduler_state": FRESH_SCHEDULER,
+        }],
+        "repeats": [{"id": "repeat_1", "training_seed": 42}],
+    }, merge=False, force_add=True)
+    recovery_cfg.accuracy_guided.stage_plan[2].restart_policy = (
+        "branch_specific_optimizer_scheduler_handoff"
+    )
+    recovery_cfg.scheduler.eta_min = 0.00025
+    OmegaConf.update(
+        recovery_cfg, "model.criterion.label_smoothing", 0.10, force_add=True,
+    )
+    validate_config(recovery_cfg)
+
+    output = tmp_path / "recovery"
+    result = run_one_shot_pruning(
+        recovery_cfg,
+        output,
+        reuse_search_from=search_dir,
+    )
+
+    branch_name = "fresh_optimizer_fresh_scheduler__repeat_1"
+    assert result["status"] == "completed"
+    assert result["stages"][branch_name]["scheduler"] == {
+        "_target_": "torch.optim.lr_scheduler.CosineAnnealingLR",
+        "T_max": 2,
+        "eta_min": 0.00025,
+        "interval": "epoch",
+    }
+    first = torch.load(
+        next((output / branch_name).rglob("epoch_0001.pt")),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert first["scheduler_state_dict"]["T_max"] == 2
+    assert first["scheduler_state_dict"]["eta_min"] == pytest.approx(0.00025)
+    resolved = OmegaConf.load(output / "resolved_config.yaml")
+    assert resolved.model.criterion.label_smoothing == pytest.approx(0.10)
 
 
 def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):
