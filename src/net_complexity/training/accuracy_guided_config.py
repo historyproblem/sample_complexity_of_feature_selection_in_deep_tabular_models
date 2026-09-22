@@ -166,7 +166,7 @@ def _reference_curve(path, total):
     return rows
 
 
-def inspect_inputs(config, *, load_initializer=True):
+def inspect_inputs(config, *, load_initializer=True, allow_optimizer_lr_difference=False):
     """Report missing paths; validate existing inputs without changing any file."""
     total = validate_config_v3(config)
     cfg = OmegaConf.to_container(config, resolve=True)
@@ -176,6 +176,8 @@ def inspect_inputs(config, *, load_initializer=True):
     result = {"status": "blocked_missing_inputs" if missing else "ready", "missing_inputs": missing,
               "paths": {key: str(Path(value).resolve()) if value else None for key, value in paths.items()},
               "sha256": {key: file_hash(value) for key, value in paths.items() if value and Path(value).is_file()},
+              "reference_compatibility_allowed_differences": (
+                  ["optimizer.lr"] if allow_optimizer_lr_difference else []),
               "reference_split": "validation", "reference_training_cost": "external; not charged to this new model"}
     if "history_path" not in missing:
         curve = _reference_curve(paths["history_path"], total)
@@ -208,7 +210,17 @@ def inspect_inputs(config, *, load_initializer=True):
                     "scheduler", "model.backbone.num_classes", "model.backbone._target_",
                     "model.backbone.stem_kernel_size", "model.backbone.stem_stride", "model.backbone.stem_padding",
                     "model.backbone.use_maxpool"):
-            _require(OmegaConf.select(source, key) == OmegaConf.select(config, key), f"reference compatibility differs: {key}")
+            source_value, config_value = OmegaConf.select(source, key), OmegaConf.select(config, key)
+            if key == "optimizer" and allow_optimizer_lr_difference:
+                source_value = OmegaConf.to_container(source_value, resolve=True)
+                config_value = OmegaConf.to_container(config_value, resolve=True)
+                _require(isinstance(source_value, dict) and isinstance(config_value, dict),
+                         "reference compatibility optimizer must be a mapping")
+                _require("lr" in source_value and "lr" in config_value,
+                         "reference compatibility optimizer requires lr")
+                source_value.pop("lr")
+                config_value.pop("lr")
+            _require(source_value == config_value, f"reference compatibility differs: {key}")
         _require(any(OmegaConf.select(metric, "_target_") == "net_complexity.metrics.classification.Accuracy"
                      and OmegaConf.select(metric, "return_counts") is True for metric in source.metrics.valid_metrics),
                  "reference accuracy must be sample weighted")
@@ -244,15 +256,18 @@ def code_provenance(root=ROOT):
         return {"commit": None, "dirty_diff_sha256": None, "status": "vcs_metadata_unavailable"}
 
 
-def validate_inputs(config):
+def validate_inputs(config, *, allow_optimizer_lr_difference=False):
     """Training preflight: missing/incompatible reference never triggers training."""
-    result = inspect_inputs(config)
+    result = inspect_inputs(
+        config,
+        allow_optimizer_lr_difference=allow_optimizer_lr_difference,
+    )
     if result["missing_inputs"]:
         raise FileNotFoundError(f"Blocked: required immutable reference/initializer inputs missing: {result['missing_inputs']}")
     return result
 
 
-def resolved_v3(config, *, check_inputs=True):
+def resolved_v3(config, *, check_inputs=True, allow_optimizer_lr_difference=False):
     total = validate_config_v3(config)
     cfg = OmegaConf.to_container(config, resolve=True)
     p, a = cfg["accuracy_guided"], cfg["training_arguments"]["adaptive_lambda"]
@@ -272,5 +287,11 @@ def resolved_v3(config, *, check_inputs=True):
                         "rebase": "preserve alpha and consumed clocks, clear paired-gap window once per transition"},
             "clocks": ["global_training_epoch", "search_epochs_consumed", "local_search_epoch"],
             "conflicting_legacy_options": [],
-            "inputs": inspect_inputs(config) if check_inputs else {"status": "not_inspected"},
+            "inputs": (
+                inspect_inputs(
+                    config,
+                    allow_optimizer_lr_difference=allow_optimizer_lr_difference,
+                )
+                if check_inputs else {"status": "not_inspected"}
+            ),
             "code": code_provenance()}

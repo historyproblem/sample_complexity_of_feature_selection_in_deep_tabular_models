@@ -108,6 +108,20 @@ def test_compatible_inputs_verified_read_only(input_config):
     assert {p: p.read_bytes() for p in paths} == before
 
 
+def test_reference_optimizer_lr_exception_is_explicit_and_narrow(input_config):
+    input_config.optimizer.lr = 0.002
+    with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
+        validate_inputs(input_config)
+
+    report = validate_inputs(input_config, allow_optimizer_lr_difference=True)
+    assert report["status"] == "ready"
+    assert report["reference_compatibility_allowed_differences"] == ["optimizer.lr"]
+
+    input_config.optimizer.weight_decay = 0.001
+    with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
+        validate_inputs(input_config, allow_optimizer_lr_difference=True)
+
+
 @pytest.mark.parametrize("mutation", ["missing", "nan", "short_curve", "trained_init", "source_split", "test_reference"])
 def test_bad_reference_or_initializer_is_never_repaired_or_trained(input_config, mutation):
     cfg = input_config

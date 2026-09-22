@@ -350,14 +350,17 @@ def test_historical_reference_bundle_is_selected_as_a_complete_pair(
     assert result["initializer_path"] == str(tmp_path / "shared_random_seed42.pt")
 
 
-def _relocated_synthetic_inputs(directory, *, historical_bundle=False):
+def _relocated_synthetic_inputs(
+        directory, *, historical_bundle=False, config_name=schema.CONFIG_NAME):
     """Move real zero-epoch fixture artifacts into the user-facing source layout."""
     from net_complexity.training.pruning_synthetic import make_synthetic_config
     old = directory / "original fixture"
     cfg = make_synthetic_config(old)
-    one_shot = schema.compose_config()
+    one_shot = schema.compose_config(config_name)
     OmegaConf.update(cfg, "one_shot", OmegaConf.to_container(one_shot.one_shot), force_add=True)
     cfg.one_shot.search_epochs, cfg.one_shot.final_epochs = 3, 2
+    if "search_scheduler_horizon_epochs" in cfg.one_shot:
+        cfg.one_shot.search_scheduler_horizon_epochs = 3
     cfg.accuracy_guided.total_epochs = cfg.training_arguments.num_epochs = 5
     cfg.accuracy_guided.guard.train_bn_calibration_batches = 0
     cfg.accuracy_guided.stage_plan = one_shot.accuracy_guided.stage_plan
@@ -376,6 +379,23 @@ def _relocated_synthetic_inputs(directory, *, historical_bundle=False):
     cfg.accuracy_guided.initializer.path = paths["initializer_path"]
     old.rmdir()
     return cfg, source, paths
+
+
+def test_quality_recovery_reference_check_allows_only_lr_sweep(tmp_path):
+    cfg, _, _ = _relocated_synthetic_inputs(
+        tmp_path,
+        config_name=schema.QUALITY_RECOVERY_CONFIG_NAME,
+    )
+    cfg.optimizer.lr = 0.002
+
+    result = schema.validate_inputs(cfg)
+    assert result["status"] == "ready"
+    assert result["reference_compatibility_allowed_differences"] == ["optimizer.lr"]
+    assert schema.resolved_one_shot(cfg)["inputs"]["status"] == "ready"
+
+    cfg.optimizer.weight_decay = 0.001
+    with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
+        schema.validate_inputs(cfg)
 
 
 @pytest.mark.parametrize("historical_bundle", [False, True])

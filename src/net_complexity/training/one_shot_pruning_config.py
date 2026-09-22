@@ -249,8 +249,10 @@ def _reference_origin_info(config, result):
 
 def validate_inputs(config):
     validate_config(config)
+    quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
     try:
-        return _reference_origin_info(config, _validate_v3_inputs(to_v3_config(config)))
+        kwargs = {"allow_optimizer_lr_difference": True} if quality_recovery else {}
+        return _reference_origin_info(config, _validate_v3_inputs(to_v3_config(config), **kwargs))
     except FileNotFoundError:
         paths = {**dict(config.accuracy_guided.reference),
                  "initializer_path": config.accuracy_guided.initializer.path}
@@ -290,7 +292,12 @@ def output_paths(config, output_root=None):
 
 def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     total = validate_config(config)
-    shared = resolved_v3(to_v3_config(config), check_inputs=check_inputs)
+    quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
+    shared = resolved_v3(
+        to_v3_config(config),
+        check_inputs=check_inputs,
+        allow_optimizer_lr_difference=quality_recovery,
+    )
     if check_inputs:
         shared["inputs"] = _reference_origin_info(config, shared["inputs"])
     one = OmegaConf.to_container(config.one_shot, resolve=True)
