@@ -125,6 +125,42 @@ def test_target5m_quality_recovery_is_one_fresh_90_epoch_branch():
     assert tuned.model.criterion.label_smoothing == pytest.approx(0.10)
 
 
+def test_parameter_curve_profiles_are_independent_60_plus_90_models():
+    search = schema.compose_config(
+        "experiment/pruning_v3/parameter_curve_search60"
+    )
+    assert schema.validate_config(search) == 150
+    assert search.one_shot.protocol == schema.PROTOCOL
+    assert search.one_shot.search_epochs == 60
+    assert search.one_shot.final_epochs == 90
+    assert search.one_shot.search_scheduler_eta_min == pytest.approx(0.00066443)
+    assert search.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.08)
+    assert search.training_arguments.adaptive_lambda.enabled is True
+    assert search.training_arguments.adaptive_lambda.soft_drop == pytest.approx(0.0125)
+    assert search.training_arguments.adaptive_lambda.hard_drop == pytest.approx(0.0175)
+    assert "label_smoothing" not in search.model.criterion
+
+    recovery = schema.compose_config(
+        "experiment/pruning_v3/parameter_curve_recovery90_ls005"
+    )
+    assert schema.validate_config(recovery) == 150
+    assert recovery.one_shot.protocol == schema.QUALITY_RECOVERY_PROTOCOL
+    assert recovery.one_shot.reuse_search_required is True
+    assert recovery.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.08)
+    assert recovery.optimizer.lr == pytest.approx(0.001)
+    assert recovery.scheduler.eta_min == pytest.approx(0.0)
+    assert recovery.model.criterion.label_smoothing == pytest.approx(0.05)
+    assert schema.resolved_branch_plan(recovery) == [{
+        "id": "fresh_optimizer_fresh_scheduler__repeat_1",
+        "method": "fresh_optimizer_fresh_scheduler",
+        "repeat": "repeat_1",
+        "training_seed": 42,
+        "model_state": "selected_surviving_state",
+        "optimizer_state": "fresh",
+        "scheduler_state": schema.FRESH_SCHEDULER,
+    }]
+
+
 @pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
 @pytest.mark.parametrize("step_mode", ["fixed", "auto"])
 def test_search60_nightly_profiles_are_exact_v3_overrides(stem, drops, step_mode):

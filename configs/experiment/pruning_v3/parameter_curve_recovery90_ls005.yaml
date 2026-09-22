@@ -1,0 +1,28 @@
+# @package _global_
+# Recovery half of one independently searched parameter/quality point. This is
+# the successful third recovery recipe (93.18% exploratory official-test
+# accuracy): inherited compact weights, fresh AdamW at 1e-3, a fresh 90-epoch
+# cosine ending at zero, and label smoothing 0.05.
+defaults:
+  - /experiment/pruning_v3/target5m_quality_recovery90
+  - _self_
+
+model:
+  criterion:
+    label_smoothing: 0.05
+
+optimizer:
+  lr: 0.001
+
+scheduler:
+  eta_min: 0.0
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.08
+
+mlflow:
+  run_name: parameter_curve_recovery90_ls005
+
+run_history:
+  run_name: parameter_curve_recovery90_ls005

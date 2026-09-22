@@ -1,0 +1,21 @@
+# @package _global_
+# Search half of the four-point parameter/quality curve. Each curve point runs
+# its own 60-epoch adaptive search; the paired recovery profile then consumes
+# that exact selected checkpoint for another 90 epochs.
+#
+# The 0.08 keep ratio is a shared safety floor for every point, not a parameter
+# target. Actual compact width remains determined by learned gates plus the
+# validation-controlled soft/hard-drop policy supplied by the launch command.
+defaults:
+  - /experiment/pruning_v3/target5m_search60_single
+  - _self_
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.08
+
+mlflow:
+  run_name: parameter_curve_search60
+
+run_history:
+  run_name: parameter_curve_search60
