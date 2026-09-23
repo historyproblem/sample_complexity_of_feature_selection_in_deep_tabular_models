@@ -52,6 +52,9 @@ from .pruning_resume import validate_epoch_eval_checkpoint
 from .randomness import set_random_seed
 
 
+NO_FEASIBLE_FALLBACK_LAST_EPOCHS = 30
+
+
 def physical_architecture_signature(model):
     """Structure and original-coordinate indices, independently of learned values."""
     shapes = {name: {"shape": list(tensor.shape), "dtype": str(tensor.dtype)}
@@ -384,31 +387,44 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                             "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
                         if index % 10 == 0 or index == len(paths):
                             progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
-                selected, selection_trace = select_checkpoint_records(candidates, reference[search_epochs],
-                    float(cfg.training_arguments.adaptive_lambda.hard_drop), search=True)
+                selected, selection_trace = select_checkpoint_records(
+                    candidates,
+                    reference[search_epochs],
+                    float(cfg.training_arguments.adaptive_lambda.hard_drop),
+                    search=True,
+                    no_feasible_fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
+                )
                 selection_trace["reference_epoch"] = search_epochs
-                if selection_trace["no_feasible_search"]:
+                if selection_trace["no_feasible_search"] and not selection_trace["fallback_used"]:
                     state.update(status="no_feasible_search", selection=selection_trace)
                     write_json(output_root / "selection.json", selection_trace)
                     persist()
                     progress_message("selection", "no feasible search checkpoint; stopping before export and branch training")
                     return state
+                if selection_trace["fallback_used"]:
+                    progress_message(
+                        "selection",
+                        "no checkpoint met the quality threshold; "
+                        f"falling back to best validation in epochs "
+                        f"{selection_trace['fallback_epoch_start']}-{search_epochs}",
+                    )
             else:
                 source_root = Path(reuse_search_from).expanduser().resolve()
                 source_state_path = source_root / "one_shot_state.json"
                 source_selection_path = source_root / "selection.json"
                 source_diagnostics_path = source_root / "export_only/diagnostics.json"
                 source_checkpoint_path = source_root / "selected_checkpoint.pt"
-                required = (source_state_path, source_selection_path,
-                            source_diagnostics_path, source_checkpoint_path)
+                required = (source_state_path, source_selection_path)
                 missing = [str(path) for path in required if not path.is_file()]
                 if missing:
                     raise FileNotFoundError("Reusable search is incomplete; missing: " + ", ".join(missing))
                 source_state = json.loads(source_state_path.read_text())
                 source_selection = json.loads(source_selection_path.read_text())
-                source_diagnostics = json.loads(source_diagnostics_path.read_text())
-                if source_state.get("status") != "search_only_completed":
-                    raise ValueError("Reusable search must have status=search_only_completed")
+                source_status = source_state.get("status")
+                if source_status not in {"search_only_completed", "no_feasible_search"}:
+                    raise ValueError(
+                        "Reusable search must have status=search_only_completed or no_feasible_search"
+                    )
                 source_provenance = source_state.get("provenance", {})
                 if source_provenance.get("split_indices_hash") != split_hash:
                     raise ValueError("Reusable search used a different train/validation split")
@@ -419,43 +435,82 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     raise ValueError("Reusable search used a different zero-epoch initializer")
                 if int(source_state.get("shared_search_ledger", {}).get("search_epochs_consumed", -1)) != search_epochs:
                     raise ValueError("Reusable search did not complete the configured search budget")
-                if file_hash(source_checkpoint_path) != source_selection.get("selected_checkpoint_hash"):
-                    raise ValueError("Reusable selected checkpoint hash differs from selection.json")
-                source_mask = source_selection.get("pruning_mask")
-                if not isinstance(source_mask, dict) or mask_hash(source_mask) != source_selection.get("mask_hash"):
-                    raise ValueError("Reusable search mask differs from selection.json identity")
+                reused_fallback = source_status == "no_feasible_search"
+                if reused_fallback:
+                    records = source_selection.get("trace")
+                    if not isinstance(records, list) or not records:
+                        raise ValueError("No-feasible reusable search has no checkpoint trace")
+                    selected, selection_trace = select_checkpoint_records(
+                        records,
+                        source_selection["reference_accuracy"],
+                        source_selection["reference_accuracy"] - source_selection["quality_threshold"],
+                        search=True,
+                        no_feasible_fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
+                    )
+                    selection_trace["reference_epoch"] = int(
+                        source_selection.get("reference_epoch", search_epochs)
+                    )
+                    source_checkpoint_path = Path(selected["path"]).expanduser().resolve()
+                    if source_root not in source_checkpoint_path.parents:
+                        raise ValueError("Fallback checkpoint is outside the reusable search directory")
+                    if not source_checkpoint_path.is_file():
+                        raise FileNotFoundError(
+                            f"Reusable fallback checkpoint is missing: {source_checkpoint_path}"
+                        )
+                    source_ledger = source_state.get("shared_search_ledger")
+                    if not isinstance(source_ledger, dict):
+                        raise ValueError("Reusable no-feasible search has no consumed search ledger")
+                else:
+                    required = (source_diagnostics_path, source_checkpoint_path)
+                    missing = [str(path) for path in required if not path.is_file()]
+                    if missing:
+                        raise FileNotFoundError(
+                            "Reusable search is incomplete; missing: " + ", ".join(missing)
+                        )
+                    source_diagnostics = json.loads(source_diagnostics_path.read_text())
+                    if file_hash(source_checkpoint_path) != source_selection.get("selected_checkpoint_hash"):
+                        raise ValueError("Reusable selected checkpoint hash differs from selection.json")
+                    source_mask = source_selection.get("pruning_mask")
+                    if not isinstance(source_mask, dict) or mask_hash(source_mask) != source_selection.get("mask_hash"):
+                        raise ValueError("Reusable search mask differs from selection.json identity")
+                    selected = {
+                        "epoch": int(source_selection["selected_epoch"]),
+                        "path": str(source_checkpoint_path),
+                        "accuracy": float(source_diagnostics["gated_validation"]["accuracy"]),
+                        "ce_loss": float(source_diagnostics["gated_validation"]["ce_loss"]),
+                        "physical_cost": int(source_diagnostics["physical_cost"]["physical_total_parameters"]),
+                        "pruning_mask": source_mask,
+                        "selector": source_diagnostics["selector"],
+                    }
+                    selection_trace = deepcopy(source_selection["trace"])
+                    source_ledger = source_selection.get("search_ledger_consumed")
+                    if not isinstance(source_ledger, dict):
+                        raise ValueError("Reusable selection has no consumed search ledger")
                 source_payload = torch.load(source_checkpoint_path, map_location="cpu", weights_only=True)
-                if int(source_payload.get("epoch", -1)) != int(source_selection.get("selected_epoch", -2)):
-                    raise ValueError("Reusable checkpoint epoch differs from selection.json")
-                source_ledger = source_selection.get("search_ledger_consumed")
-                if not isinstance(source_ledger, dict):
-                    raise ValueError("Reusable selection has no consumed search ledger")
+                if int(source_payload.get("epoch", -1)) != int(selected["epoch"]):
+                    raise ValueError("Reusable checkpoint epoch differs from selected epoch")
                 search_ledger.update(deepcopy(source_ledger))
                 state["stages"]["shared_search"] = {
                     **deepcopy(source_state["stages"]["shared_search"]),
                     "reused_from": str(source_root),
                     "training_performed_by_this_command": False,
                 }
-                selected = {
-                    "epoch": int(source_selection["selected_epoch"]),
-                    "path": str(source_checkpoint_path),
-                    "accuracy": float(source_diagnostics["gated_validation"]["accuracy"]),
-                    "ce_loss": float(source_diagnostics["gated_validation"]["ce_loss"]),
-                    "physical_cost": int(source_diagnostics["physical_cost"]["physical_total_parameters"]),
-                    "pruning_mask": source_mask,
-                    "selector": source_diagnostics["selector"],
-                }
-                selection_trace = deepcopy(source_selection["trace"])
                 state["reused_search"] = {
                     "source": str(source_root),
                     "source_protocol": source_state.get("protocol"),
-                    "source_status": source_state["status"],
+                    "source_status": source_status,
                     "training_epochs_reused": search_epochs,
                     "training_epochs_executed_by_this_command": 0,
                 }
+                if reused_fallback:
+                    state["reused_search"].update(
+                        selection_recomputed_from_completed_trace=True,
+                        fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
+                    )
                 progress_message(
                     "shared_search",
-                    f"reusing completed search selection from {source_root}; epoch={selected['epoch']}",
+                    f"reusing completed search selection from {source_root}; epoch={selected['epoch']}"
+                    + ("; policy=best_validation_last_30_epochs" if reused_fallback else ""),
                 )
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:
@@ -474,7 +529,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 "selected_model_state_hash": state_hash(selected_carrier.state_dict()), "mask_hash": mask_hash(mask)}
             selection = {**identity, "pruning_mask": mask, "selected_epoch": selected["epoch"],
                 "quality_threshold": selection_trace["quality_threshold"], "reference_epoch": search_epochs,
-                "policy": "best_feasible_compact", "trace": selection_trace,
+                "policy": selection_trace["policy"], "trace": selection_trace,
                 "search_ledger_consumed": deepcopy(search_ledger)}
             if reuse_search_from is not None:
                 selection["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())

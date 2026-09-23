@@ -23,6 +23,7 @@ from net_complexity.training.one_shot_pruning_config import (
     to_v3_config,
     validate_config,
 )
+from net_complexity.training.accuracy_guided_pruning import select_checkpoint_records
 from net_complexity.training.pruning_audit import build_structural
 from net_complexity.training.pruning_measurement import isolated_diagnostic_rng, mask_hash, state_hash
 from net_complexity.training.pruning_synthetic import make_synthetic_config
@@ -481,14 +482,69 @@ def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_st
     }
 
 
-def test_no_feasible_shared_search_never_starts_a_recovery_branch(tmp_path):
+def test_no_feasible_shared_search_uses_recent_validation_fallback(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", reject_after=1)
     result = run_one_shot_pruning(cfg, tmp_path / "run")
-    assert result["status"] == "no_feasible_search"
-    assert result["branches"] == {}
-    assert result["export_only"] is None
-    assert result["compute_ledger"]["shared_search_epochs"] == 3
-    assert result["compute_ledger"]["actual_training_epochs_executed"] == 3
+    assert result["status"] == "completed"
+    assert result["selection"]["policy"] == "best_validation_last_epochs_fallback"
+    trace = result["selection"]["trace"]
+    assert trace["no_feasible_search"] is True
+    assert trace["fallback_used"] is True
+    assert trace["fallback_last_epochs"] == 30
+    assert trace["fallback_epoch_start"] == 1
+    assert trace["fallback_candidate_count"] == 3
+    expected = min(trace["trace"], key=lambda row: (-row["accuracy"], row["ce_loss"], row["epoch"]))
+    assert result["selection"]["selected_epoch"] == expected["epoch"]
+    assert set(result["branches"]) == {"inherited", "scratch"}
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 7
+
+
+def test_no_feasible_fallback_ignores_better_epochs_outside_recent_window():
+    records = [
+        {"epoch": epoch, "accuracy": 0.50 + epoch / 1000, "ce_loss": 1.0,
+         "physical_cost": 1000 - epoch}
+        for epoch in range(1, 41)
+    ]
+    records[0]["accuracy"] = 0.99
+    records[34]["accuracy"] = 0.90
+    selected, report = select_checkpoint_records(
+        records,
+        reference_accuracy=1.0,
+        hard_drop=0.0,
+        search=True,
+        no_feasible_fallback_last_epochs=30,
+    )
+    assert selected["epoch"] == 35
+    assert report["fallback_epoch_start"] == 11
+    assert report["fallback_candidate_count"] == 30
+
+
+def test_completed_no_feasible_search_can_be_reused_by_global_fallback(tmp_path, monkeypatch):
+    from net_complexity.training import one_shot_pruning as runtime
+
+    cfg = one_shot_fixture(tmp_path / "inputs", reject_after=1)
+    source = tmp_path / "legacy_no_feasible"
+    monkeypatch.setattr(runtime, "NO_FEASIBLE_FALLBACK_LAST_EPOCHS", None)
+    source_result = runtime.run_one_shot_pruning(cfg, source, search_only=True)
+    assert source_result["status"] == "no_feasible_search"
+    assert not (source / "selected_checkpoint.pt").exists()
+
+    monkeypatch.setattr(runtime, "NO_FEASIBLE_FALLBACK_LAST_EPOCHS", 30)
+    output = tmp_path / "recovered"
+    result = runtime.run_one_shot_pruning(cfg, output, reuse_search_from=source)
+
+    assert result["status"] == "completed"
+    assert result["selection"]["policy"] == "best_validation_last_epochs_fallback"
+    assert result["reused_search"] == {
+        "source": str(source.resolve()),
+        "source_protocol": "pruning_v3_one_shot_60_90",
+        "source_status": "no_feasible_search",
+        "training_epochs_reused": 3,
+        "training_epochs_executed_by_this_command": 0,
+        "selection_recomputed_from_completed_trace": True,
+        "fallback_last_epochs": 30,
+    }
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 4
 
 
 def test_unexplained_actual_gated_export_mismatch_stops_before_branch_training(tmp_path, monkeypatch):

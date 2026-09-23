@@ -212,7 +212,9 @@ def test_resolved_budget_and_output_paths_are_explicit(tmp_path):
     assert report["execution_policy"]["bn_calibration_batches"] == 0
     assert report["execution_policy"]["iterative_recovery_guard_executed"] is False
     assert report["execution_policy"]["shared_search_checkpoint_and_mask"] is True
-    assert report["execution_policy"]["no_feasible_search"] == "stop_before_export_and_branch_training"
+    assert report["execution_policy"]["no_feasible_search"] == (
+        "best_validation_accuracy_among_last_30_search_epochs"
+    )
     assert report["execution_policy"]["inherited_optimizer_state"] == "mapped_adamw_moments_and_step"
     assert report["execution_policy"]["scratch_optimizer_state"] == "fresh"
     assert report["output_paths"]["export_only"] == str(tmp_path / "run/export_only")

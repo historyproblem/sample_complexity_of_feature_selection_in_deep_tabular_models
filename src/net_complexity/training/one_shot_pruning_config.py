@@ -1,7 +1,8 @@
 """Strict adapters for shared-search compact-model comparison protocols.
 
 The iterative protocol schema and runtime remain untouched. One-shot execution
-has an explicit terminal no-feasible-search policy and no iterative rollback.
+uses a validation-only recent-epoch fallback when the quality threshold has no
+feasible search checkpoint.
 """
 from __future__ import annotations
 
@@ -313,7 +314,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     execution = {
         "shared_search_checkpoint_and_mask": True,
         "search_checkpoint_selection": "best_feasible_compact; reference fixed at shared search end",
-        "no_feasible_search": "stop_before_export_and_branch_training",
+        "no_feasible_search": "best_validation_accuracy_among_last_30_search_epochs",
         "export_diagnostics": "before_branch_training; eval/no_grad; weights_and_bn_unchanged",
         "export_diagnostic_quality": "measure opening/export jumps without calibration or training",
         "bn_calibration_batches": 0,

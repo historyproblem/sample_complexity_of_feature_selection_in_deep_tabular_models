@@ -44,11 +44,21 @@ def atomic_checkpoint(path, payload):
     temporary.replace(path)
 
 
-def select_checkpoint_records(records, reference_accuracy, hard_drop, *, search=True):
+def select_checkpoint_records(
+    records,
+    reference_accuracy,
+    hard_drop,
+    *,
+    search=True,
+    no_feasible_fallback_last_epochs=None,
+):
     """Pure stage-end selection; no mutation of model, mask or consumed ledger."""
     threshold = float(reference_accuracy) - float(hard_drop)
     if not records or not math.isfinite(threshold):
         raise ValueError("Selection requires checkpoints and a finite reference.")
+    if no_feasible_fallback_last_epochs is not None:
+        if type(no_feasible_fallback_last_epochs) is not int or no_feasible_fallback_last_epochs <= 0:
+            raise ValueError("No-feasible fallback window must be a positive integer.")
     for record in records:
         if not all(math.isfinite(float(record[k])) for k in ("accuracy", "ce_loss", "physical_cost")):
             raise FloatingPointError("Non-finite checkpoint selection metrics/cost.")
@@ -56,11 +66,26 @@ def select_checkpoint_records(records, reference_accuracy, hard_drop, *, search=
     accuracy_key = lambda record: (-record["accuracy"], record["ce_loss"], record["epoch"])
     if search and feasible:
         selected = min(feasible, key=lambda record: (record["physical_cost"], *accuracy_key(record)))
+        policy = "best_feasible_compact"
+        fallback_records = []
+    elif search and no_feasible_fallback_last_epochs is not None:
+        ordered = sorted(records, key=lambda record: record["epoch"])
+        fallback_records = ordered[-no_feasible_fallback_last_epochs:]
+        selected = min(fallback_records, key=accuracy_key)
+        policy = "best_validation_last_epochs_fallback"
     else:
         selected = min(feasible or records, key=accuracy_key)
-    return selected, {"policy": "best_feasible_compact" if search else "best_validation_accuracy",
+        policy = "best_validation_accuracy"
+        fallback_records = []
+    fallback_used = bool(search and not feasible and fallback_records)
+    return selected, {"policy": policy,
                       "quality_threshold": threshold, "reference_accuracy": float(reference_accuracy),
                       "no_feasible_search": search and not feasible,
+                      "fallback_used": fallback_used,
+                      "fallback_last_epochs": (no_feasible_fallback_last_epochs if fallback_used else None),
+                      "fallback_epoch_start": (min(record["epoch"] for record in fallback_records)
+                                               if fallback_used else None),
+                      "fallback_candidate_count": len(fallback_records),
                       "feasible_count": len(feasible), "selected_epoch": selected["epoch"],
                       "trace": records}
 
