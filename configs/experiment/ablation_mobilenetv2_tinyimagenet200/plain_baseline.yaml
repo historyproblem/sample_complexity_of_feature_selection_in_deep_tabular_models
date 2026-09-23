@@ -16,8 +16,8 @@
 #       experiment=ablation_mobilenetv2_tinyimagenet200/plain_baseline
 
 defaults:
-  - /data: tinyimagenet200_best_practice
-  - /model: mobilenetv2_tinyimagenet200
+  - /data: tinyimagenet200_resize224
+  - /model: mobilenetv2_tinyimagenet200_224
   - /method: plain
   - /train: resnet50_best_practice
   - /optimizer: adamw
@@ -40,10 +40,11 @@ training_arguments:
 
 mlflow:
   enabled: true
-  experiment_name: mobilenetv2_baseline
+  experiment_name: mobilenetv2_baseline_v2
   run_name: "baseline_mobilenetv2_tinyimagenet200"
   tags:
     model_type: "MobileNetV2"
     method: "plain"
     dataset: "tinyimagenet200"
     recipe: "baseline_mobilenetv2_tinyimagenet200"
+

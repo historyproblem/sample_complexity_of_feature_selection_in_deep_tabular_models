@@ -29,5 +29,13 @@ dataloaders:
   image_size: 64
   resize: 256
   center_crop: 224
+  train_transform:
+    _target_: torchvision.transforms.Compose
+    transforms:
+      - {_target_: torchvision.transforms.RandomResizedCrop, size: 224, scale: [0.6, 1.0]}
+      - {_target_: torchvision.transforms.RandomHorizontalFlip}
+      - {_target_: torchvision.transforms.ToTensor}
+      - {_target_: torchvision.transforms.Normalize, mean: [0.4802, 0.4481, 0.3975], std: [0.2302, 0.2265, 0.2262]}
   valid_ratio: 0.1
   seed: 42
+
