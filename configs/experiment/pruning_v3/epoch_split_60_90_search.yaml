@@ -1,0 +1,20 @@
+# @package _global_
+# Anchor tolerances from the successful 11.934M-parameter 60/90 search.
+defaults:
+  - /experiment/pruning_v3/epoch_split_search_base
+  - _self_
+
+one_shot:
+  search_epochs: 60
+  final_epochs: 90
+
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.0005
+    hard_drop: 0.001
+
+mlflow:
+  run_name: epoch_split_60_90_search
+
+run_history:
+  run_name: epoch_split_60_90_search

@@ -102,7 +102,7 @@ def main(argv=None):
     parser.add_argument(
         "--search-only",
         action="store_true",
-        help="Stop after 60-epoch search, checkpoint selection and physical export; do not run recovery or test",
+        help="Stop after the configured search, checkpoint selection and physical export; do not run recovery or test",
     )
     parser.add_argument(
         "--reuse-search",
@@ -133,7 +133,10 @@ def main(argv=None):
     config = compose_config(args.config_name, args.override,
                             dense_source=reference_output if new_reference else args.dense_source)
     if bool(getattr(config.one_shot, "reuse_search_required", False)) and args.reuse_search is None:
-        parser.error(f"{args.config_name} requires --reuse-search PATH; it is a 90-epoch recovery-only profile")
+        parser.error(
+            f"{args.config_name} requires --reuse-search PATH; "
+            "it is a configured recovery-only profile"
+        )
     output = Path(output_paths(config, args.output)["root"])
     if new_reference:
         validate_config(config)

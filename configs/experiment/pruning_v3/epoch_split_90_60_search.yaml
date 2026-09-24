@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/epoch_split_search_base
+  - _self_
+
+one_shot:
+  search_epochs: 90
+  final_epochs: 60
+
+accuracy_guided:
+  stage_plan:
+    - {id: shared_search, kind: search, epochs: 90, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: export_only, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: final_recovery, kind: recovery, epochs: 60, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.00033
+    hard_drop: 0.00067
+
+mlflow:
+  run_name: epoch_split_90_60_search
+
+run_history:
+  run_name: epoch_split_90_60_search

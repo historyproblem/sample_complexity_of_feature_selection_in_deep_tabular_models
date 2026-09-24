@@ -31,8 +31,8 @@ from .one_shot_pruning_config import (
     FRESH_SCHEDULER,
     HANDOFF_PROTOCOL,
     MAPPED_OPTIMIZER,
-    PROTOCOL,
     RESUMED_SCHEDULER,
+    SEARCH_PROTOCOLS,
     resolved_branch_plan,
     to_v3_config,
     validate_config,
@@ -117,7 +117,7 @@ def build_physical_branches(config, selected_carrier, mask, selection_identity):
 def build_planned_physical_branches(config, selected_carrier, mask, selection_identity):
     """Build every planned branch without allowing optimizer policy to affect weights."""
     plan = resolved_branch_plan(config)
-    if str(config.one_shot.protocol) == PROTOCOL:
+    if str(config.one_shot.protocol) in SEARCH_PROTOCOLS:
         inherited, scratch, report = build_physical_branches(
             config, selected_carrier, mask, selection_identity,
         )

@@ -1,0 +1,26 @@
+# @package _global_
+# One physical recovery branch paired with epoch_split_search_base. Recovery
+# uses ordinary CrossEntropyLoss (no label smoothing), fresh AdamW at 1e-3 with
+# weight decay 5e-4, and a fresh cosine schedule ending at zero.
+defaults:
+  - /experiment/pruning_v3/target5m_quality_recovery90
+  - _self_
+
+one_shot:
+  protocol: pruning_v3_quality_recovery_epoch_split_150
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.08
+
+training_arguments:
+  adaptive_lambda:
+    # Structural recovery has no gates/live controller. Keep this value equal
+    # to search for auditable configuration compatibility and provenance.
+    log_step: 0.9210340371976183
+
+mlflow:
+  run_name: epoch_split_recovery
+
+run_history:
+  run_name: epoch_split_recovery

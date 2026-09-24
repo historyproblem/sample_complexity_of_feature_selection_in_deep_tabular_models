@@ -21,6 +21,11 @@ PROTOCOL = "pruning_v3_one_shot_60_90"
 HANDOFF_PROTOCOL = "pruning_v3_optimizer_scheduler_handoff_60_90"
 MAPPED_REPEATS_PROTOCOL = "pruning_v3_mapped_optimizer_fresh_scheduler_repeats2_60_90"
 QUALITY_RECOVERY_PROTOCOL = "pruning_v3_quality_recovery_single_60_90"
+EPOCH_SPLIT_SEARCH_PROTOCOL = "pruning_v3_one_shot_epoch_split_150"
+EPOCH_SPLIT_RECOVERY_PROTOCOL = "pruning_v3_quality_recovery_epoch_split_150"
+SEARCH_PROTOCOLS = {PROTOCOL, EPOCH_SPLIT_SEARCH_PROTOCOL}
+QUALITY_RECOVERY_PROTOCOLS = {QUALITY_RECOVERY_PROTOCOL, EPOCH_SPLIT_RECOVERY_PROTOCOL}
+AUTHORIZED_EPOCH_SPLITS = {(30, 120), (45, 105), (60, 90), (75, 75), (90, 60)}
 CONFIG_NAME = "experiment/pruning_v3/one_shot_60_90_inherited_vs_scratch"
 HANDOFF_CONFIG_NAME = "experiment/pruning_v3/optimizer_scheduler_handoff_60_90_repeats2"
 MAPPED_REPEATS_CONFIG_NAME = "experiment/pruning_v3/target5m_mapped_recovery_repeats2"
@@ -81,7 +86,7 @@ def to_v3_config(config):
     _require(isinstance(plain, dict) and "one_shot" in plain, "one_shot mapping is required")
     one = plain.pop("one_shot")
     if one.get("protocol") in {
-        HANDOFF_PROTOCOL, MAPPED_REPEATS_PROTOCOL, QUALITY_RECOVERY_PROTOCOL,
+        HANDOFF_PROTOCOL, MAPPED_REPEATS_PROTOCOL, *QUALITY_RECOVERY_PROTOCOLS,
     }:
         # The shared v3 validator predates per-branch state policies and accepts
         # only its historical restart token. The one-shot adapter validates the
@@ -96,7 +101,7 @@ def validate_config(config):
     one = plain.get("one_shot")
     _require(isinstance(one, dict), "one_shot mapping is required")
     protocol = one.get("protocol")
-    if protocol == PROTOCOL:
+    if protocol in SEARCH_PROTOCOLS:
         required_fields = {
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
@@ -115,14 +120,16 @@ def validate_config(config):
             eta_min = one["search_scheduler_eta_min"]
             _require(type(eta_min) in (float, int) and 0 <= eta_min < plain["optimizer"]["lr"],
                      "search_scheduler_eta_min must be in [0, optimizer.lr)")
-    elif protocol in {HANDOFF_PROTOCOL, MAPPED_REPEATS_PROTOCOL, QUALITY_RECOVERY_PROTOCOL}:
+    elif protocol in {
+        HANDOFF_PROTOCOL, MAPPED_REPEATS_PROTOCOL, *QUALITY_RECOVERY_PROTOCOLS,
+    }:
         fields = {
             "protocol", "search_epochs", "final_epochs",
             "search_scheduler_horizon_epochs", "execution_order", "methods", "repeats",
         }
-        if protocol in {MAPPED_REPEATS_PROTOCOL, QUALITY_RECOVERY_PROTOCOL}:
+        if protocol in {MAPPED_REPEATS_PROTOCOL, *QUALITY_RECOVERY_PROTOCOLS}:
             fields.add("search_scheduler_eta_min")
-        if protocol == QUALITY_RECOVERY_PROTOCOL:
+        if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
         _require(set(one) == fields,
                  f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
@@ -140,7 +147,7 @@ def validate_config(config):
                 {"id": "fresh_optimizer_fresh_scheduler",
                  "model_state": "selected_surviving_state",
                  "optimizer_state": "fresh", "scheduler_state": FRESH_SCHEDULER},
-            ] if protocol == QUALITY_RECOVERY_PROTOCOL else [
+            ] if protocol in QUALITY_RECOVERY_PROTOCOLS else [
                 {"id": "mapped_optimizer_fresh_scheduler",
                  "model_state": "selected_surviving_state",
                  "optimizer_state": MAPPED_OPTIMIZER, "scheduler_state": FRESH_SCHEDULER},
@@ -149,39 +156,39 @@ def validate_config(config):
                  ("handoff methods must be the three ordered single-change policies"
                   if protocol == HANDOFF_PROTOCOL
                   else "quality recovery requires inherited compact weights with fresh AdamW and cosine"
-                  if protocol == QUALITY_RECOVERY_PROTOCOL
+                  if protocol in QUALITY_RECOVERY_PROTOCOLS
                   else "mapped-repeat recovery requires mapped AdamW and a fresh scheduler"))
         expected_order = ("all_methods_once_then_repeats" if protocol == HANDOFF_PROTOCOL
-                          else "single" if protocol == QUALITY_RECOVERY_PROTOCOL
+                          else "single" if protocol in QUALITY_RECOVERY_PROTOCOLS
                           else "repeat_major")
         _require(one["execution_order"] == expected_order,
                  ("execution order must finish every method before later repeats"
                   if protocol == HANDOFF_PROTOCOL
                   else "quality recovery execution order must be single"
-                  if protocol == QUALITY_RECOVERY_PROTOCOL
+                  if protocol in QUALITY_RECOVERY_PROTOCOLS
                   else "mapped-repeat recovery execution order must be repeat_major"))
         _require(plain["accuracy_guided"]["stage_plan"][2]["restart_policy"]
                  == "branch_specific_optimizer_scheduler_handoff",
                  "final recovery restart policy must defer to the explicit method list")
         expected_repeats = ([{"id": "repeat_1", "training_seed": 42}]
-                            if protocol == QUALITY_RECOVERY_PROTOCOL else [
+                            if protocol in QUALITY_RECOVERY_PROTOCOLS else [
                                 {"id": "repeat_1", "training_seed": 42},
                                 {"id": "repeat_2", "training_seed": 43},
                             ])
         _require(one["repeats"] == expected_repeats,
                  ("quality recovery uses exactly one seed42 branch"
-                  if protocol == QUALITY_RECOVERY_PROTOCOL
+                  if protocol in QUALITY_RECOVERY_PROTOCOLS
                   else "the authorized paired plan uses repeat seeds 42 then 43"))
-        if protocol == QUALITY_RECOVERY_PROTOCOL:
+        if protocol in QUALITY_RECOVERY_PROTOCOLS:
             _require(one["reuse_search_required"] is True,
-                     "quality recovery must reuse the completed 60-epoch search")
+                     "quality recovery must reuse the completed configured search")
         _require(type(one["search_epochs"]) is int and type(one["final_epochs"]) is int,
                  "search_epochs and final_epochs must be integers")
         expected_horizon = (one["search_epochs"] + one["final_epochs"]
                             if protocol == HANDOFF_PROTOCOL else one["search_epochs"])
         _require(one["search_scheduler_horizon_epochs"] == expected_horizon,
                  "search scheduler horizon differs from the protocol policy")
-        if protocol in {MAPPED_REPEATS_PROTOCOL, QUALITY_RECOVERY_PROTOCOL}:
+        if protocol in {MAPPED_REPEATS_PROTOCOL, *QUALITY_RECOVERY_PROTOCOLS}:
             eta_min = one["search_scheduler_eta_min"]
             _require(type(eta_min) in (float, int) and 0 <= eta_min < plain["optimizer"]["lr"],
                      "search_scheduler_eta_min must be in [0, optimizer.lr)")
@@ -193,8 +200,13 @@ def validate_config(config):
     total = validate_config_v3(shared)
     _require(one["search_epochs"] + one["final_epochs"] == total, "branch budget differs from shared stage plan")
     if not shared.accuracy_guided.smoke:
-        _require((one["search_epochs"], one["final_epochs"]) == (60, 90),
-                 "only the authorized full 60-search + 90-physical profile is supported")
+        split = (one["search_epochs"], one["final_epochs"])
+        if protocol in {EPOCH_SPLIT_SEARCH_PROTOCOL, EPOCH_SPLIT_RECOVERY_PROTOCOL}:
+            _require(split in AUTHORIZED_EPOCH_SPLITS,
+                     "epoch-split study requires one of 30/120, 45/105, 60/90, 75/75, 90/60")
+        else:
+            _require(split == (60, 90),
+                     "only the authorized full 60-search + 90-physical profile is supported")
         _require(shared.seed == shared.dataloaders.seed == shared.dataloaders.loader_seed == 42,
                  "the authorized full profile preserves seed/split 42")
     stages = shared.accuracy_guided.stage_plan
@@ -213,7 +225,7 @@ def resolved_branch_plan(config):
     """Expand the checked-in branch order into concrete, auditable runs."""
     validate_config(config)
     one = OmegaConf.to_container(config.one_shot, resolve=True)
-    if one["protocol"] == PROTOCOL:
+    if one["protocol"] in SEARCH_PROTOCOLS:
         return [
             {"id": "inherited", "method": "inherited", "repeat": "repeat_1",
              "training_seed": int(config.seed), "model_state": "selected_surviving_state",
@@ -250,6 +262,10 @@ def _reference_origin_info(config, result):
 
 def validate_inputs(config):
     validate_config(config)
+    # Only the explicitly tunable legacy recovery sweep may differ from the
+    # dense reference in ordinary optimizer/loss settings. The epoch-split
+    # study is intentionally strict: only method parameters and epoch allocation
+    # may differ.
     quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
     try:
         kwargs = ({
@@ -286,7 +302,7 @@ def output_paths(config, output_root=None):
     protocol = str(config.one_shot.protocol)
     output_name = (HANDOFF_OUTPUT_NAME if protocol == HANDOFF_PROTOCOL
                    else MAPPED_REPEATS_OUTPUT_NAME if protocol == MAPPED_REPEATS_PROTOCOL
-                   else QUALITY_RECOVERY_OUTPUT_NAME if protocol == QUALITY_RECOVERY_PROTOCOL
+                   else QUALITY_RECOVERY_OUTPUT_NAME if protocol in QUALITY_RECOVERY_PROTOCOLS
                    else OUTPUT_NAME)
     root = (Path(output_root) if output_root is not None
             else Path(config.run_history.root_dir) / output_name).resolve()
@@ -297,13 +313,13 @@ def output_paths(config, output_root=None):
 
 def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     total = validate_config(config)
-    quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
+    tunable_quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
     shared = resolved_v3(
         to_v3_config(config),
         check_inputs=check_inputs,
-        allow_optimizer_lr_difference=quality_recovery,
-        allow_scheduler_eta_min_difference=quality_recovery,
-        allow_label_smoothing_difference=quality_recovery,
+        allow_optimizer_lr_difference=tunable_quality_recovery,
+        allow_scheduler_eta_min_difference=tunable_quality_recovery,
+        allow_label_smoothing_difference=tunable_quality_recovery,
     )
     if check_inputs:
         shared["inputs"] = _reference_origin_info(config, shared["inputs"])
@@ -324,7 +340,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         "iterative_recovery_guard_executed": False,
         "final_test": "separate frozen physical evaluation; never training or selection",
     }
-    if one["protocol"] == PROTOCOL:
+    if one["protocol"] in SEARCH_PROTOCOLS:
         execution.update({
             "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
             "scratch_initialization": one["scratch_initialization"],
@@ -348,7 +364,8 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
                   "selection_does_not_rewind_consumed_budget": True}
     else:
         continued_search_scheduler = one["protocol"] == HANDOFF_PROTOCOL
-        quality_recovery = one["protocol"] == QUALITY_RECOVERY_PROTOCOL
+        quality_recovery = one["protocol"] in QUALITY_RECOVERY_PROTOCOLS
+        epoch_split_study = one["protocol"] == EPOCH_SPLIT_RECOVERY_PROTOCOL
         execution.update({
             "all_model_initialization": "selected search Conv/BN tensors sliced into one shared compact architecture",
             "search_scheduler": ((
@@ -358,6 +375,8 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
                 f"CosineAnnealingLR(T_max={one['search_scheduler_horizon_epochs']}); recovery uses a fresh cosine"),
             "comparison_axis": (
                 "optimizer and scheduler state only" if continued_search_scheduler
+                else "search/recovery epoch allocation; ordinary recovery recipe fixed"
+                if epoch_split_study
                 else "recovery LR, cosine eta_min, or label smoothing; inherited compact weights and fresh state"
                 if quality_recovery
                 else "recovery seed only; mapped optimizer and fresh scheduler fixed"
