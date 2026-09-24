@@ -12,6 +12,11 @@ one_shot:
 accuracy_guided:
   eligibility:
     min_keep_ratio: 0.08
+  guard:
+    # Forward-only train-split pass after physical surgery. This resets and
+    # rebuilds BN running statistics before the first recovery optimizer step;
+    # it changes no weights and consumes no training epoch.
+    train_bn_calibration_batches: 200
 
 training_arguments:
   adaptive_lambda:

@@ -214,8 +214,15 @@ def validate_config(config):
     _require([(stage.id, stage.kind, stage.epochs) for stage in stages] == [
         ("shared_search", "search", one["search_epochs"]), ("export_only", "commit", 0),
         ("final_recovery", "recovery", one["final_epochs"])], "unexpected one-shot stage identities or lengths")
-    _require(shared.accuracy_guided.guard.train_bn_calibration_batches == 0,
-             "export-only diagnostics and both physical branches forbid BN calibration")
+    bn_calibration_batches = shared.accuracy_guided.guard.train_bn_calibration_batches
+    if protocol in QUALITY_RECOVERY_PROTOCOLS:
+        _require(
+            type(bn_calibration_batches) is int and bn_calibration_batches >= 0,
+            "quality recovery BN calibration batches must be a non-negative integer",
+        )
+    else:
+        _require(bn_calibration_batches == 0,
+                 "comparison protocols forbid BN calibration")
     # The base validator already checks the disabled engine recalibration/warmup,
     # quality-only controller, initial-width normalization, gates and no test access.
     return total

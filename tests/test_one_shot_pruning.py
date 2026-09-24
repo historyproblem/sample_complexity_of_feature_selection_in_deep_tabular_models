@@ -392,6 +392,7 @@ def test_quality_recovery_applies_label_smoothing_and_nonzero_cosine_floor(tmp_p
     recovery_cfg.accuracy_guided.stage_plan[2].restart_policy = (
         "branch_specific_optimizer_scheduler_handoff"
     )
+    recovery_cfg.accuracy_guided.guard.train_bn_calibration_batches = 1
     recovery_cfg.scheduler.eta_min = 0.00025
     OmegaConf.update(
         recovery_cfg, "model.criterion.label_smoothing", 0.10, force_add=True,
@@ -407,6 +408,13 @@ def test_quality_recovery_applies_label_smoothing_and_nonzero_cosine_floor(tmp_p
 
     branch_name = "fresh_optimizer_fresh_scheduler__repeat_1"
     assert result["status"] == "completed"
+    assert result["export_only"]["bn_calibration_batches"] == 1
+    assert result["export_only"]["trainable_weights_unchanged"] is True
+    assert result["export_only"]["bn_state_recalibrated"] is True
+    assert result["branches"][branch_name]["bn_calibration"]["batches"] == 1
+    assert result["branches"][branch_name]["initialization_state_hash"] != (
+        result["branches"][branch_name]["pre_bn_calibration_state_hash"]
+    )
     assert result["stages"][branch_name]["scheduler"] == {
         "_target_": "torch.optim.lr_scheduler.CosineAnnealingLR",
         "T_max": 2,
@@ -574,11 +582,13 @@ def test_unexplained_actual_gated_export_mismatch_stops_before_branch_training(t
     assert state["compute_ledger"]["actual_training_epochs_executed"] == 3
     assert diagnostic["blocked_closed_survivors_opened_by_export"] == []
     assert diagnostic["gated_equivalent_on_checked_batch"] is False
-    assert diagnostic["non_equivalence_reason"] == "gated_export_function_difference"
+    assert diagnostic["non_equivalence_reason"] == (
+        "dependency_safe_gated_export_function_difference"
+    )
     assert not (output / "inherited").exists() and not (output / "scratch").exists()
 
 
-def test_known_floor_blocked_survivor_opening_is_measured_and_both_branches_continue(tmp_path):
+def test_floor_retained_closed_survivors_are_materialized_before_export(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
     initial_path = Path(cfg.accuracy_guided.initializer.path)
     payload = torch.load(initial_path, map_location="cpu", weights_only=True)
@@ -595,8 +605,17 @@ def test_known_floor_blocked_survivor_opening_is_measured_and_both_branches_cont
     result = run_one_shot_pruning(cfg, tmp_path / "run")
     diagnostic = result["export_only"]
     assert diagnostic["blocked_closed_survivors_opened_by_export"]
-    assert diagnostic["gated_equivalent_on_checked_batch"] is False
-    assert diagnostic["non_equivalence_reason"] == "blocked_closed_survivors_opened"
+    assert diagnostic["retained_learned_closed_channels"] == (
+        diagnostic["blocked_closed_survivors_opened_by_export"]
+    )
+    assert diagnostic["selection_predictor"] == (
+        "dependency_safe_all_physical_survivors_open"
+    )
+    assert diagnostic["gated_equivalent_on_checked_batch"] is True
+    assert diagnostic["raw_gated_equivalent_on_checked_batch"] is False
+    assert diagnostic["raw_gated_non_equivalence_reason"] == (
+        "retained_learned_closed_channels_opened"
+    )
     assert diagnostic["transfer_equivalence"]["status"].startswith("passed")
     assert diagnostic["weights_and_bn_unchanged"]
     assert result["status"] == "completed"

@@ -50,6 +50,8 @@ def test_epoch_split_pair_is_a_strict_150_epoch_plain_ce_experiment(
         assert config.scheduler.eta_min == pytest.approx(0.0)
         assert config.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.08)
 
+    assert search.accuracy_guided.guard.train_bn_calibration_batches == 0
+    assert recovery.accuracy_guided.guard.train_bn_calibration_batches == 200
     assert search.one_shot.search_scheduler_eta_min == pytest.approx(0.0)
     assert recovery.one_shot.search_scheduler_horizon_epochs == search_epochs
     assert schema.resolved_branch_plan(recovery) == [{

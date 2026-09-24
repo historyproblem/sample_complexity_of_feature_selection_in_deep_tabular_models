@@ -21,7 +21,7 @@ from net_complexity.models.channel_pruning import build_structurally_pruned_mode
 from net_complexity.models.feature_selection import (
     get_gate_normalization_metadata, validate_gate_normalization_metadata,
 )
-from net_complexity.models.pruning_budget import gates, select_learned_closed
+from net_complexity.models.pruning_budget import gates, select_learned_closed, validate_mask
 from .accuracy_guided_config import code_provenance, file_hash
 from .accuracy_guided_pruning import atomic_checkpoint, select_checkpoint_records
 from .cyclic_aig import _configure_run_history, _set_num_epochs
@@ -45,7 +45,8 @@ from .optimizer_handoff import (
 )
 from .pruning_audit import build_structural, committed_equivalence, load_adaptive_reference
 from .pruning_measurement import (
-    compare_predictors, deployment_cost, evaluate_deployment, gated_export_equivalence,
+    calibrate_bn, compare_predictors, deployment_cost, evaluate_deployment,
+    gated_export_equivalence,
     isolated_diagnostic_rng, mask_hash, state_hash, write_json,
 )
 from .pruning_resume import validate_epoch_eval_checkpoint
@@ -53,6 +54,37 @@ from .randomness import set_random_seed
 
 
 NO_FEASIBLE_FALLBACK_LAST_EPOCHS = 30
+
+
+def materialize_physical_survivor_carrier(carrier, mask):
+    """Return the exact full-width predictor represented by physical surgery.
+
+    Structural pruning can only remove the channels present in ``mask``.  A
+    learned-closed channel retained by a width floor or a dependency is a real
+    channel in the physical graph, so it must be open while selecting and
+    validating that graph.  The number of such retained channels is diagnostic
+    information, never a rejection threshold.
+    """
+    materialized = deepcopy(carrier).cpu()
+    validate_mask(materialized, mask)
+    for name, gate in gates(materialized).items():
+        gate.channel_mask.fill_(1)
+        if mask.get(name):
+            gate.channel_mask[mask[name]] = 0
+        gate.set_bypass(True)
+    return materialized
+
+
+def retained_learned_closed_channels(carrier, mask):
+    disabled = {name: set(ids) for name, ids in mask.items()}
+    return [
+        {"boundary": name, "original_id": index}
+        for name, gate in gates(carrier).items()
+        for index, opened in enumerate(
+            gate.get_hard_gate_decisions(apply_permanent_mask=False).tolist()
+        )
+        if not opened and index not in disabled.get(name, set())
+    ]
 
 
 def physical_architecture_signature(model):
@@ -377,13 +409,29 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     training_seed=seed,
                 )
                 candidates = []
-                with phase_progress("selection", f"checking {len(paths)} search checkpoints by validation and physical size"):
+                with phase_progress(
+                    "selection",
+                    f"checking {len(paths)} search checkpoints by dependency-safe validation and physical size",
+                ):
                     for index, path in enumerate(paths, 1):
                         model, checkpoint = load_model(path, carrier)
                         mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
+                        materialized = materialize_physical_survivor_carrier(model, mask)
+                        with isolated_diagnostic_rng(data.valid_dataloader):
+                            materialized_validation = evaluate_deployment(
+                                materialized, data.valid_dataloader, device
+                            )
+                        materialized.cpu()
+                        retained_closed = retained_learned_closed_channels(model, mask)
                         candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
-                            "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
-                            "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                            "accuracy": float(materialized_validation["accuracy"]),
+                            "ce_loss": float(materialized_validation["ce_loss"]),
+                            "raw_gated_validation": {
+                                "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                                "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                            },
+                            "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                            "retained_learned_closed_channels": retained_closed,
                             "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
                         if index % 10 == 0 or index == len(paths):
                             progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
@@ -523,6 +571,20 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 if "scheduler_state_dict" not in checkpoint or "scheduler_step_count" not in checkpoint:
                     raise ValueError("Selected search checkpoint has no scheduler state for handoff.")
             mask = selected["pruning_mask"]
+            materialized_carrier = materialize_physical_survivor_carrier(selected_carrier, mask)
+            with isolated_diagnostic_rng(data.valid_dataloader):
+                dependency_safe_validation = evaluate_deployment(
+                    materialized_carrier, data.valid_dataloader, device
+                )
+            materialized_carrier.cpu()
+            raw_gated_validation = {
+                "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+            }
+            retained_closed = retained_learned_closed_channels(selected_carrier, mask)
+            selection_trace["selection_predictor"] = (
+                "dependency_safe_all_physical_survivors_open"
+            )
             selected_hash = file_hash(selected["path"])
             identity = {"selected_checkpoint_id": f"shared_search:epoch_{selected['epoch']:04d}:{selected_hash[:16]}",
                 "selected_checkpoint_hash": selected_hash,
@@ -530,6 +592,10 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             selection = {**identity, "pruning_mask": mask, "selected_epoch": selected["epoch"],
                 "quality_threshold": selection_trace["quality_threshold"], "reference_epoch": search_epochs,
                 "policy": selection_trace["policy"], "trace": selection_trace,
+                "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                "raw_gated_validation": raw_gated_validation,
+                "dependency_safe_validation": dependency_safe_validation,
+                "retained_learned_closed_channels": retained_closed,
                 "search_ledger_consumed": deepcopy(search_ledger)}
             if reuse_search_from is not None:
                 selection["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())
@@ -546,16 +612,26 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             export_dir = output_root / "export_only"
             export_dir.mkdir()
             source_hash = state_hash(selected_carrier.state_dict())
-            physical_hash = state_hash(export_model.state_dict())
-            # This compares the actual selected gated predictor, with its original
-            # runtime/mask, to the exported model. The transfer check is separate.
-            with phase_progress("export_only", "frozen validation comparison before training or BN recalibration"):
-                comparison = compare_predictors(export_model, selected_carrier, data.valid_dataloader, device)
+            physical_hash_before_bn = state_hash(export_model.state_dict())
+            # The deployable predictor has every physically retained channel
+            # open.  Compare exactly that dependency/floor-safe function to the
+            # structural graph; keep the raw gated checkpoint as a diagnostic.
+            with phase_progress("export_only", "dependency-safe validation comparison before BN recalibration"):
+                comparison = compare_predictors(
+                    export_model, materialized_carrier, data.valid_dataloader, device
+                )
             report = {**identity, "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                 "status": "measured", "training_epochs": 0, "bn_calibration_batches": 0,
-                "gated_validation": comparison["carry_carrier"], "physical_validation": comparison["physical"],
+                "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                "raw_gated_validation": raw_gated_validation,
+                "dependency_safe_validation": comparison["carry_carrier"],
+                "gated_validation": comparison["carry_carrier"],
+                "physical_validation_before_bn_calibration": comparison["physical"],
+                "physical_validation": comparison["physical"],
                 "logits_comparison": comparison["carry_vs_physical"], "diagnostic_overhead": comparison["overhead"],
-                "selector": selected["selector"], "physical_state_hash": physical_hash,
+                "selector": selected["selector"],
+                "physical_state_hash_before_bn_calibration": physical_hash_before_bn,
+                "physical_state_hash": physical_hash_before_bn,
                 "physical_cost": deployment_cost(export_model, image_shape=image_shape),
                 "search_carrier_cost": deployment_cost(selected_carrier, image_shape=image_shape),
                 "search_carrier_scope": "full-width gated carrier, not a compact model"}
@@ -569,32 +645,100 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 report.update(status="technical_transfer_failure", non_equivalence_reason=str(exc))
                 write_json(export_dir / "diagnostics.json", report)
                 raise
-            disabled = {name: set(ids) for name, ids in mask.items()}
-            blocked_closed = [{"boundary": name, "original_id": i}
-                for name, gate in gates(selected_carrier).items()
-                for i, opened in enumerate(gate.get_hard_gate_decisions(apply_permanent_mask=False).tolist())
-                if not opened and i not in disabled.get(name, set())]
-            report["blocked_closed_survivors_opened_by_export"] = blocked_closed
+            report["retained_learned_closed_channels"] = retained_closed
+            # Historical key retained for readers of older artifacts.  This is
+            # a countable event, not an error and not subject to a maximum.
+            report["blocked_closed_survivors_opened_by_export"] = retained_closed
             try:
-                report["gated_equivalence"] = gated_export_equivalence(selected_carrier, export_model, sample, device)
+                report["gated_equivalence"] = gated_export_equivalence(
+                    materialized_carrier, export_model, sample, device
+                )
                 report["gated_equivalent_on_checked_batch"] = True
             except AssertionError as exc:
                 report.update(gated_equivalent_on_checked_batch=False,
-                    non_equivalence_reason="blocked_closed_survivors_opened" if blocked_closed else "gated_export_function_difference",
+                    non_equivalence_reason="dependency_safe_gated_export_function_difference",
                     gated_equivalence_error=str(exc))
+            try:
+                report["raw_gated_equivalence"] = gated_export_equivalence(
+                    selected_carrier, export_model, sample, device
+                )
+                report["raw_gated_equivalent_on_checked_batch"] = True
+            except AssertionError as exc:
+                report.update(
+                    raw_gated_equivalent_on_checked_batch=False,
+                    raw_gated_non_equivalence_reason="retained_learned_closed_channels_opened",
+                    raw_gated_equivalence_error=str(exc),
+                )
             if (source_hash != state_hash(selected_carrier.state_dict())
-                    or physical_hash != state_hash(export_model.state_dict())):
+                    or physical_hash_before_bn != state_hash(export_model.state_dict())):
                 raise AssertionError("Export diagnostics modified weights or BN state.")
-            report["weights_and_bn_unchanged"] = True
-            if not report["gated_equivalent_on_checked_batch"] and not blocked_closed:
+            report["weights_and_bn_unchanged_before_calibration"] = True
+            if not report["gated_equivalent_on_checked_batch"]:
                 report["status"] = "technical_gated_export_failure"
             write_json(export_dir / "diagnostics.json", report)
             if report["status"] == "technical_gated_export_failure":
-                raise RuntimeError("Unexplained gated/physical export mismatch; see export_only/diagnostics.json")
+                raise RuntimeError("Dependency-safe gated/physical export mismatch; see export_only/diagnostics.json")
+
+            calibration_requested = int(
+                cfg.accuracy_guided.guard.train_bn_calibration_batches
+            )
+            branch_calibration = {}
+            for branch_spec in branch_plan:
+                name = branch_spec["id"]
+                model = branch_models[name]
+                parameters_before = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.named_parameters()
+                }
+                calibration = {"requested_batches": calibration_requested,
+                    "batches": 0, "forward_examples": 0, "wall_seconds": 0.0}
+                if calibration_requested:
+                    with phase_progress(name, f"recalibrating BatchNorm for up to {calibration_requested} train batches"):
+                        with isolated_diagnostic_rng(data.train_dataloader):
+                            calibrate_bn(
+                                model,
+                                data.train_dataloader,
+                                device,
+                                calibration_requested,
+                                int(branch_spec["training_seed"]),
+                                accounting=calibration,
+                            )
+                if any(
+                    not torch.equal(value.detach().cpu(), parameters_before[key])
+                    for key, value in model.named_parameters()
+                ):
+                    raise AssertionError("BN recalibration changed trainable weights.")
+                with isolated_diagnostic_rng(data.valid_dataloader):
+                    validation_after_bn = evaluate_deployment(
+                        model, data.valid_dataloader, device
+                    )
+                model.cpu()
+                calibration.update(
+                    validation_after=validation_after_bn,
+                    trainable_weights_unchanged=True,
+                    state_hash_after=state_hash(model.state_dict()),
+                )
+                branch_calibration[name] = calibration
+
+            export_name = branch_plan[0]["id"]
+            export_calibration = branch_calibration[export_name]
+            physical_hash = state_hash(export_model.state_dict())
+            report.update(
+                physical_state_hash=physical_hash,
+                physical_validation=export_calibration["validation_after"],
+                bn_calibration_batches=export_calibration["batches"],
+                bn_calibration=export_calibration,
+                trainable_weights_unchanged=True,
+                bn_state_recalibrated=bool(export_calibration["batches"]),
+                weights_and_bn_unchanged=not bool(export_calibration["batches"]),
+            )
+            state["export_only"] = report
+            write_json(export_dir / "diagnostics.json", report)
             atomic_checkpoint(export_dir / "deployment.pt", {**identity, "protocol": protocol,
                 "artifact_type": "physical_ungated", "model_state_dict": export_model.state_dict(),
                 "model_state_hash": physical_hash, "pruning_mask": mask, "training_epochs": 0,
-                "bn_calibration_batches": 0, "normalization_metadata": normalization})
+                "bn_calibration_batches": export_calibration["batches"],
+                "bn_calibration": export_calibration, "normalization_metadata": normalization})
             persist()
             progress_message("export_only", f"diagnostics saved: {export_dir / 'diagnostics.json'}")
             if search_only:
@@ -612,12 +756,16 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 branch_dir = output_root / name
                 branch_dir.mkdir()
                 ledger = deepcopy(search_ledger)
+                pre_bn_initialization_hash = initialization[name]["initialization_state_hash"]
+                calibrated_initialization_hash = state_hash(model.state_dict())
                 branch = {**identity, "protocol": protocol,
                     "artifact_type": "physical_ungated", "branch": name,
                     "method": branch_spec["method"], "repeat": branch_spec["repeat"],
                     "training_seed": branch_spec["training_seed"],
                     "status": "running", "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
-                    "initialization_state_hash": initialization[name]["initialization_state_hash"],
+                    "initialization_state_hash": calibrated_initialization_hash,
+                    "pre_bn_calibration_state_hash": pre_bn_initialization_hash,
+                    "bn_calibration": deepcopy(branch_calibration[name]),
                     "initialization": initialization[name]["initialization"], "ledger": ledger,
                     "optimizer_state_initialization": branch_spec["optimizer_state"],
                     "scheduler_state_initialization": branch_spec["scheduler_state"],
