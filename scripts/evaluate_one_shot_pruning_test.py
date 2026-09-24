@@ -49,7 +49,8 @@ def evaluation_args_from_config(config_path=DEFAULT_CONFIG, **overrides):
             f"missing={sorted(fields - set(values))}")
     for key, value in overrides.items():
         if value is not None:
-            require(key in fields | {"output", "check_only"}, f"Unknown test override: {key}")
+            require(key in fields | {"output", "check_only", "search_export"},
+                    f"Unknown test override: {key}")
             values[key] = value
     run_dir = Path(values["run_dir"]).expanduser()
     data = Path(values["data"]).expanduser()
@@ -67,6 +68,7 @@ def evaluation_args_from_config(config_path=DEFAULT_CONFIG, **overrides):
         run_dir=run_dir.resolve(), data=data.resolve(), device=str(values["device"]),
         output=output.resolve(), batch_size=batch_size, num_workers=num_workers,
         download=bool(values["download"]), check_only=bool(values.get("check_only", False)),
+        search_export=bool(values.get("search_export", False)),
         config_path=path,
     )
 
@@ -309,6 +311,189 @@ def prepare_branches(run_dir):
     return prepared
 
 
+def prepare_search_export(run_dir):
+    """Validate one frozen physical export from a completed search-only run.
+
+    This deliberately does not reinterpret the artifact as a completed
+    150-epoch deployment. Its test result is exploratory and retains both the
+    consumed search budget and the earlier selected-checkpoint epoch.
+    """
+    from net_complexity.training.one_shot_pruning_config import (
+        SEARCH_PROTOCOLS, to_v3_config, validate_config,
+    )
+    from net_complexity.training.one_shot_pruning import physical_architecture_signature
+
+    run_dir = Path(run_dir).resolve()
+    config_path = run_dir / "resolved_config.yaml"
+    state_path = run_dir / "one_shot_state.json"
+    selection_path = run_dir / "selection.json"
+    selected_path = run_dir / "selected_checkpoint.pt"
+    diagnostics_path = run_dir / "export_only/diagnostics.json"
+    deployment_path = run_dir / "export_only/deployment.pt"
+    for path in (config_path, state_path, selection_path, selected_path,
+                 diagnostics_path, deployment_path):
+        require(path.is_file(), f"Missing search-export artifact: {path}")
+
+    config = OmegaConf.load(config_path)
+    validate_config(config)
+    protocol = str(config.one_shot.protocol)
+    require(protocol in SEARCH_PROTOCOLS,
+            "Search-export evaluation requires a one-shot search protocol")
+    require(not config.accuracy_guided.smoke,
+            "Synthetic smoke artifacts must never access official test data")
+    search_epochs = int(config.one_shot.search_epochs)
+
+    state = read_json(state_path)
+    selection = read_json(selection_path)
+    diagnostics = read_json(diagnostics_path)
+    require(state.get("status") == "search_only_completed"
+            and state.get("search_only") is True
+            and state.get("test_evaluated") is False
+            and state.get("branches") == {},
+            "Search-only run is not finalized or already contains physical branches")
+    require(state.get("protocol") == protocol, "Search state protocol differs")
+    require(state.get("selection") == selection, "Search state selection differs")
+    require(state.get("export_only") == diagnostics, "Search state export diagnostics differ")
+    require(diagnostics.get("status") == "measured"
+            and diagnostics.get("training_epochs") == 0
+            and diagnostics.get("bn_calibration_batches") == 0
+            and diagnostics.get("weights_and_bn_unchanged") is True,
+            "Physical search export diagnostics are incomplete")
+
+    ledger = selection.get("search_ledger_consumed")
+    _validate_ledger(ledger, total=search_epochs, search=search_epochs)
+    require(state.get("shared_search_ledger") == ledger,
+            "Search selection ledger differs from the completed run")
+    require(selection.get("reference_epoch") == search_epochs
+            and type(selection.get("selected_epoch")) is int
+            and 1 <= selection["selected_epoch"] <= search_epochs
+            and selection.get("policy") in {
+                "best_feasible_compact", "best_validation_last_epochs_fallback",
+            }, "Invalid search-only validation selection")
+
+    selected = torch.load(selected_path, map_location="cpu", weights_only=True)
+    require(int(selected.get("epoch", -1)) == selection["selected_epoch"]
+            and "model_state_dict" in selected,
+            "Selected search checkpoint epoch/tensors differ")
+    selected_hash = file_hash(selected_path)
+    selected_model_hash = state_hash(selected["model_state_dict"])
+    identity = {
+        "selected_checkpoint_id": selection.get("selected_checkpoint_id"),
+        "selected_checkpoint_hash": selected_hash,
+        "selected_model_state_hash": selected_model_hash,
+        "mask_hash": selection.get("mask_hash"),
+    }
+    require(isinstance(identity["selected_checkpoint_id"], str)
+            and selection.get("selected_checkpoint_hash") == selected_hash
+            and selected.get("model_state_hash") == selected_model_hash,
+            "Selected search checkpoint identity/hash differs")
+
+    checkpoint = torch.load(deployment_path, map_location="cpu", weights_only=True)
+    require(checkpoint.get("protocol") == protocol
+            and checkpoint.get("artifact_type") == "physical_ungated"
+            and checkpoint.get("training_epochs") == 0
+            and checkpoint.get("bn_calibration_batches") == 0,
+            "Search export is not the zero-training physical artifact")
+    require(all(checkpoint.get(key) == value for key, value in identity.items()),
+            "Search export selected-checkpoint identity differs")
+    require(all(diagnostics.get(key) == value for key, value in identity.items()),
+            "Search diagnostics selected-checkpoint identity differs")
+    mask = checkpoint.get("pruning_mask")
+    require(isinstance(mask, dict) and mask == selection.get("pruning_mask")
+            == diagnostics.get("pruning_mask")
+            and mask_hash(mask) == identity["mask_hash"],
+            "Search export pruning mask differs")
+    weights = checkpoint.get("model_state_dict")
+    require(isinstance(weights, dict)
+            and not any("gumbel" in name or "gate_logits" in name for name in weights)
+            and all(isinstance(value, torch.Tensor) and (not value.is_floating_point()
+                    or value.dtype == torch.float32 and bool(torch.isfinite(value).all()))
+                    for value in weights.values()),
+            "Search export must contain finite FP32 ungated tensors")
+    weights_hash = state_hash(weights)
+    require(weights_hash == checkpoint.get("model_state_hash")
+            == diagnostics.get("physical_state_hash"),
+            "Search export tensor hash differs")
+
+    normalization = checkpoint.get("normalization_metadata")
+    _validate_normalization(config, normalization)
+    require(normalization == state.get("provenance", {}).get("normalization"),
+            "Search export normalization provenance differs")
+    structural_config = to_v3_config(config)
+    structural_config.model.lambda_coef = 0.0
+    pruning = OmegaConf.create({
+        "mode": "explicit", "structural": True, "enabled": True, "mask": mask,
+    })
+    with redirect_stdout(io.StringIO()):
+        model = build_structurally_pruned_model_from_config(structural_config, pruning)
+    model.load_state_dict(weights, strict=True)
+    model.eval()
+    architecture_hash = hashlib.sha256(
+        json.dumps(physical_architecture_signature(model), sort_keys=True).encode()
+    ).hexdigest()
+    require(architecture_hash == diagnostics.get("architecture_hash"),
+            "Search export physical architecture hash differs")
+    cost = deployment_cost(model)
+    for key in ("physical_total_parameters", "conv_linear_macs_per_image"):
+        require(cost[key] == diagnostics.get("physical_cost", {}).get(key),
+                f"Search export physical cost differs: {key}")
+    require(state_hash(model.state_dict()) == weights_hash,
+            "Search export construction/cost check changed tensors")
+
+    validation = diagnostics.get("physical_validation")
+    require(isinstance(validation, dict)
+            and all(type(validation.get(key)) in (int, float)
+                    and math.isfinite(validation[key]) for key in ("accuracy", "ce_loss")),
+            "Search export physical validation metrics are incomplete")
+    record = {
+        "job": run_dir.name,
+        "branch": "search_export",
+        "method": "adaptive_search_physical_export",
+        "repeat": "seed42",
+        "training_seed": int(config.seed),
+        "optimizer_state_initialization": "search_optimizer",
+        "scheduler_state_initialization": "search_scheduler",
+        "initialization": "shared_zero_epoch_initializer",
+        "initialization_state_hash": state.get("provenance", {}).get("inputs", {}).get(
+            "initializer_model_state_hash"
+        ),
+        "pilot_version": 3,
+        "training_protocol": protocol,
+        "artifact_type": "physical_ungated_search_export",
+        "checkpoint": str(deployment_path),
+        "checkpoint_sha256": file_hash(deployment_path),
+        "state_sha256": file_hash(state_path),
+        "config_sha256": file_hash(config_path),
+        "selection_sha256": file_hash(selection_path),
+        "model_state_hash": weights_hash,
+        "mask_hash": identity["mask_hash"],
+        "architecture_hash": architecture_hash,
+        "pruning_mask": deepcopy(mask),
+        **{key: identity[key] for key in (
+            "selected_checkpoint_id", "selected_checkpoint_hash",
+            "selected_model_state_hash",
+        )},
+        "normalization_metadata": normalization,
+        "gate_regularization_normalization": "initial_channels",
+        "scaling_contract": "survivor_equivalent_v1",
+        "selection_provenance": state.get("provenance"),
+        "ledger": ledger,
+        "validation": validation,
+        "quality_feasible": selection.get("policy") == "best_feasible_compact",
+        "validation_quality_threshold": selection.get("quality_threshold"),
+        "validation_reference_epoch": search_epochs,
+        "final_selection_policy": selection.get("policy"),
+        "selected_final_epoch": selection["selected_epoch"],
+        "physical_parameters": cost["physical_total_parameters"],
+        "conv_linear_macs_per_image": cost["conv_linear_macs_per_image"],
+        "search_epochs_consumed": search_epochs,
+        "selected_checkpoint_epoch": selection["selected_epoch"],
+        "recovery_epochs_executed": 0,
+        "per_model_150_epoch_protocol_complete": False,
+    }
+    return model, record
+
+
 def run(args):
     run_dir = Path(args.run_dir).resolve()
     output = Path(args.output or run_dir / "one_shot_test_evaluation").resolve()
@@ -316,7 +501,9 @@ def run(args):
         raise FileExistsError(f"Refusing to overwrite {output}. Use a fresh --output directory.")
     if not args.check_only and str(args.device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; use the GPU server or explicitly pass --device cpu.")
-    prepared = prepare_branches(run_dir)
+    search_export = bool(getattr(args, "search_export", False))
+    prepared = ([prepare_search_export(run_dir)] if search_export
+                else prepare_branches(run_dir))
     if args.check_only:
         print(f"{len(prepared)} frozen branches verified. Official test data not loaded; no outputs written.")
         return None
@@ -326,8 +513,13 @@ def run(args):
     require(dataset.get("example_count") == 10000 and dataset.get("dataset") == "CIFAR10"
             and dataset.get("split") == "official_test", "Expected the full official CIFAR-10 test set")
     output.mkdir(parents=True, exist_ok=False)
-    report = {"status": "running", "source_run": str(run_dir), "protocol": "frozen_one_shot_branches_test_v1",
-        "training_protocol": protocol, "comparison_scope": "exploratory", "test_evaluated": False,
+    report = {"status": "running", "source_run": str(run_dir),
+        "protocol": ("frozen_one_shot_search_export_test_v1" if search_export
+                     else "frozen_one_shot_branches_test_v1"),
+        "training_protocol": protocol,
+        "comparison_scope": ("exploratory_search_only_incomplete_150_epoch_protocol"
+                             if search_export else "exploratory"),
+        "test_evaluated": False,
         "training_performed": False, "bn_recalibration": False, "test_based_selection": False,
         "started_at_utc": datetime.now(timezone.utc).isoformat(), "dataset": dataset,
         "planned_branches": branches, "device": str(args.device), "precision": "fp32",
@@ -348,7 +540,8 @@ def run(args):
             report["runs"].append({**record, "test": metrics, "model_state_unchanged": True,
                 "bn_counters_unchanged": True, "predictions": prediction_path.name,
                 "predictions_sha256": file_hash(prediction_path)})
-            print(f"[official-test] {record['branch']}: accuracy={metrics['accuracy']:.2%}; "
+            prefix = "exploratory-search-test" if search_export else "official-test"
+            print(f"[{prefix}] {record['branch']}: accuracy={metrics['accuracy']:.2%}; "
                   f"ce_loss={metrics['ce_loss']:.6f}; "
                   f"correct={metrics['correct_count']}/{metrics['example_count']}", flush=True)
             report["test_evaluated"] = True
@@ -384,11 +577,16 @@ def main(argv=None):
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--check-only", action="store_true", help="CPU artifact verification, no official test access or writes")
+    parser.add_argument(
+        "--search-export",
+        action="store_true",
+        help="Evaluate a completed search-only physical export without recovery; exploratory only",
+    )
     cli = parser.parse_args(argv)
     args = evaluation_args_from_config(
         cli.config, run_dir=cli.run_dir, data=cli.data, device=cli.device, output=cli.output,
         batch_size=cli.batch_size, num_workers=cli.num_workers, download=cli.download,
-        check_only=cli.check_only,
+        check_only=cli.check_only, search_export=cli.search_export,
     )
     torch.set_num_threads(min(4, torch.get_num_threads()))
     return run(args)
