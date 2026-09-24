@@ -505,7 +505,9 @@ def run(args):
     prepared = ([prepare_search_export(run_dir)] if search_export
                 else prepare_branches(run_dir))
     if args.check_only:
-        print(f"{len(prepared)} frozen branches verified. Official test data not loaded; no outputs written.")
+        scope = "search-export" if search_export else "recovery"
+        print(f"{len(prepared)} frozen {scope} branches verified. "
+              "Official test data not loaded; no outputs written.")
         return None
     protocol = prepared[0][1]["training_protocol"]
     branches = [record["branch"] for _, record in prepared]
@@ -561,7 +563,8 @@ def run(args):
         by_branch = {row["branch"]: row["test"]["accuracy"] for row in report["runs"]}
         delta = 100 * (by_branch["inherited"] - by_branch["scratch"])
         print(f"[official-test] inherited-minus-scratch={delta:+.2f} pp", flush=True)
-    print(f"[official-test] saved={output / 'test_summary.json'}", flush=True)
+    prefix = "exploratory-search-test" if search_export else "official-test"
+    print(f"[{prefix}] saved={output / 'test_summary.json'}", flush=True)
     return report
 
 
