@@ -80,3 +80,20 @@ def test_epoch_split_protocol_rejects_an_unplanned_split():
     config.accuracy_guided.stage_plan[2].epochs = 100
     with pytest.raises(ValueError, match="epoch-split study requires"):
         schema.validate_config(config)
+
+
+def test_epoch_split_recovery_preflight_allows_only_lr_ablation(monkeypatch):
+    config = schema.compose_config(
+        "experiment/pruning_v3/epoch_split_45_105_recovery",
+        overrides=["optimizer.lr=0.000857142857"],
+    )
+    observed = {}
+
+    def fake_validate(shared, **kwargs):
+        observed.update(kwargs)
+        return {"status": "ready"}
+
+    monkeypatch.setattr(schema, "_validate_v3_inputs", fake_validate)
+
+    assert schema.validate_inputs(config)["status"] == "ready"
+    assert observed == {"allow_optimizer_lr_difference": True}

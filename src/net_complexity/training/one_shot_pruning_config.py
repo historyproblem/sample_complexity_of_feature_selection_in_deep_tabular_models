@@ -269,17 +269,20 @@ def _reference_origin_info(config, result):
 
 def validate_inputs(config):
     validate_config(config)
-    # Only the explicitly tunable legacy recovery sweep may differ from the
-    # dense reference in ordinary optimizer/loss settings. The epoch-split
-    # study is intentionally strict: only method parameters and epoch allocation
-    # may differ.
-    quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
+    # Recovery-only LR ablations may start fresh AdamW at a different LR. Keep
+    # every other optimizer field strict, and keep label smoothing tunable only
+    # for the explicitly authorized legacy quality-recovery sweep.
+    protocol = str(config.one_shot.protocol)
+    quality_recovery = protocol == QUALITY_RECOVERY_PROTOCOL
+    epoch_split_recovery = protocol == EPOCH_SPLIT_RECOVERY_PROTOCOL
     try:
         kwargs = ({
             "allow_optimizer_lr_difference": True,
             "allow_scheduler_eta_min_difference": True,
             "allow_label_smoothing_difference": True,
-        } if quality_recovery else {})
+        } if quality_recovery else {
+            "allow_optimizer_lr_difference": True,
+        } if epoch_split_recovery else {})
         return _reference_origin_info(config, _validate_v3_inputs(to_v3_config(config), **kwargs))
     except FileNotFoundError:
         paths = {**dict(config.accuracy_guided.reference),
@@ -320,11 +323,15 @@ def output_paths(config, output_root=None):
 
 def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     total = validate_config(config)
-    tunable_quality_recovery = str(config.one_shot.protocol) == QUALITY_RECOVERY_PROTOCOL
+    protocol = str(config.one_shot.protocol)
+    tunable_quality_recovery = protocol == QUALITY_RECOVERY_PROTOCOL
+    tunable_epoch_split_recovery = protocol == EPOCH_SPLIT_RECOVERY_PROTOCOL
     shared = resolved_v3(
         to_v3_config(config),
         check_inputs=check_inputs,
-        allow_optimizer_lr_difference=tunable_quality_recovery,
+        allow_optimizer_lr_difference=(
+            tunable_quality_recovery or tunable_epoch_split_recovery
+        ),
         allow_scheduler_eta_min_difference=tunable_quality_recovery,
         allow_label_smoothing_difference=tunable_quality_recovery,
     )
