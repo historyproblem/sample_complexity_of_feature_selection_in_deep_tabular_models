@@ -155,7 +155,9 @@ def prepare_branches(run_dir):
             and 1 <= selection["selected_epoch"] <= search_epochs
             and selection["selected_epoch"] == selected.get("epoch")
             and selection.get("reference_epoch") == search_epochs
-            and selection.get("policy") == "best_feasible_compact",
+            and selection.get("policy") in {
+                "best_feasible_compact", "best_validation_last_epochs_fallback",
+            },
             "Invalid common search checkpoint selection policy/epoch/reference")
     require(type(selection.get("quality_threshold")) in (int, float)
             and math.isfinite(selection["quality_threshold"]), "Invalid frozen search quality threshold")
