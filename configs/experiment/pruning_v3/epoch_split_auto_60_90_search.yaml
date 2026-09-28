@@ -1,0 +1,17 @@
+# @package _global_
+# Anchor point: auto resolves to the same 0.921034037... step used by the prior
+# 60/90 run, while making the derivation explicit and runtime-checked.
+defaults:
+  - /experiment/pruning_v3/epoch_split_60_90_search
+  - _self_
+
+training_arguments:
+  adaptive_lambda:
+    initial_search_warmup: 10
+    log_step: auto
+
+mlflow:
+  run_name: epoch_split_auto_60_90_search
+
+run_history:
+  run_name: epoch_split_auto_60_90_search

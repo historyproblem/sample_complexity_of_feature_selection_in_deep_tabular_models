@@ -23,6 +23,8 @@ SRC = ROOT / "src"
 ONE_SHOT = ROOT / "scripts/launch_one_shot_pruning.py"
 EVALUATOR = ROOT / "scripts/evaluate_one_shot_pruning_test.py"
 SPLITS = ((30, 120), (45, 105), (60, 90), (75, 75))
+PROFILES = ("fixed", "auto")
+AUTO_WARMUP_BY_SEARCH_EPOCHS = {30: 5, 45: 8, 60: 10, 75: 13}
 RECOVERY_BRANCH = "fresh_optimizer_fresh_scheduler__repeat_1"
 SEARCH_PROTOCOL = "pruning_v3_one_shot_epoch_split_150"
 RECOVERY_PROTOCOL = "pruning_v3_quality_recovery_epoch_split_150"
@@ -68,25 +70,30 @@ def _run(command, *, capture=False):
     return result
 
 
-def _config_name(search_epochs, recovery_epochs, phase):
+def _config_name(search_epochs, recovery_epochs, phase, profile="fixed"):
+    _require(profile in PROFILES, f"Unknown epoch-split profile: {profile}")
+    profile_token = "_auto" if profile == "auto" else ""
     return (
-        f"experiment/pruning_v3/epoch_split_"
+        f"experiment/pruning_v3/epoch_split{profile_token}_"
         f"{search_epochs}_{recovery_epochs}_{phase}"
     )
 
 
-def validate_study_configs():
+def validate_study_configs(profile="fixed"):
     """Resolve and strictly verify every checked-in study configuration."""
+    _require(profile in PROFILES, f"Unknown epoch-split profile: {profile}")
     sys.path.insert(0, str(SRC))
     from net_complexity.training import one_shot_pruning_config as schema
+    from net_complexity.training.engine import _resolve_adaptive_lambda_log_step_init
+    from omegaconf import OmegaConf
 
     resolved = []
     for search_epochs, recovery_epochs in SPLITS:
         search = schema.compose_config(
-            _config_name(search_epochs, recovery_epochs, "search")
+            _config_name(search_epochs, recovery_epochs, "search", profile)
         )
         recovery = schema.compose_config(
-            _config_name(search_epochs, recovery_epochs, "recovery")
+            _config_name(search_epochs, recovery_epochs, "recovery", profile)
         )
         _require(
             schema.validate_config(search) == schema.validate_config(recovery) == 150,
@@ -110,6 +117,26 @@ def validate_study_configs():
             }, f"{search_epochs}/{recovery_epochs}: loss is not plain cross entropy")
             _require(float(config.scheduler.eta_min) == 0.0,
                      f"{search_epochs}/{recovery_epochs}: cosine eta_min changed")
+        if profile == "auto":
+            expected_warmup = AUTO_WARMUP_BY_SEARCH_EPOCHS[search_epochs]
+            for config in (search, recovery):
+                adaptive = config.training_arguments.adaptive_lambda
+                _require(str(adaptive.log_step).lower() == "auto",
+                         f"{search_epochs}/{recovery_epochs}: log_step is not automatic")
+                _require(int(adaptive.initial_search_warmup) == expected_warmup,
+                         f"{search_epochs}/{recovery_epochs}: horizon warmup differs")
+            adaptive = search.training_arguments.adaptive_lambda
+            resolved_log_step = _resolve_adaptive_lambda_log_step_init(
+                OmegaConf.create({"num_epochs": search_epochs}),
+                OmegaConf.create({"log_step_init": "auto"}),
+                initial_lambda_coef=float(adaptive.alpha_init),
+                warmup_epochs=int(adaptive.initial_search_warmup),
+                update_every_epochs=int(adaptive.update_every_search_epochs),
+            )
+        else:
+            resolved_log_step = float(
+                search.training_arguments.adaptive_lambda.log_step
+            )
         _require(int(search.accuracy_guided.guard.train_bn_calibration_batches) == 0,
                  f"{search_epochs}/{recovery_epochs}: search unexpectedly calibrates BN")
         _require(int(recovery.accuracy_guided.guard.train_bn_calibration_batches) == 200,
@@ -126,8 +153,17 @@ def validate_study_configs():
         }, f"{search_epochs}/{recovery_epochs}: recovery handoff policy changed")
         resolved.append({
             "split": f"{search_epochs}/{recovery_epochs}",
-            "search_config": _config_name(search_epochs, recovery_epochs, "search"),
-            "recovery_config": _config_name(search_epochs, recovery_epochs, "recovery"),
+            "profile": profile,
+            "search_config": _config_name(
+                search_epochs, recovery_epochs, "search", profile
+            ),
+            "recovery_config": _config_name(
+                search_epochs, recovery_epochs, "recovery", profile
+            ),
+            "initial_search_warmup": int(
+                search.training_arguments.adaptive_lambda.initial_search_warmup
+            ),
+            "resolved_log_step": resolved_log_step,
         })
     return resolved
 
@@ -352,13 +388,17 @@ def _test_result(test_dir, winner_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--profile", choices=PROFILES, default="fixed",
+        help="Controller-step profile: original fixed step or horizon-aware auto",
+    )
+    parser.add_argument(
         "--reference-output", type=Path,
         default=Path("outputs/runs/epoch_split_dense_reference_seed42_fresh"),
     )
     parser.add_argument("--output-root", type=Path, default=Path("outputs/runs"))
     parser.add_argument(
         "--state", type=Path,
-        default=Path("outputs/runs/epoch_split_four_way_state.json"),
+        help="Study state path (profile-specific default under outputs/runs)",
     )
     parser.add_argument(
         "--resume-completed", action="store_true",
@@ -377,12 +417,18 @@ def main(argv=None):
 
     reference = args.reference_output.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
-    state_path = args.state.expanduser().resolve()
+    state_path = (
+        args.state if args.state is not None else Path(
+            "outputs/runs/epoch_split_auto_four_way_state.json"
+            if args.profile == "auto"
+            else "outputs/runs/epoch_split_four_way_state.json"
+        )
+    ).expanduser().resolve()
     min_free_gib = float(args.min_free_gib if args.min_free_gib is not None else
                          (90.0 if args.prune_completed_checkpoints else 200.0))
     _require(min_free_gib > 0, "--min-free-gib must be positive")
 
-    configs = validate_study_configs()
+    configs = validate_study_configs(args.profile)
     preflight = _environment_preflight(min_free_gib)
     if args.preflight_only:
         print(json.dumps({"status": "ready", "configs": configs, "environment": preflight},
@@ -395,7 +441,12 @@ def main(argv=None):
             "Use --resume-completed only to verify and skip completed stages."
         )
     state = {
-        "protocol": "pruning_v3_epoch_split_four_way_fresh_reference_v1",
+        "protocol": (
+            "pruning_v3_epoch_split_four_way_auto_step_fresh_reference_v1"
+            if args.profile == "auto"
+            else "pruning_v3_epoch_split_four_way_fresh_reference_v1"
+        ),
+        "profile": args.profile,
         "status": "running",
         "started_unix": time(),
         "reference": None,
@@ -425,7 +476,7 @@ def main(argv=None):
             lambda: _reference_result(reference),
             [
                 sys.executable, ONE_SHOT,
-                "--config-name", _config_name(60, 90, "search"),
+                "--config-name", _config_name(60, 90, "search", args.profile),
                 "--prepare-reference", reference,
             ],
         )
@@ -433,7 +484,11 @@ def main(argv=None):
 
         recoveries = []
         for index, (search_epochs, recovery_epochs) in enumerate(SPLITS, 1):
-            stem = f"epoch_split_{search_epochs}_{recovery_epochs}"
+            stem = (
+                f"epoch_split_auto_{search_epochs}_{recovery_epochs}"
+                if args.profile == "auto"
+                else f"epoch_split_{search_epochs}_{recovery_epochs}"
+            )
             search_dir = output_root / f"{stem}_depsafe_search"
             recovery_dir = output_root / f"{stem}_depsafe_bn200_fixed"
             print(
@@ -447,7 +502,9 @@ def main(argv=None):
                     _search_result(s, a, b),
                 [
                     sys.executable, ONE_SHOT,
-                    "--config-name", _config_name(search_epochs, recovery_epochs, "search"),
+                    "--config-name", _config_name(
+                        search_epochs, recovery_epochs, "search", args.profile
+                    ),
                     "--dense-source", reference,
                     "--output", search_dir,
                     "--search-only",
@@ -459,7 +516,9 @@ def main(argv=None):
                     _recovery_result(r, s, a, b),
                 [
                     sys.executable, ONE_SHOT,
-                    "--config-name", _config_name(search_epochs, recovery_epochs, "recovery"),
+                    "--config-name", _config_name(
+                        search_epochs, recovery_epochs, "recovery", args.profile
+                    ),
                     "--dense-source", reference,
                     "--reuse-search", search_dir,
                     "--output", recovery_dir,
@@ -478,7 +537,11 @@ def main(argv=None):
             _write_json(state_path, state)
 
         winner, policy = select_validation_winner(recoveries)
-        validation_csv = state_path.with_name("epoch_split_validation_summary.csv")
+        validation_csv = state_path.with_name(
+            "epoch_split_auto_validation_summary.csv"
+            if args.profile == "auto"
+            else "epoch_split_validation_summary.csv"
+        )
         _write_validation_csv(validation_csv, recoveries)
         state["selection"] = {
             "data": "validation_only",

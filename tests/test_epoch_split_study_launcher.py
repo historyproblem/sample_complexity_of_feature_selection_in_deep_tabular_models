@@ -24,6 +24,23 @@ def test_all_study_configs_are_strictly_validated():
     assert [row["split"] for row in rows] == ["30/120", "45/105", "60/90", "75/75"]
 
 
+def test_auto_step_study_configs_resolve_from_each_search_horizon():
+    rows = launcher.validate_study_configs("auto")
+    assert [row["search_config"] for row in rows] == [
+        "experiment/pruning_v3/epoch_split_auto_30_120_search",
+        "experiment/pruning_v3/epoch_split_auto_45_105_search",
+        "experiment/pruning_v3/epoch_split_auto_60_90_search",
+        "experiment/pruning_v3/epoch_split_auto_75_75_search",
+    ]
+    assert [row["initial_search_warmup"] for row in rows] == [5, 8, 10, 13]
+    assert [row["resolved_log_step"] for row in rows] == pytest.approx([
+        1.8420680743952367,
+        1.315762910282312,
+        0.9210340371976183,
+        0.7675283643313486,
+    ])
+
+
 def test_validation_winner_excludes_infeasible_and_uses_validation_ties():
     rows = [
         dict(split="30/120", search_epochs=30, quality_feasible=True,
@@ -105,7 +122,10 @@ def test_main_runs_reference_four_pairs_validation_selection_and_one_frozen_test
     monkeypatch.setattr(
         launcher,
         "validate_study_configs",
-        lambda: [{"split": f"{a}/{b}"} for a, b in launcher.SPLITS],
+        lambda profile="fixed": [
+            {"split": f"{a}/{b}", "profile": profile}
+            for a, b in launcher.SPLITS
+        ],
     )
     monkeypatch.setattr(
         launcher,

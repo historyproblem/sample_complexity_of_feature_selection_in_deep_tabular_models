@@ -20,3 +20,8 @@
 - Iteration informed by previously seen test results is exploratory, not a fresh
   untouched holdout confirmation. Keep physical parameters distinct from active
   parameter estimates and account for training/pretraining budgets explicitly.
+- In comparisons with different adaptive-search horizons, do not reuse one fixed
+  `log_step` merely to keep the numeric configuration identical. Derive the
+  controller warmup and automatic step from each search horizon, and verify the
+  resolved values before launching, unless the user explicitly requests a
+  fixed-step ablation.

@@ -11,6 +11,13 @@ SPLITS = [
     (90, 60, 0.00033, 0.00067),
 ]
 
+AUTO_SPLITS = [
+    (30, 120, 5),
+    (45, 105, 8),
+    (60, 90, 10),
+    (75, 75, 13),
+]
+
 
 @pytest.mark.parametrize("search_epochs,recovery_epochs,soft_drop,hard_drop", SPLITS)
 def test_epoch_split_pair_is_a_strict_150_epoch_plain_ce_experiment(
@@ -80,6 +87,32 @@ def test_epoch_split_protocol_rejects_an_unplanned_split():
     config.accuracy_guided.stage_plan[2].epochs = 100
     with pytest.raises(ValueError, match="epoch-split study requires"):
         schema.validate_config(config)
+
+
+@pytest.mark.parametrize("search_epochs,recovery_epochs,warmup", AUTO_SPLITS)
+def test_epoch_split_auto_step_pair_preserves_protocol_and_uses_horizon_warmup(
+    search_epochs, recovery_epochs, warmup
+):
+    search = schema.compose_config(
+        f"experiment/pruning_v3/epoch_split_auto_{search_epochs}_{recovery_epochs}_search"
+    )
+    recovery = schema.compose_config(
+        f"experiment/pruning_v3/epoch_split_auto_{search_epochs}_{recovery_epochs}_recovery"
+    )
+
+    assert schema.validate_config(search) == schema.validate_config(recovery) == 150
+    for config in (search, recovery):
+        adaptive = config.training_arguments.adaptive_lambda
+        assert adaptive.enabled is True
+        assert adaptive.log_step == "auto"
+        assert adaptive.initial_search_warmup == warmup
+        assert config.one_shot.search_epochs == search_epochs
+        assert config.one_shot.final_epochs == recovery_epochs
+        assert config.model.criterion == {"_target_": "torch.nn.CrossEntropyLoss"}
+        assert config.optimizer.lr == pytest.approx(0.001)
+        assert config.optimizer.weight_decay == pytest.approx(0.0005)
+    assert search.accuracy_guided.guard.train_bn_calibration_batches == 0
+    assert recovery.accuracy_guided.guard.train_bn_calibration_batches == 200
 
 
 def test_epoch_split_recovery_preflight_allows_only_lr_ablation(monkeypatch):

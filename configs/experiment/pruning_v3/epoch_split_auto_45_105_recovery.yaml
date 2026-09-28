@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/epoch_split_45_105_recovery
+  - _self_
+
+training_arguments:
+  adaptive_lambda:
+    initial_search_warmup: 8
+    log_step: auto
+
+mlflow:
+  run_name: epoch_split_auto_45_105_recovery
+
+run_history:
+  run_name: epoch_split_auto_45_105_recovery
