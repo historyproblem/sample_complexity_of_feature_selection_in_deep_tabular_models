@@ -26,7 +26,12 @@ from net_complexity.training.one_shot_pruning_config import (
 )
 from net_complexity.training.accuracy_guided_pruning import select_checkpoint_records
 from net_complexity.training.pruning_audit import build_structural
-from net_complexity.training.pruning_measurement import isolated_diagnostic_rng, mask_hash, state_hash
+from net_complexity.training.pruning_measurement import (
+    gated_export_equivalence,
+    isolated_diagnostic_rng,
+    mask_hash,
+    state_hash,
+)
 from net_complexity.training.pruning_synthetic import make_synthetic_config
 
 
@@ -478,6 +483,38 @@ def test_epoch_split_recovery_can_precommit_the_search_end_checkpoint(tmp_path):
     assert result["reused_search"]["recovery_source_search_epoch"] == 3
     assert result["compute_ledger"]["attributed_training_epochs_including_reused_search"] == 5
     assert result["compute_ledger"]["actual_training_epochs_executed"] == 2
+
+
+def test_gated_export_equivalence_uses_the_audited_fp64_fallback_ceiling():
+    class AccumulationOrderModel(nn.Module):
+        def __init__(self, stable_order):
+            super().__init__()
+            self.stable_order = stable_order
+            self.register_buffer("large", torch.tensor(1.0e8))
+            self.register_buffer("small", torch.tensor(1.0))
+            self.register_buffer("base", torch.tensor(2000.0))
+
+        def forward(self, x, y):
+            del y
+            if self.stable_order:
+                value = (self.large - self.large) + self.small + self.base
+            else:
+                value = (self.large + self.small) - self.large + self.base
+            logits = value.expand(len(x), 2)
+            return type("Output", (), {"logits": logits})()
+
+    sample = torch.zeros(4, 1), torch.zeros(4, dtype=torch.long)
+    report = gated_export_equivalence(
+        AccumulationOrderModel(stable_order=False),
+        AccumulationOrderModel(stable_order=True),
+        sample,
+    )
+
+    assert report["status"] == "passed_fp64_fallback"
+    assert report["fp32"]["mismatched_logits"] == 8
+    assert report["fp32_ceiling"]["mismatched_logits"] == 0
+    assert report["fp32_ceiling"]["rtol"] == pytest.approx(1e-3)
+    assert report["fp64"]["mismatched_logits"] == 0
 
 
 def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):

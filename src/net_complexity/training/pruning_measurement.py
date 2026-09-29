@@ -114,8 +114,14 @@ def gated_export_equivalence(carrier, physical, sample, device="cpu"):
         if report["fp32"]["mismatched_logits"] == 0:
             report["status"] = "passed_fp32"
         else:
-            torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
-            report["fp32_ceiling"] = {"rtol": 1e-4, "atol": 1e-4}
+            # Match committed_equivalence: narrow convolutions may change the
+            # FP32 accumulation order enough to exceed the strict diagnostic
+            # tolerance.  This wider bound only permits the independent FP64
+            # check to run; it never accepts the transfer by itself.
+            report["fp32_ceiling"] = _equivalence_stats(
+                actual, expected, rtol=1e-3, atol=1e-4
+            )
+            torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
             gated, exported = gated.cpu().double(), exported.cpu().double()
             x64, y64 = sample[0].cpu().double(), sample[1].cpu()
             actual64 = torch.cat([gated(x64[i:i+8], y64[i:i+8]).logits for i in range(0, len(x64), 8)])
