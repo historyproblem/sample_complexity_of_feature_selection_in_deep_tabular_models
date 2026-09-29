@@ -131,8 +131,14 @@ def validate_config(config):
             fields.add("search_scheduler_eta_min")
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
-        _require(set(one) == fields,
-                 f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
+        optional_fields = (
+            {"recovery_source_search_epoch"}
+            if protocol == EPOCH_SPLIT_RECOVERY_PROTOCOL
+            else set()
+        )
+        _require(fields <= set(one) <= fields | optional_fields,
+                 f"one_shot unknown={sorted(set(one) - fields - optional_fields)}, "
+                 f"missing={sorted(fields - set(one))}")
         expected_methods = ([
                 {"id": "fresh_optimizer_fresh_scheduler",
                  "model_state": "selected_surviving_state",
@@ -182,6 +188,12 @@ def validate_config(config):
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             _require(one["reuse_search_required"] is True,
                      "quality recovery must reuse the completed configured search")
+        if "recovery_source_search_epoch" in one:
+            source_epoch = one["recovery_source_search_epoch"]
+            _require(
+                type(source_epoch) is int and 1 <= source_epoch <= one["search_epochs"],
+                "recovery_source_search_epoch must be an integer within the completed search",
+            )
         _require(type(one["search_epochs"]) is int and type(one["final_epochs"]) is int,
                  "search_epochs and final_epochs must be integers")
         expected_horizon = (one["search_epochs"] + one["final_epochs"]
@@ -343,7 +355,12 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
     # Do not expose the inherited iterative guard as this runner's actual policy.
     execution = {
         "shared_search_checkpoint_and_mask": True,
-        "search_checkpoint_selection": "best_feasible_compact; reference fixed at shared search end",
+        "search_checkpoint_selection": (
+            f"precommitted search epoch {one['recovery_source_search_epoch']}; "
+            "validation does not choose the recovery source"
+            if "recovery_source_search_epoch" in one
+            else "best_feasible_compact; reference fixed at shared search end"
+        ),
         "no_feasible_search": "best_validation_accuracy_among_last_30_search_epochs",
         "export_diagnostics": "before_branch_training; eval/no_grad; weights_and_bn_unchanged",
         "export_diagnostic_quality": "measure opening/export jumps without calibration or training",
@@ -398,7 +415,12 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
             "paired_recovery_seeds": [repeat["training_seed"] for repeat in one["repeats"]],
             "execution_order": [branch["id"] for branch in branches],
         })
-        handoff = {"source": "one selected adaptive search checkpoint and learned mask",
+        handoff = {"source": (
+                       f"precommitted adaptive search epoch {one['recovery_source_search_epoch']} "
+                       "and its learned mask"
+                       if "recovery_source_search_epoch" in one
+                       else "one selected adaptive search checkpoint and learned mask"
+                   ),
                    "model_state": "identical selected surviving state for every branch",
                    "gate_reentry": None, "controller_rebase": None,
                    "methods": one["methods"]}

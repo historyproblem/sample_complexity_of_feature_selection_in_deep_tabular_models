@@ -1,0 +1,17 @@
+# @package _global_
+# Targeted recovery of the physical architecture represented by the final
+# checkpoint of the 30-epoch adaptive search. The source epoch is precommitted,
+# not selected by validation. Recovery remains BN200 + 120 epochs of plain-CE
+# training with fresh AdamW (lr=1e-3, weight_decay=5e-4) and fresh cosine.
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_30_120_recovery
+  - _self_
+
+one_shot:
+  recovery_source_search_epoch: 30
+
+mlflow:
+  run_name: epoch_split_auto_30_120_epoch30_recovery
+
+run_history:
+  run_name: epoch_split_auto_30_120_epoch30_recovery

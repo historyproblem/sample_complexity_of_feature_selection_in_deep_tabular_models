@@ -56,6 +56,54 @@ from .randomness import set_random_seed
 NO_FEASIBLE_FALLBACK_LAST_EPOCHS = 30
 
 
+def _precommitted_recovery_source(source_root, source_selection, source_epoch):
+    """Resolve one precommitted search checkpoint without validation selection."""
+    trace = source_selection.get("trace")
+    records = trace.get("trace") if isinstance(trace, dict) else trace
+    if not isinstance(records, list) or not records:
+        raise ValueError("Reusable search has no checkpoint trace for a precommitted epoch")
+    matches = [record for record in records if int(record.get("epoch", -1)) == source_epoch]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Reusable search trace must contain exactly one epoch {source_epoch} record"
+        )
+    selected = deepcopy(matches[0])
+    expected_name = f"epoch_{source_epoch:04d}.pt"
+    recorded_path = Path(str(selected.get("path", ""))).expanduser()
+    if recorded_path.name != expected_name:
+        raise ValueError(
+            f"Reusable search epoch {source_epoch} record points to {recorded_path.name!r}"
+        )
+    source_root = Path(source_root).resolve()
+    candidates = []
+    if recorded_path.is_absolute():
+        resolved_recorded = recorded_path.resolve()
+        if source_root in resolved_recorded.parents and resolved_recorded.is_file():
+            candidates.append(resolved_recorded)
+    training_root = source_root / "shared_search" / "training"
+    if training_root.is_dir():
+        candidates.extend(training_root.glob(f"*/checkpoints/{expected_name}"))
+    candidates = sorted({path.resolve() for path in candidates if path.is_file()})
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            f"Reusable search checkpoint {expected_name} is missing or ambiguous under "
+            f"{training_root}. Nested search checkpoints may have been cleaned; rerun the "
+            "30-epoch search without checkpoint cleanup before starting recovery."
+        )
+    selected["path"] = str(candidates[0])
+    selection_trace = deepcopy(trace if isinstance(trace, dict) else source_selection)
+    source_policy = selection_trace.get("policy")
+    selection_trace.update({
+        "policy": "precommitted_recovery_source_epoch",
+        "source_selection_policy": source_policy,
+        "selected_epoch": source_epoch,
+        "recovery_source_search_epoch": source_epoch,
+        "forced_selection": True,
+        "fallback_used": False,
+    })
+    return selected, selection_trace, candidates[0]
+
+
 def materialize_physical_survivor_carrier(carrier, mask):
     """Return the exact full-width predictor represented by physical surgery.
 
@@ -483,8 +531,24 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     raise ValueError("Reusable search used a different zero-epoch initializer")
                 if int(source_state.get("shared_search_ledger", {}).get("search_epochs_consumed", -1)) != search_epochs:
                     raise ValueError("Reusable search did not complete the configured search budget")
-                reused_fallback = source_status == "no_feasible_search"
-                if reused_fallback:
+                source_epoch = getattr(
+                    config.one_shot, "recovery_source_search_epoch", None
+                )
+                reused_fallback = False
+                if source_epoch is not None:
+                    source_epoch = int(source_epoch)
+                    selected, selection_trace, source_checkpoint_path = (
+                        _precommitted_recovery_source(
+                            source_root, source_selection, source_epoch
+                        )
+                    )
+                    source_ledger = source_selection.get("search_ledger_consumed")
+                    if not isinstance(source_ledger, dict):
+                        source_ledger = source_state.get("shared_search_ledger")
+                    if not isinstance(source_ledger, dict):
+                        raise ValueError("Reusable search has no consumed search ledger")
+                elif source_status == "no_feasible_search":
+                    reused_fallback = True
                     records = source_selection.get("trace")
                     if not isinstance(records, list) or not records:
                         raise ValueError("No-feasible reusable search has no checkpoint trace")
@@ -555,10 +619,21 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                         selection_recomputed_from_completed_trace=True,
                         fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
                     )
+                if source_epoch is not None:
+                    state["reused_search"].update(
+                        selection_precommitted_before_recovery=True,
+                        recovery_source_search_epoch=source_epoch,
+                    )
                 progress_message(
                     "shared_search",
                     f"reusing completed search selection from {source_root}; epoch={selected['epoch']}"
-                    + ("; policy=best_validation_last_30_epochs" if reused_fallback else ""),
+                    + (
+                        "; policy=precommitted_recovery_source_epoch"
+                        if source_epoch is not None
+                        else "; policy=best_validation_last_30_epochs"
+                        if reused_fallback
+                        else ""
+                    ),
                 )
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:

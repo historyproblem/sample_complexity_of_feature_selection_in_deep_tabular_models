@@ -125,6 +125,37 @@ def test_target5m_quality_recovery_is_one_fresh_90_epoch_branch():
     assert tuned.model.criterion.label_smoothing == pytest.approx(0.10)
 
 
+def test_epoch30_recovery_profile_precommits_search_end_and_keeps_150_epoch_budget():
+    cfg = schema.compose_config(
+        "experiment/pruning_v3/epoch_split_auto_30_120_epoch30_recovery"
+    )
+    assert schema.validate_config(cfg) == 150
+    assert cfg.one_shot.search_epochs == 30
+    assert cfg.one_shot.final_epochs == 120
+    assert cfg.one_shot.recovery_source_search_epoch == 30
+    assert cfg.accuracy_guided.guard.train_bn_calibration_batches == 200
+    assert cfg.optimizer.lr == pytest.approx(0.001)
+    assert cfg.optimizer.weight_decay == pytest.approx(0.0005)
+    assert cfg.scheduler.eta_min == 0
+    assert dict(cfg.model.criterion) == {"_target_": "torch.nn.CrossEntropyLoss"}
+    assert cfg.training_arguments.adaptive_lambda.enabled is True
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["search_checkpoint_selection"] == (
+        "precommitted search epoch 30; validation does not choose the recovery source"
+    )
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+
+
+@pytest.mark.parametrize("source_epoch", [0, 31, 1.5])
+def test_epoch_split_recovery_rejects_invalid_precommitted_search_epoch(source_epoch):
+    cfg = schema.compose_config(
+        "experiment/pruning_v3/epoch_split_auto_30_120_epoch30_recovery"
+    )
+    cfg.one_shot.recovery_source_search_epoch = source_epoch
+    with pytest.raises(ValueError, match="recovery_source_search_epoch"):
+        schema.validate_config(cfg)
+
+
 def test_parameter_curve_profiles_are_independent_60_plus_90_models():
     search = schema.compose_config(
         "experiment/pruning_v3/parameter_curve_search60"
