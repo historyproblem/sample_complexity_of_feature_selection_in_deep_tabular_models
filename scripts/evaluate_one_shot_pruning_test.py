@@ -115,6 +115,38 @@ def _validate_validation(metrics):
             and metrics["ce_loss"] >= 0, "Invalid selected validation accuracy/CE")
 
 
+def _validate_recovery_source_selection(config, selection, search_epochs):
+    """Accept validation selection or an explicitly precommitted source epoch."""
+    selected_epoch = selection.get("selected_epoch")
+    require(
+        selection.get("reference_epoch") == search_epochs
+        and type(selected_epoch) is int
+        and 1 <= selected_epoch <= search_epochs,
+        "Invalid common search checkpoint epoch/reference",
+    )
+    source_epoch = OmegaConf.select(
+        config, "one_shot.recovery_source_search_epoch", default=None
+    )
+    if source_epoch is None:
+        require(
+            selection.get("policy") in {
+                "best_feasible_compact", "best_validation_last_epochs_fallback",
+            },
+            "Invalid common search checkpoint selection policy",
+        )
+        return
+    trace = selection.get("trace")
+    require(
+        selection.get("policy") == "precommitted_recovery_source_epoch"
+        and selected_epoch == int(source_epoch)
+        and isinstance(trace, dict)
+        and trace.get("forced_selection") is True
+        and trace.get("recovery_source_search_epoch") == int(source_epoch)
+        and trace.get("selected_epoch") == int(source_epoch),
+        "Precommitted recovery source differs from config/selection trace",
+    )
+
+
 def prepare_branches(run_dir):
     """Validate finalized branches and their common frozen search selection."""
     from net_complexity.training.one_shot_pruning_config import (
@@ -151,14 +183,9 @@ def prepare_branches(run_dir):
             "Missing shared selected checkpoint identity")
     require(all(selection.get(key) == value for key, value in identity.items()),
             "Selection record differs from the frozen shared checkpoint")
-    require(type(selection.get("selected_epoch")) is int
-            and 1 <= selection["selected_epoch"] <= search_epochs
-            and selection["selected_epoch"] == selected.get("epoch")
-            and selection.get("reference_epoch") == search_epochs
-            and selection.get("policy") in {
-                "best_feasible_compact", "best_validation_last_epochs_fallback",
-            },
-            "Invalid common search checkpoint selection policy/epoch/reference")
+    _validate_recovery_source_selection(config, selection, search_epochs)
+    require(selection["selected_epoch"] == selected.get("epoch"),
+            "Common search selection differs from selected checkpoint epoch")
     require(type(selection.get("quality_threshold")) in (int, float)
             and math.isfinite(selection["quality_threshold"]), "Invalid frozen search quality threshold")
     _validate_ledger(selection.get("search_ledger_consumed"), total=search_epochs, search=search_epochs)

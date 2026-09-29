@@ -197,6 +197,38 @@ def test_validation_fallback_search_selection_is_accepted(pair):
     assert len(prepared) == 2
 
 
+def test_precommitted_recovery_source_requires_matching_config_and_trace(pair):
+    selection = evaluation.read_json(pair / "selection.json")
+    selection.update(
+        policy="precommitted_recovery_source_epoch",
+        trace={
+            "forced_selection": True,
+            "recovery_source_search_epoch": 51,
+            "selected_epoch": 51,
+        },
+    )
+    config = OmegaConf.load(pair / "resolved_config.yaml")
+    OmegaConf.update(
+        config, "one_shot.recovery_source_search_epoch", 51, force_add=True,
+    )
+
+    evaluation._validate_recovery_source_selection(config, selection, 60)
+
+    for field, value in (
+        ("one_shot.recovery_source_search_epoch", 50),
+        ("one_shot.recovery_source_search_epoch", None),
+    ):
+        changed = deepcopy(config)
+        OmegaConf.update(changed, field, value, force_add=True)
+        with pytest.raises(ValueError, match="(?i)(precommitted|selection policy)"):
+            evaluation._validate_recovery_source_selection(changed, selection, 60)
+
+    changed_selection = deepcopy(selection)
+    changed_selection["trace"]["forced_selection"] = False
+    with pytest.raises(ValueError, match="Precommitted"):
+        evaluation._validate_recovery_source_selection(config, changed_selection, 60)
+
+
 def test_finalized_infeasible_branch_keeps_honest_quality_status(pair):
     folder = pair / "scratch"
     state = evaluation.read_json(folder / "branch_state.json")
