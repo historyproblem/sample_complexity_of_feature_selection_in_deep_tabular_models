@@ -25,7 +25,9 @@ from net_complexity.training.one_shot_pruning_config import (
 from net_complexity.training.one_shot_progress import phase_progress, progress_message
 
 DEFAULT_REFERENCE_OUTPUT = Path("outputs/runs/one_shot_dense_reference_seed42")
+MOBILENET_REFERENCE_OUTPUT = Path("outputs/runs/mobilenetv2_dense_reference_seed42")
 DEFAULT_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test.yaml"
+MOBILENET_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test_mobilenetv2_tinyimagenet200.yaml"
 
 
 def _run_official_test(output, config_path):
@@ -96,7 +98,7 @@ def main(argv=None):
                         help="Create a NEW shared seed42 initializer, train its dense150 reference, then run the configured search and compact branches")
     parser.add_argument("--reference-output", type=Path,
                         help=f"New reference directory for --from-scratch (default: {DEFAULT_REFERENCE_OUTPUT})")
-    parser.add_argument("--test-config", type=Path, default=DEFAULT_TEST_CONFIG,
+    parser.add_argument("--test-config", type=Path,
                         help="Official-test inference profile run automatically after frozen deployments are finalized")
     parser.add_argument("--dry-run", action="store_true", help="Resolve paths/contracts without training, CUDA, or dataset construction")
     parser.add_argument(
@@ -113,6 +115,10 @@ def main(argv=None):
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE",
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
+    is_mobilenet = "mobilenetv2" in str(args.config_name).lower()
+    default_reference_output = MOBILENET_REFERENCE_OUTPUT if is_mobilenet else DEFAULT_REFERENCE_OUTPUT
+    if args.test_config is None:
+        args.test_config = MOBILENET_TEST_CONFIG if is_mobilenet else DEFAULT_TEST_CONFIG
     if args.reference_output is not None and not args.from_scratch:
         parser.error("--reference-output requires --from-scratch; use --prepare-reference PATH for preparation alone")
     if args.prepare_reference is not None and args.output is not None:
@@ -123,7 +129,7 @@ def main(argv=None):
     if new_reference and args.reuse_search is not None:
         parser.error("--reuse-search requires an existing --dense-source; it cannot create a new reference")
     reference_output = ((args.prepare_reference if args.prepare_reference is not None
-                         else args.reference_output or DEFAULT_REFERENCE_OUTPUT).expanduser().resolve()
+                         else args.reference_output or default_reference_output).expanduser().resolve()
                         if new_reference else None)
     config = compose_config(args.config_name, args.override,
                             dense_source=reference_output if new_reference else args.dense_source)

@@ -274,7 +274,7 @@ def build_test_loader(data_dir, batch_size, num_workers, device, download=False)
 
 
 @torch.inference_mode()
-def evaluate_fixed(model, loader, device, *, job, expected_examples=10000):
+def evaluate_fixed(model, loader, device, *, job, expected_examples=10000, num_classes=10):
     original_hash = state_hash(model.state_dict())
     model.to(device).eval()
     labels, predictions, probabilities, losses = [], [], [], []
@@ -283,7 +283,7 @@ def evaluate_fixed(model, loader, device, *, job, expected_examples=10000):
     for batch, (x, y) in enumerate(loader, 1):
         x, y = x.to(device), y.to(device)
         logits = model(x, y).logits
-        require(logits.shape == (len(y), 10), f"{job}: invalid classifier output shape")
+        require(logits.shape == (len(y), num_classes), f"{job}: invalid classifier output shape")
         if not torch.isfinite(logits).all():
             raise FloatingPointError(f"{job}: non-finite test logits")
         per_example_ce = F.cross_entropy(logits, y, reduction="none")
@@ -308,10 +308,10 @@ def evaluate_fixed(model, loader, device, *, job, expected_examples=10000):
     return result, arrays
 
 
-def write_comparison(output, records):
+def write_comparison(output, records, *, dataset_name="CIFAR-10"):
     dense = next((r for r in records if r["job"] == JOBS[0]), None)
     rows = []
-    lines = ["# Frozen pruning deployments — CIFAR-10 test", "",
+    lines = [f"# Frozen pruning deployments — {dataset_name} test", "",
              "No training, model selection, or BN recalibration. One fixed checkpoint per job.", "",
              "| Job | Test accuracy | Validation accuracy | Parameters | Conv/Linear GMAC |",
              "|---|---:|---:|---:|---:|"]

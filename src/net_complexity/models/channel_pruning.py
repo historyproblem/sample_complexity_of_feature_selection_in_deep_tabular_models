@@ -200,6 +200,23 @@ _BOTTLENECK_GATE_SPEC_KEY = {
     "mid2_gumbel_layer": "mid2",
 }
 
+# MobileNetV2: blocks live in `features` and expose up to two gates — the
+# residual-output gate every residual block has, plus the optional
+# internal-width gate (MaskedGumbelInvertedResidual(gate_internal_width=True),
+# which non-residual blocks can have too).
+# "backbone.features.3.gumbel_layer"     -> ("features.3", "output")
+# "backbone.features.3.mid_gumbel_layer" -> ("features.3", "mid")
+_MOBILENET_LAYER_NAME_RE = re.compile(
+    r"(?:backbone\.)?(?P<key>features\.\d+)\.(?P<gate>gumbel_layer|mid_gumbel_layer)$"
+)
+
+_MOBILENET_GATE_SPEC_KEY = {
+    "gumbel_layer": "output",
+    "mid_gumbel_layer": "mid",
+}
+
+_MOBILENET_BACKBONE_TARGETS = ("MobileNetV2", "MobileNetV2TinyImageNet200")
+
 _NUM_BLOCKS_BY_TARGET = {
     "CIFARResNet20": [3, 3, 3],
     "CIFARResNet32": [5, 5, 5],
@@ -274,8 +291,110 @@ def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
         )
 
 
+def _mask_dict_to_mobilenet_pruning_spec(
+    mask_dict: dict[str, list[int]],
+) -> dict[str, dict[str, list[int]]]:
+    """Convert channel_history layer-name keys to PrunedMobileNetV2 pruning_spec keys.
+
+    MobileNetV2 counterpart of ``_mask_dict_to_bottleneck_pruning_spec``: the
+    gate module path ``backbone.features.3.gumbel_layer`` becomes the block
+    address ``features.3``, grouped per block into ``{"output": [...],
+    "mid": [...]}`` (only non-empty boundaries are included). MobileNetV2
+    needs one internal key where the Bottleneck needs two, because
+    ``depthwise`` preserves channel identity — see
+    ``MaskedGumbelInvertedResidual``.
+    """
+    spec: dict[str, dict[str, list[int]]] = defaultdict(dict)
+    for layer_name, channels in mask_dict.items():
+        m = _MOBILENET_LAYER_NAME_RE.search(layer_name)
+        if m:
+            spec[m.group("key")][_MOBILENET_GATE_SPEC_KEY[m.group("gate")]] = channels
+    return dict(spec)
+
+
 def _is_bottleneck_backbone_target(backbone_target: str) -> bool:
     return any(name in backbone_target for name in _BOTTLENECK_LAYER_LIST_BY_TARGET)
+
+
+def _is_mobilenet_backbone_target(backbone_target: str) -> bool:
+    return any(name in backbone_target for name in _MOBILENET_BACKBONE_TARGETS)
+
+
+def build_pruned_mobilenet_model(
+    config: DictConfig,
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
+) -> nn.Module:
+    """Build a ``PrunedMobileNetV2`` wrapped in ``ClassificationFeatureSelectionWrapper``.
+
+    MobileNetV2 counterpart of ``build_pruned_bottleneck_model``: takes the
+    pruning spec directly (``{"features.N": [channel_indices]}``) so the
+    iterative channel-pruning cycle can hand it over in memory.
+    """
+    from .feature_selection import ClassificationFeatureSelectionWrapper
+    from .pruned_mobilenet_v2 import PrunedMobileNetV2
+
+    num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 1000)
+    in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
+    width_mult = float(OmegaConf.select(config, "model.backbone.width_mult") or 1.0)
+    round_nearest = int(OmegaConf.select(config, "model.backbone.round_nearest") or 8)
+    dropout_cfg = OmegaConf.select(config, "model.backbone.dropout")
+    dropout = 0.2 if dropout_cfg is None else float(dropout_cfg)
+
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+    stem_stride_cfg = OmegaConf.select(config, "model.backbone.stem_stride")
+    if stem_stride_cfg is not None:
+        stem_stride = int(stem_stride_cfg)
+    else:
+        # MobileNetV2TinyImageNet200 defaults to a stride-1 stem; the plain
+        # MobileNetV2 keeps torchvision's stride-2 stem.
+        stem_stride = 1 if "TinyImageNet200" in backbone_target else 2
+
+    setting_cfg = OmegaConf.select(config, "model.backbone.inverted_residual_setting")
+    inverted_residual_setting = (
+        OmegaConf.to_container(setting_cfg, resolve=True) if setting_cfg is not None else None
+    )
+
+    backbone = PrunedMobileNetV2(
+        pruning_spec=pruning_spec,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        width_mult=width_mult,
+        inverted_residual_setting=inverted_residual_setting,
+        round_nearest=round_nearest,
+        dropout=dropout,
+        stem_stride=stem_stride,
+    )
+
+    lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)
+    criterion_cfg = OmegaConf.select(config, "model.criterion")
+    criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
+
+    total_disabled = _count_disabled_channels(pruning_spec)
+    print(
+        f"[channel_pruning] Structural pruning applied (MobileNetV2): "
+        f"{len(pruning_spec)} blocks affected, "
+        f"{total_disabled} channels removed from residual branches."
+    )
+
+    return ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=lambda_coef,
+        criterion=criterion,
+        regularization_loss=lambda m: 0,
+    )
+
+
+def _count_disabled_channels(
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
+) -> int:
+    """Total channels in a pruning spec, for both the flat and nested value shapes."""
+    total = 0
+    for value in pruning_spec.values():
+        if isinstance(value, dict):
+            total += sum(len(channels) for channels in value.values())
+        else:
+            total += len(value)
+    return total
 
 
 def build_pruned_bottleneck_model(
@@ -329,7 +448,7 @@ def build_pruned_bottleneck_model(
     criterion_cfg = OmegaConf.select(config, "model.criterion")
     criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
-    total_disabled = sum(len(v) for v in pruning_spec.values())
+    total_disabled = _count_disabled_channels(pruning_spec)
     print(
         f"[channel_pruning] Structural pruning applied (Bottleneck): "
         f"{len(pruning_spec)} blocks affected, "
@@ -401,8 +520,8 @@ def build_structurally_pruned_model_from_config(
     Reads the channel mask (from channel_history file or explicit YAML),
     converts it to a per-block pruning_spec, and constructs a fresh model
     whose residual branches are physically narrowed to the active channels.
-    Dispatches to the CIFARResNet (BasicBlock) or Bottleneck (ResNet50/101/152)
-    builder based on ``model.backbone._target_``.
+    Dispatches to the CIFARResNet (BasicBlock), Bottleneck (ResNet50/101/152)
+    or MobileNetV2 builder based on ``model.backbone._target_``.
 
     The returned model has the same interface as the standard training model:
     forward(X, y) -> ClassifModelOutput.
@@ -419,6 +538,15 @@ def build_structurally_pruned_model_from_config(
             )
         return build_pruned_bottleneck_model(config, pruning_spec)
 
+    if _is_mobilenet_backbone_target(backbone_target):
+        pruning_spec = _mask_dict_to_mobilenet_pruning_spec(mask_dict)
+        if not pruning_spec:
+            print(
+                "[channel_pruning] WARNING: no prunable layers found in mask - "
+                "the pruned model will be equivalent to the full model."
+            )
+        return build_pruned_mobilenet_model(config, pruning_spec)
+
     pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
     if not pruning_spec:
         print(
@@ -429,7 +557,7 @@ def build_structurally_pruned_model_from_config(
 
 
 # ---------------------------------------------------------------------------
-# Weight handoff for Bottleneck channel pruning.
+# Weight and optimizer-state handoff for structural channel pruning.
 # ---------------------------------------------------------------------------
 
 def _unwrap_backbone(model: nn.Module) -> nn.Module:
@@ -521,6 +649,49 @@ def _validate_bottleneck_pair(
         )
 
 
+def _mobilenet_blocks(backbone: nn.Module) -> dict[str, nn.Module]:
+    from .mobilenet_v2 import InvertedResidual
+
+    features = getattr(backbone, "features", None)
+    if not isinstance(features, nn.Sequential):
+        raise TypeError("MobileNetV2 weight handoff expects a sequential features container.")
+    blocks = {
+        f"features.{index}": module
+        for index, module in enumerate(features)
+        if isinstance(module, InvertedResidual)
+    }
+    if not blocks:
+        raise TypeError("MobileNetV2 weight handoff found no inverted-residual blocks.")
+    return blocks
+
+
+def _validate_mobilenet_pair(
+    source_blocks: dict[str, nn.Module],
+    target_blocks: dict[str, nn.Module],
+) -> None:
+    if source_blocks.keys() != target_blocks.keys():
+        raise ValueError(
+            "Source and target MobileNetV2 topologies differ; cannot transfer channel weights."
+        )
+
+
+def _is_mobilenet_backbone(backbone: nn.Module) -> bool:
+    from .mobilenet_v2 import MobileNetV2
+
+    return isinstance(backbone, MobileNetV2)
+
+
+def _copy_mobilenet_shared_weights(source: nn.Module, target: nn.Module) -> None:
+    """Copy MobileNetV2 modules outside the inverted-residual blocks."""
+    if len(source.features) != len(target.features):
+        raise ValueError("Source and target MobileNetV2 feature counts differ.")
+    _copy_same_shape_module(source.features[0], target.features[0], "features.0")
+    _copy_same_shape_module(
+        source.features[-1], target.features[-1], f"features.{len(source.features) - 1}"
+    )
+    _copy_same_shape_module(source.classifier, target.classifier, "classifier")
+
+
 @dataclass(frozen=True)
 class ParameterTensorMapping:
     """Original-coordinate mapping from one gated parameter to one compact parameter.
@@ -558,11 +729,108 @@ class ParameterTensorMapping:
         return selected
 
 
+def _build_mobilenet_parameter_mappings(
+    gated_model: nn.Module,
+    structural_model: nn.Module,
+) -> tuple[ParameterTensorMapping, ...]:
+    from .mobilenet_v2 import MaskedGumbelInvertedResidual
+    from .pruned_mobilenet_v2 import PrunedGumbelInvertedResidual
+
+    source_backbone = _unwrap_backbone(gated_model)
+    target_backbone = _unwrap_backbone(structural_model)
+    source_blocks = _mobilenet_blocks(source_backbone)
+    target_blocks = _mobilenet_blocks(target_backbone)
+    _validate_mobilenet_pair(source_blocks, target_blocks)
+
+    source_names = {id(parameter): name for name, parameter in gated_model.named_parameters()}
+    source_parameters = dict(gated_model.named_parameters())
+    target_parameters = dict(structural_model.named_parameters())
+    target_names = {id(parameter): name for name, parameter in target_parameters.items()}
+    mappings: dict[str, ParameterTensorMapping] = {}
+
+    def add(
+        source_parameter: nn.Parameter | None,
+        target_parameter: nn.Parameter | None,
+        *indices_by_dimension: tuple[int, torch.Tensor],
+    ) -> None:
+        if source_parameter is None and target_parameter is None:
+            return
+        if source_parameter is None or target_parameter is None:
+            raise ValueError("Source and structural parameters disagree about an optional tensor.")
+        source_name = source_names.get(id(source_parameter))
+        target_name = target_names.get(id(target_parameter))
+        if source_name is None or target_name is None:
+            raise ValueError("Could not resolve a MobileNetV2 parameter to its qualified name.")
+        if target_name in mappings:
+            raise ValueError(f"Duplicate structural parameter mapping for {target_name}.")
+        mappings[target_name] = ParameterTensorMapping(
+            source_name=source_name,
+            target_name=target_name,
+            source_parameter=source_parameter,
+            target_parameter=target_parameter,
+            indices_by_dimension=tuple(
+                (int(dimension), indices.detach().to(device="cpu", dtype=torch.long).clone())
+                for dimension, indices in indices_by_dimension
+            ),
+        )
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, MaskedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected MaskedGumbelInvertedResidual at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, PrunedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected PrunedGumbelInvertedResidual at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = target.active_indices
+        mid_indices = target.mid_active_indices
+        if source.has_expand:
+            add(source.branch.expand[0].weight, target.branch.expand[0].weight, (0, mid_indices))
+            add(source.branch.expand[1].weight, target.branch.expand[1].weight, (0, mid_indices))
+            add(source.branch.expand[1].bias, target.branch.expand[1].bias, (0, mid_indices))
+
+        add(source.branch.depthwise[0].weight, target.branch.depthwise[0].weight, (0, mid_indices))
+        add(source.branch.depthwise[1].weight, target.branch.depthwise[1].weight, (0, mid_indices))
+        add(source.branch.depthwise[1].bias, target.branch.depthwise[1].bias, (0, mid_indices))
+
+        add(
+            source.branch.project.weight,
+            target.branch.project.weight,
+            (0, output_indices),
+            (1, mid_indices),
+        )
+        add(source.branch.project_bn.weight, target.branch.project_bn.weight, (0, output_indices))
+        add(source.branch.project_bn.bias, target.branch.project_bn.bias, (0, output_indices))
+
+    for target_name, target_parameter in target_parameters.items():
+        if target_name in mappings:
+            continue
+        source_parameter = source_parameters.get(target_name)
+        if source_parameter is None:
+            raise ValueError(f"No gated source parameter corresponds to {target_name}.")
+        if tuple(source_parameter.shape) != tuple(target_parameter.shape):
+            raise ValueError(
+                f"Shape-changing MobileNetV2 parameter {target_name} has no channel mapping: "
+                f"{tuple(source_parameter.shape)} -> {tuple(target_parameter.shape)}."
+            )
+        add(source_parameter, target_parameter)
+
+    if set(mappings) != set(target_parameters):
+        missing = sorted(set(target_parameters) - set(mappings))
+        raise AssertionError(f"Incomplete MobileNetV2 parameter mapping: {missing[:5]}.")
+    return tuple(mappings[name] for name in target_parameters)
+
+
 def build_gated_to_structural_parameter_mappings(
     gated_model: nn.Module,
     structural_model: nn.Module,
 ) -> tuple[ParameterTensorMapping, ...]:
-    """Return the complete trainable-parameter mapping for Bottleneck pruning.
+    """Return the complete trainable-parameter mapping for structural pruning.
 
     Parameter names alone are insufficient once channel axes are compacted.
     This manifest binds every compact parameter to its source ``Parameter`` and
@@ -574,6 +842,10 @@ def build_gated_to_structural_parameter_mappings(
 
     source_backbone = _unwrap_backbone(gated_model)
     target_backbone = _unwrap_backbone(structural_model)
+    if _is_mobilenet_backbone(source_backbone) or _is_mobilenet_backbone(target_backbone):
+        if not (_is_mobilenet_backbone(source_backbone) and _is_mobilenet_backbone(target_backbone)):
+            raise TypeError("Source and target must both be MobileNetV2 backbones.")
+        return _build_mobilenet_parameter_mappings(gated_model, structural_model)
     source_blocks = _bottleneck_blocks(source_backbone)
     target_blocks = _bottleneck_blocks(target_backbone)
     _validate_bottleneck_pair(source_blocks, target_blocks)
@@ -666,7 +938,7 @@ def transfer_gated_weights_to_structural(
     gated_model: nn.Module,
     structural_model: nn.Module,
 ) -> None:
-    """Slice a full gated Bottleneck ResNet into its structural counterpart.
+    """Slice a full gated model into its structural counterpart.
 
     The structural model owns the cumulative active-index buffers. They use
     coordinates of the original full-width block, so they can directly select
@@ -677,6 +949,11 @@ def transfer_gated_weights_to_structural(
 
     source_backbone = _unwrap_backbone(gated_model)
     target_backbone = _unwrap_backbone(structural_model)
+    if _is_mobilenet_backbone(source_backbone) or _is_mobilenet_backbone(target_backbone):
+        if not (_is_mobilenet_backbone(source_backbone) and _is_mobilenet_backbone(target_backbone)):
+            raise TypeError("Source and target must both be MobileNetV2 backbones.")
+        _transfer_gated_mobilenet_weights_to_structural(source_backbone, target_backbone)
+        return
     source_blocks = _bottleneck_blocks(source_backbone)
     target_blocks = _bottleneck_blocks(target_backbone)
     _validate_bottleneck_pair(source_blocks, target_blocks)
@@ -725,6 +1002,59 @@ def transfer_gated_weights_to_structural(
         )
 
 
+def _transfer_gated_mobilenet_weights_to_structural(
+    source_backbone: nn.Module,
+    target_backbone: nn.Module,
+) -> None:
+    from .mobilenet_v2 import MaskedGumbelInvertedResidual
+    from .pruned_mobilenet_v2 import PrunedGumbelInvertedResidual
+
+    source_blocks = _mobilenet_blocks(source_backbone)
+    target_blocks = _mobilenet_blocks(target_backbone)
+    _validate_mobilenet_pair(source_blocks, target_blocks)
+    _copy_mobilenet_shared_weights(source_backbone, target_backbone)
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, MaskedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected MaskedGumbelInvertedResidual at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, PrunedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected PrunedGumbelInvertedResidual at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = target.active_indices.to(source.branch.project.weight.device)
+        mid_indices = target.mid_active_indices.to(source.branch.depthwise[0].weight.device)
+
+        if source.has_expand:
+            _copy_tensor(
+                target.branch.expand[0].weight,
+                source.branch.expand[0].weight.index_select(0, mid_indices),
+            )
+            _copy_batch_norm_subset(
+                source.branch.expand[1], target.branch.expand[1], mid_indices
+            )
+
+        _copy_tensor(
+            target.branch.depthwise[0].weight,
+            source.branch.depthwise[0].weight.index_select(0, mid_indices),
+        )
+        _copy_batch_norm_subset(
+            source.branch.depthwise[1], target.branch.depthwise[1], mid_indices
+        )
+
+        project_weight = source.branch.project.weight.index_select(0, output_indices)
+        project_weight = project_weight.index_select(1, mid_indices)
+        _copy_tensor(target.branch.project.weight, project_weight)
+        _copy_batch_norm_subset(
+            source.branch.project_bn, target.branch.project_bn, output_indices
+        )
+
+
 def _scatter_conv_weight(
     source: nn.Conv2d,
     target: nn.Conv2d,
@@ -768,6 +1098,11 @@ def transfer_structural_weights_to_gated(
 
     source_backbone = _unwrap_backbone(structural_model)
     target_backbone = _unwrap_backbone(gated_model)
+    if _is_mobilenet_backbone(source_backbone) or _is_mobilenet_backbone(target_backbone):
+        if not (_is_mobilenet_backbone(source_backbone) and _is_mobilenet_backbone(target_backbone)):
+            raise TypeError("Source and target must both be MobileNetV2 backbones.")
+        _transfer_structural_mobilenet_weights_to_gated(source_backbone, target_backbone)
+        return
     source_blocks = _bottleneck_blocks(source_backbone)
     target_blocks = _bottleneck_blocks(target_backbone)
     _validate_bottleneck_pair(source_blocks, target_blocks)
@@ -804,4 +1139,67 @@ def transfer_structural_weights_to_gated(
             source.i_downsample,
             target.i_downsample,
             f"{block_name}.i_downsample",
+        )
+
+
+def _transfer_structural_mobilenet_weights_to_gated(
+    source_backbone: nn.Module,
+    target_backbone: nn.Module,
+) -> None:
+    from .mobilenet_v2 import MaskedGumbelInvertedResidual
+    from .pruned_mobilenet_v2 import PrunedGumbelInvertedResidual
+
+    source_blocks = _mobilenet_blocks(source_backbone)
+    target_blocks = _mobilenet_blocks(target_backbone)
+    _validate_mobilenet_pair(source_blocks, target_blocks)
+    _copy_mobilenet_shared_weights(source_backbone, target_backbone)
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, PrunedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected PrunedGumbelInvertedResidual at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, MaskedGumbelInvertedResidual):
+            raise TypeError(
+                f"Expected MaskedGumbelInvertedResidual at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = source.active_indices.to(target.branch.project.weight.device)
+        mid_indices = source.mid_active_indices.to(target.branch.depthwise[0].weight.device)
+
+        if target.has_expand:
+            all_inputs = torch.arange(
+                target.branch.expand[0].in_channels,
+                device=target.branch.expand[0].weight.device,
+            )
+            _scatter_conv_weight(
+                source.branch.expand[0],
+                target.branch.expand[0],
+                mid_indices,
+                all_inputs,
+            )
+            _scatter_batch_norm_subset(
+                source.branch.expand[1], target.branch.expand[1], mid_indices
+            )
+
+        target.branch.depthwise[0].weight.index_copy_(
+            0,
+            mid_indices,
+            source.branch.depthwise[0].weight.to(target.branch.depthwise[0].weight),
+        )
+        _scatter_batch_norm_subset(
+            source.branch.depthwise[1], target.branch.depthwise[1], mid_indices
+        )
+
+        _scatter_conv_weight(
+            source.branch.project,
+            target.branch.project,
+            output_indices,
+            mid_indices,
+        )
+        _scatter_batch_norm_subset(
+            source.branch.project_bn, target.branch.project_bn, output_indices
         )

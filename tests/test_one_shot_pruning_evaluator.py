@@ -299,6 +299,19 @@ def test_checked_in_server_config_resolves_reusable_paths(pair):
     assert resolved.download is False and resolved.check_only is False
 
 
+def test_mobilenetv2_evaluator_validates_native_gate_metadata_and_shape():
+    config = compose_config(
+        "experiment/pruning_v3/mobilenetv2_tinyimagenet200_optimizer_handoff_60_90_repeats2"
+    )
+    carrier = evaluation.instantiate(config.model).cpu()
+    metadata = evaluation.get_gate_normalization_metadata(carrier)
+
+    evaluation._validate_normalization(config, metadata)
+    evaluation._validate_config_and_mask(config, {})
+    assert metadata["M0"] > 0
+    assert evaluation._image_shape_from_config(config) == (3, 64, 64)
+
+
 def test_checked_in_config_cli_supports_artifact_only_preflight(pair, monkeypatch, capsys):
     monkeypatch.setattr(evaluation.frozen, "build_test_loader", lambda *a: pytest.fail("official test accessed"))
     assert evaluation.main([

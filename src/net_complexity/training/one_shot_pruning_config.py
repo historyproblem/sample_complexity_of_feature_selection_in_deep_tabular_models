@@ -258,6 +258,9 @@ def output_paths(config, output_root=None):
     output_name = (HANDOFF_OUTPUT_NAME if protocol == HANDOFF_PROTOCOL
                    else MAPPED_REPEATS_OUTPUT_NAME if protocol == MAPPED_REPEATS_PROTOCOL
                    else OUTPUT_NAME)
+    configured_name = OmegaConf.select(config, "run_history.run_name")
+    if isinstance(configured_name, str) and configured_name.strip():
+        output_name = configured_name.strip()
     root = (Path(output_root) if output_root is not None
             else Path(config.run_history.root_dir) / output_name).resolve()
     branch_ids = [branch["id"] for branch in resolved_branch_plan(config)]

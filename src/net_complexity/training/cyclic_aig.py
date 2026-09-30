@@ -73,12 +73,22 @@ _VALID_DROP_MODES = {"threshold", "param_budget"}
 # Metric helpers
 # ---------------------------------------------------------------------------
 
+# Block containers whose entries ``layer_skipping`` can address as
+# ``<container>.<index>``: ResNet/CIFARResNet stages (``layerN``) and
+# MobileNetV2's ``features``.
+_BLOCK_CONTAINER_PREFIXES = ("layer", "features")
+_BLOCK_CONTAINER_NAMES = ("layer1", "layer2", "layer3", "layer4", "features")
+
+
 def _extract_layer_g_probs(valid_metrics: Mapping[str, Any]) -> dict[str, float]:
-    """Return {layer_name: g_prob} for every ``valid_g_prob_*layer*`` metric.
+    """Return {layer_name: g_prob} for every gated-block ``valid_g_prob_*`` metric.
 
     Strips an optional ``backbone.`` prefix so that metric keys like
     ``valid_g_prob_backbone.layer2.0`` are stored as ``layer2.0``, matching
-    the format expected by ``layer_skipping.disabled_layers``.
+    the format expected by ``layer_skipping.disabled_layers``. MobileNetV2
+    gates live one level deeper (``backbone.features.3.gate``), so a trailing
+    ``.gate`` is stripped too, leaving ``features.3`` — again exactly the
+    address ``layer_skipping`` expects.
     """
     result: dict[str, float] = {}
     prefix = "valid_g_prob_"
@@ -88,7 +98,9 @@ def _extract_layer_g_probs(valid_metrics: Mapping[str, Any]) -> dict[str, float]
         layer_name = key[len(prefix):]
         if layer_name.startswith("backbone."):
             layer_name = layer_name[len("backbone."):]
-        if layer_name.startswith("layer"):
+        if layer_name.endswith(".gate"):
+            layer_name = layer_name[: -len(".gate")]
+        if layer_name.startswith(_BLOCK_CONTAINER_PREFIXES):
             result[layer_name] = float(value)
     return result
 
@@ -129,6 +141,7 @@ def _pruneable_param_counts(config: DictConfig) -> tuple[dict[str, int], int]:
     from net_complexity.models.cifar_resnet import CIFARBasicBlock
     from net_complexity.models.feature_selection import PrunedBottleneck, PrunedCIFARBasicBlock
     from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
+    from net_complexity.models.mobilenet_v2 import InvertedResidual, PrunedInvertedResidual
     from net_complexity.models.resnet import Bottleneck
 
     model = hydra_instantiate(config.model)
@@ -145,16 +158,18 @@ def _pruneable_param_counts(config: DictConfig) -> tuple[dict[str, int], int]:
     ) if layer_skipping_cfg is not None else []
     disabled_set = {str(k) for k in raw_disabled}
 
+    already_pruned_types = (PrunedBottleneck, PrunedCIFARBasicBlock, PrunedInvertedResidual)
+
     freeable: dict[str, int] = {}
-    for stage_name in ("layer1", "layer2", "layer3", "layer4"):
+    for stage_name in _BLOCK_CONTAINER_NAMES:
         stage = getattr(backbone, stage_name, None)
         if stage is None:
             continue
         for block_idx, block in enumerate(stage):
             key = f"{stage_name}.{block_idx}"
-            if key in disabled_set or isinstance(block, (PrunedBottleneck, PrunedCIFARBasicBlock)):
+            if key in disabled_set or isinstance(block, already_pruned_types):
                 continue
-            block_params = sum(p.numel() for p in block.parameters())
+
             kept = 0
             if isinstance(block, Bottleneck):
                 ds = getattr(block, "i_downsample", None)
@@ -164,6 +179,19 @@ def _pruneable_param_counts(config: DictConfig) -> tuple[dict[str, int], int]:
                 sc = getattr(block, "shortcut", None)
                 if sc is not None and not isinstance(sc, nn.Identity):
                     kept = sum(p.numel() for p in sc.parameters())
+            elif isinstance(block, InvertedResidual):
+                # Only residual MobileNetV2 blocks are droppable, and a dropped
+                # one keeps nothing (no downsample projection). Non-residual
+                # blocks are not addressable by layer_skipping at all, so they
+                # must not appear as pruning candidates.
+                if not block.use_res_connect:
+                    continue
+            else:
+                # Anything else in this container (MobileNetV2's stem/head
+                # ConvBNReLU, for instance) is not a droppable block.
+                continue
+
+            block_params = sum(p.numel() for p in block.parameters())
             freeable[key] = block_params - kept
 
     return freeable, total_params
@@ -332,13 +360,14 @@ def _build_recovery_config(
     OmegaConf.update(cfg, "training_arguments.adaptive_lambda.enabled", False, merge=False)
 
     if bool(getattr(cyclic_cfg, "use_plain_model_for_final", True)):
-        if (
-            hasattr(cfg, "model")
-            and hasattr(cfg.model, "backbone")
-            and "resnet_block" in cfg.model.backbone
-        ):
-            with open_dict(cfg):
-                del cfg.model.backbone["resnet_block"]
+        # Drop the gated-block override so the recovery model is built from the
+        # backbone's plain default block. ResNet-family backbones take it as
+        # `resnet_block`, MobileNetV2 as `block`.
+        if hasattr(cfg, "model") and hasattr(cfg.model, "backbone"):
+            for block_key in ("resnet_block", "block"):
+                if block_key in cfg.model.backbone:
+                    with open_dict(cfg):
+                        del cfg.model.backbone[block_key]
 
     _set_disabled_layers(cfg, disabled_layers)
     _configure_run_history(cfg, output_root / stage_name)

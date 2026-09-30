@@ -1,0 +1,8 @@
+one_shot_test:
+  run_dir: outputs/runs/mobilenetv2_tinyimagenet200_optimizer_handoff_60_90_repeats2
+  data: data/tiny-imagenet-200
+  device: cuda:0
+  output_subdir: test_evaluation
+  batch_size: 128
+  num_workers: 2
+  download: false

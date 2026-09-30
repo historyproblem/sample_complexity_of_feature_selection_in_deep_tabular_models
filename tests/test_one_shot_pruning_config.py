@@ -69,6 +69,25 @@ def test_handoff_ablation_config_is_single_axis_and_method_first():
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 600
 
 
+def test_mobilenetv2_handoff_profile_preserves_the_v3_contract():
+    name = "experiment/pruning_v3/mobilenetv2_tinyimagenet200_optimizer_handoff_60_90_repeats2"
+    cfg = schema.compose_config(name)
+
+    assert schema.validate_config(cfg) == 150
+    assert cfg.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2TinyImageNet200"
+    assert cfg.model.backbone.block.gate_internal_width is True
+    assert cfg.model.backbone.block.regularization_normalization == "initial_channels"
+    assert cfg.model.backbone.block.train_gate_mode == "ste_hard"
+    assert cfg.dataloaders.taskname == "tinyimagenet200"
+    assert cfg.dataloaders.include_test is False
+    assert cfg.metrics.test_metrics == []
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+    assert report["output_paths"]["root"].endswith(
+        "mobilenetv2_tinyimagenet200_optimizer_handoff_60_90_repeats2"
+    )
+
+
 def test_target5m_recovery_config_maps_adamw_and_restarts_cosine_twice():
     cfg = schema.compose_config(schema.MAPPED_REPEATS_CONFIG_NAME)
     assert schema.validate_config(cfg) == 150

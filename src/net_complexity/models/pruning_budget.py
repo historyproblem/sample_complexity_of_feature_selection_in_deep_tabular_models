@@ -1,4 +1,4 @@
-"""Exact parameter budgeting in original channel coordinates (Bottleneck only)."""
+"""Exact parameter budgeting in original channel coordinates."""
 from __future__ import annotations
 
 import math
@@ -8,8 +8,17 @@ from copy import deepcopy
 import torch
 
 from .feature_selection import MaskedGumbelBottleneckLayer, MaskedGumbelLayer
+from .mobilenet_v2 import MaskedGumbelInvertedResidual
 
-BOUNDARIES = {"gumbel_layer": 2, "mid1_gumbel_layer": 0, "mid2_gumbel_layer": 1}
+BOTTLENECK_BOUNDARIES = {
+    "gumbel_layer": 2,
+    "mid1_gumbel_layer": 0,
+    "mid2_gumbel_layer": 1,
+}
+MOBILENET_BOUNDARIES = {
+    "gumbel_layer": "output",
+    "mid_gumbel_layer": "mid",
+}
 
 
 def gates(model):
@@ -52,8 +61,8 @@ def select_learned_closed(model, previous, min_keep_ratio=0.0, *, dependency_gro
 
     Costs are measurements, never a removal quota. Coordinates are original
     ids. Dependency groups, if supplied, are iterables of (gate_name, id); an
-    open survivor blocks its entire connected group. The repository Bottleneck
-    slicing has independent boundaries and therefore needs no extra groups.
+    open survivor blocks its entire connected group. The repository's ResNet
+    and MobileNetV2 slicing has independent boundaries and needs no extra groups.
     This function does not mutate either the checkpoint or its permanent mask.
     """
     validate_mask(model, previous, min_keep_ratio=min_keep_ratio)
@@ -158,39 +167,125 @@ class PhysicalBudget:
         self.blocks = {}
         gate_params = {id(p) for gate in gates(model).values() for p in gate.parameters()}
         self.fixed = sum(p.numel() for p in model.parameters() if id(p) not in gate_params)
+        architecture = None
         for name, block in model.named_modules():
-            if not isinstance(block, MaskedGumbelBottleneckLayer):
-                continue
-            widths = [block.conv1.out_channels, block.conv2.out_channels, block.conv3.out_channels]
-            original = list(widths)
-            for suffix, axis in BOUNDARIES.items():
-                widths[axis] -= len(mask.get(f"{name}.{suffix}", []))
-            if any(conv.bias is None or conv.groups != 1
-                   for conv in (block.conv1, block.conv2, block.conv3)):
-                raise ValueError("Budget formula requires the repository's biased Bottleneck.")
-            self.blocks[name] = (block.conv1.in_channels, widths)
-            self.fixed -= self.cost(block.conv1.in_channels, original)
+            if isinstance(block, MaskedGumbelBottleneckLayer):
+                if architecture not in (None, "bottleneck"):
+                    raise TypeError("A pruning carrier cannot mix Bottleneck and MobileNetV2 blocks.")
+                architecture = "bottleneck"
+                widths = [
+                    block.conv1.out_channels,
+                    block.conv2.out_channels,
+                    block.conv3.out_channels,
+                ]
+                original = list(widths)
+                for suffix, axis in BOTTLENECK_BOUNDARIES.items():
+                    widths[axis] -= len(mask.get(f"{name}.{suffix}", []))
+                if any(
+                    conv.bias is None or conv.groups != 1
+                    for conv in (block.conv1, block.conv2, block.conv3)
+                ):
+                    raise ValueError("Budget formula requires the repository's biased Bottleneck.")
+                self.blocks[name] = {
+                    "kind": "bottleneck",
+                    "inputs": block.conv1.in_channels,
+                    "widths": widths,
+                }
+                self.fixed -= self._bottleneck_cost(block.conv1.in_channels, original)
+            elif isinstance(block, MaskedGumbelInvertedResidual):
+                if architecture not in (None, "mobilenetv2"):
+                    raise TypeError("A pruning carrier cannot mix Bottleneck and MobileNetV2 blocks.")
+                architecture = "mobilenetv2"
+                output_width = int(block.oup)
+                mid_width = int(block.hidden_dim)
+                widths = {
+                    "output": output_width
+                    - len(mask.get(f"{name}.gumbel_layer", [])),
+                    "mid": mid_width
+                    - len(mask.get(f"{name}.mid_gumbel_layer", [])),
+                }
+                self._validate_mobilenet_block(block)
+                self.blocks[name] = {
+                    "kind": "mobilenetv2",
+                    "inputs": int(block.inp),
+                    "has_expand": bool(block.has_expand),
+                    "widths": widths,
+                }
+                self.fixed -= self._mobilenet_cost(
+                    int(block.inp),
+                    mid_width,
+                    output_width,
+                    has_expand=bool(block.has_expand),
+                )
         if not self.blocks:
-            raise TypeError("No masked Bottleneck blocks found.")
+            raise TypeError("No supported masked Bottleneck or MobileNetV2 blocks found.")
 
     @staticmethod
-    def cost(inputs, widths):
+    def _bottleneck_cost(inputs, widths):
         w1, w2, outputs = widths
         return inputs * w1 + 9 * w1 * w2 + w2 * outputs + 3 * (w1 + w2 + outputs)
 
+    # Retain the historic public helper used by older analysis code.
+    cost = _bottleneck_cost
+
+    @staticmethod
+    def _mobilenet_cost(inputs, mid, outputs, *, has_expand):
+        # All convolutions are bias-free and every BatchNorm is affine.
+        # expand: inputs*mid + 2*mid
+        # depthwise: 3*3*mid + 2*mid
+        # project: mid*outputs + 2*outputs
+        expand = inputs * mid + 2 * mid if has_expand else 0
+        return expand + 11 * mid + mid * outputs + 2 * outputs
+
+    @staticmethod
+    def _validate_mobilenet_block(block):
+        convolutions = [block.branch.depthwise[0], block.branch.project]
+        batch_norms = [block.branch.depthwise[1], block.branch.project_bn]
+        if block.has_expand:
+            convolutions.append(block.branch.expand[0])
+            batch_norms.append(block.branch.expand[1])
+        if any(conv.bias is not None for conv in convolutions):
+            raise ValueError("MobileNetV2 budget requires bias-free convolutions.")
+        depthwise = block.branch.depthwise[0]
+        if depthwise.groups != block.hidden_dim or depthwise.kernel_size != (3, 3):
+            raise ValueError("MobileNetV2 budget requires the repository's 3x3 depthwise convolution.")
+        if any(not bn.affine for bn in batch_norms):
+            raise ValueError("MobileNetV2 budget requires affine BatchNorm layers.")
+
+    @classmethod
+    def _block_cost(cls, state):
+        if state["kind"] == "bottleneck":
+            return cls._bottleneck_cost(state["inputs"], state["widths"])
+        return cls._mobilenet_cost(
+            state["inputs"],
+            state["widths"]["mid"],
+            state["widths"]["output"],
+            has_expand=state["has_expand"],
+        )
+
     def total(self):
-        return self.fixed + sum(self.cost(inputs, widths) for inputs, widths in self.blocks.values())
+        return self.fixed + sum(self._block_cost(state) for state in self.blocks.values())
 
     def marginal(self, gate):
         name, suffix = gate.rsplit(".", 1)
-        inputs, widths = self.blocks[name]
-        narrowed = list(widths)
-        narrowed[BOUNDARIES[suffix]] -= 1
-        return self.cost(inputs, widths) - self.cost(inputs, narrowed)
+        state = self.blocks[name]
+        before = self._block_cost(state)
+        narrowed = dict(state)
+        if state["kind"] == "bottleneck":
+            narrowed["widths"] = list(state["widths"])
+            narrowed["widths"][BOTTLENECK_BOUNDARIES[suffix]] -= 1
+        else:
+            narrowed["widths"] = dict(state["widths"])
+            narrowed["widths"][MOBILENET_BOUNDARIES[suffix]] -= 1
+        return before - self._block_cost(narrowed)
 
     def remove(self, gate):
         name, suffix = gate.rsplit(".", 1)
-        self.blocks[name][1][BOUNDARIES[suffix]] -= 1
+        state = self.blocks[name]
+        if state["kind"] == "bottleneck":
+            state["widths"][BOTTLENECK_BOUNDARIES[suffix]] -= 1
+        else:
+            state["widths"][MOBILENET_BOUNDARIES[suffix]] -= 1
 
 
 def select_by_budget(model, previous, fraction, min_keep_ratio, *, ranking="learned", seed=42):

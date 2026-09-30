@@ -1,7 +1,8 @@
-"""Evaluate frozen one-shot physical branches on one official CIFAR-10 test loader.
+"""Evaluate frozen one-shot physical branches on one official test loader.
 
 Training outputs are read-only. Checkpoint validation finishes before test data
-is opened; evaluation performs no training, selection, or BN calibration.
+is opened; evaluation performs no training, selection, or BN calibration. Both
+CIFAR-10/ResNet and TinyImageNet-200/MobileNetV2 profiles are supported.
 """
 from __future__ import annotations
 
@@ -21,11 +22,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import torch
+from torch.utils.data import DataLoader
 
 import evaluate_pruning_test as frozen
+from net_complexity.data.dataloaders import (
+    ClassicCVDataloaders,
+    TinyImageNetDataset,
+    _build_tinyimagenet_transforms,
+    _read_nonempty_lines,
+    _resolve_num_workers,
+)
 from net_complexity.models.channel_pruning import build_structurally_pruned_model_from_config
+from net_complexity.models.feature_selection import get_gate_normalization_metadata
+from net_complexity.models.pruning_budget import validate_mask
 from net_complexity.training.pruning_measurement import deployment_cost, mask_hash, state_hash, write_json
 
 PROTOCOL = "pruning_v3_one_shot_60_90"
@@ -73,21 +85,95 @@ def evaluation_args_from_config(config_path=DEFAULT_CONFIG, **overrides):
 
 def _validate_normalization(config, metadata):
     require(isinstance(metadata, dict), "Missing original normalization metadata")
-    widths = {}
-    block = config.model.backbone.resnet_block
-    base = int(OmegaConf.select(config, "model.backbone.base_width", default=64))
-    for stage, count in enumerate((3, 4, 6, 3), 1):
-        for index in range(count):
-            prefix = f"backbone.layer{stage}.{index}."
-            width = base * 2 ** (stage - 1)
-            if block.gate_internal_width:
-                widths.update({prefix + "mid1_gumbel_layer": width, prefix + "mid2_gumbel_layer": width})
-            if block.gate_output:
-                widths[prefix + "gumbel_layer"] = width * 4
-    require(metadata == {"version": 1, "M0": len(widths), "n_b0": widths,
-                         "normalization": {name: "initial_channels" for name in widths},
-                         "scaling_contract": "survivor_equivalent_v1"},
+    with torch.random.fork_rng(devices=[]):
+        carrier = instantiate(config.model).cpu()
+    expected = get_gate_normalization_metadata(carrier)
+    require(metadata == expected,
             "Original boundary ids/widths/M0 or normalization contract differ")
+
+
+def _validate_config_and_mask(config, mask):
+    target = str(config.model.backbone._target_)
+    supported = {
+        "net_complexity.wrappers.ResNet50",
+        "net_complexity.wrappers.MobileNetV2TinyImageNet200",
+        "net_complexity.wrappers.MobileNetV2",
+    }
+    require(target in supported, f"Unsupported one-shot backbone: {target}")
+    with torch.random.fork_rng(devices=[]):
+        carrier = instantiate(config.model).cpu()
+    validate_mask(carrier, mask)
+
+
+def _image_shape_from_config(config):
+    channels = int(OmegaConf.select(config, "model.backbone.in_channels", default=3))
+    size = OmegaConf.select(config, "dataloaders.center_crop")
+    if size is None:
+        size = OmegaConf.select(config, "dataloaders.resize")
+    if size is None:
+        size = OmegaConf.select(config, "dataloaders.image_size")
+    if size is None:
+        task = str(config.dataloaders.taskname).replace("-", "").replace("_", "").upper()
+        size = 32 if task == "CIFAR10" else 64
+    if isinstance(size, (list, tuple)):
+        require(len(size) == 2, "Image size must be a scalar or a two-element shape")
+        height, width = (int(size[0]), int(size[1]))
+    else:
+        height = width = int(size)
+    return channels, height, width
+
+
+def _build_official_test_loader(config, data_root, batch_size, num_workers, device, download):
+    task = str(config.dataloaders.taskname).replace("-", "").replace("_", "").upper()
+    if task == "CIFAR10":
+        return frozen.build_test_loader(data_root, batch_size, num_workers, device, download)
+    require(task in {"TINYIMAGENET", "TINYIMAGENET200"}, f"Unsupported official-test dataset: {task}")
+    require(not download, "TinyImageNet-200 must be prepared explicitly; evaluator never downloads it")
+
+    root = Path(data_root)
+    wnids_path = root / "wnids.txt"
+    annotations_path = root / "val" / "val_annotations.txt"
+    images_root = root / "val" / "images"
+    require(wnids_path.is_file() and annotations_path.is_file() and images_root.is_dir(),
+            f"TinyImageNet-200 official validation split is incomplete under {root}")
+    wnids = sorted(_read_nonempty_lines(wnids_path))
+    class_to_idx = {wnid: index for index, wnid in enumerate(wnids)}
+    samples = ClassicCVDataloaders._build_tinyimagenet_val_samples(
+        val_images_root=images_root,
+        val_annotations_path=annotations_path,
+        class_to_idx=class_to_idx,
+    )
+    _, transform = _build_tinyimagenet_transforms(
+        image_size=int(OmegaConf.select(config, "dataloaders.image_size", default=64)),
+        resize=OmegaConf.select(config, "dataloaders.resize"),
+        center_crop=OmegaConf.select(config, "dataloaders.center_crop"),
+    )
+    dataset = TinyImageNetDataset(samples, transform=transform, class_to_idx=class_to_idx)
+    require(len(dataset) == 10000, "Expected all 10,000 official TinyImageNet-200 validation images")
+    digest = hashlib.sha256()
+    for image_path, target in dataset.samples:
+        digest.update(image_path.name.encode())
+        digest.update(int(target).to_bytes(4, "little", signed=False))
+        digest.update(image_path.read_bytes())
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=_resolve_num_workers(num_workers),
+        pin_memory=str(device).startswith("cuda"),
+    )
+    info = {
+        "dataset": "TinyImageNet-200",
+        "split": "official_validation_as_test",
+        "example_count": len(dataset),
+        "ordered_data_and_labels_sha256": digest.hexdigest(),
+        "transform": repr(transform),
+        "classes": dataset.classes,
+        "shuffle": False,
+        "drop_last": False,
+    }
+    return loader, info
 
 
 def _validate_ledger(ledger, *, total, search):
@@ -252,7 +338,7 @@ def prepare_branches(run_dir):
         require(all(isinstance(value, torch.Tensor) and (not value.is_floating_point()
                     or value.dtype == torch.float32 and bool(torch.isfinite(value).all()))
                     for value in weights.values()), f"{branch}: expected finite FP32 deployment tensors")
-        frozen.validate_config_and_mask(config, mask)
+        _validate_config_and_mask(config, mask)
         structural_config = deepcopy(config)
         structural_config.model.lambda_coef = 0.0
         pruning = OmegaConf.create({"mode": "explicit", "structural": True, "enabled": True, "mask": mask})
@@ -263,7 +349,12 @@ def prepare_branches(run_dir):
         architecture_hash = hashlib.sha256(json.dumps(physical_architecture_signature(model), sort_keys=True).encode()).hexdigest()
         require(architecture_hash == checkpoint["architecture_hash"],
                 f"{branch}: saved architecture hash differs from constructed modules/tensors/indices")
-        cost = deployment_cost(model)
+        task = str(config.dataloaders.taskname).replace("-", "").replace("_", "").upper()
+        cost = (
+            deployment_cost(model)
+            if task == "CIFAR10"
+            else deployment_cost(model, image_shape=_image_shape_from_config(config))
+        )
         for key in ("physical_total_parameters", "conv_linear_macs_per_image"):
             require(cost[key] == state.get("final_cost", {}).get(key), f"{branch}: physical cost differs: {key}")
         require(state_hash(model.state_dict()) == expected_hash, f"{branch}: model loading/cost check mutated state")
@@ -316,15 +407,18 @@ def run(args):
         raise FileExistsError(f"Refusing to overwrite {output}. Use a fresh --output directory.")
     if not args.check_only and str(args.device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; use the GPU server or explicitly pass --device cpu.")
+    config = OmegaConf.load(run_dir / "resolved_config.yaml")
     prepared = prepare_branches(run_dir)
     if args.check_only:
         print(f"{len(prepared)} frozen branches verified. Official test data not loaded; no outputs written.")
         return None
     protocol = prepared[0][1]["training_protocol"]
     branches = [record["branch"] for _, record in prepared]
-    loader, dataset = frozen.build_test_loader(args.data, args.batch_size, args.num_workers, args.device, args.download)
-    require(dataset.get("example_count") == 10000 and dataset.get("dataset") == "CIFAR10"
-            and dataset.get("split") == "official_test", "Expected the full official CIFAR-10 test set")
+    loader, dataset = _build_official_test_loader(
+        config, args.data, args.batch_size, args.num_workers, args.device, args.download
+    )
+    require(dataset.get("example_count") == 10000,
+            "Expected the complete 10,000-example official evaluation split")
     output.mkdir(parents=True, exist_ok=False)
     report = {"status": "running", "source_run": str(run_dir), "protocol": "frozen_one_shot_branches_test_v1",
         "training_protocol": protocol, "comparison_scope": "exploratory", "test_evaluated": False,
@@ -335,11 +429,20 @@ def run(args):
         "evaluation_script_sha256": file_hash(__file__), "runs": []}
     write_json(output / "evaluation_plan.json", {**report, "selected_deployments": [row for _, row in prepared]})
     expected_labels = np.asarray(loader.dataset.targets)
+    num_classes = int(config.model.backbone.num_classes)
+    expected_examples = int(dataset["example_count"])
     try:
         for model, record in prepared:
             bn_before = {name: value.detach().cpu().clone() for name, value in model.named_buffers()
                          if name.endswith("num_batches_tracked")}
-            metrics, arrays = frozen.evaluate_fixed(model, loader, args.device, job=record["branch"])
+            metrics, arrays = frozen.evaluate_fixed(
+                model,
+                loader,
+                args.device,
+                job=record["branch"],
+                expected_examples=expected_examples,
+                num_classes=num_classes,
+            )
             require(np.array_equal(arrays["label"], expected_labels), "Official test sample order differs")
             require(all(torch.equal(dict(model.named_buffers())[name].cpu(), value)
                         for name, value in bn_before.items()), "Frozen evaluation changed BatchNorm counters")
@@ -353,7 +456,9 @@ def run(args):
                   f"correct={metrics['correct_count']}/{metrics['example_count']}", flush=True)
             report["test_evaluated"] = True
             write_json(output / "test_summary.json", report)
-            frozen.write_comparison(output, report["runs"])
+            frozen.write_comparison(
+                output, report["runs"], dataset_name=str(dataset["dataset"])
+            )
             comparison_path = output / "test_comparison.md"
             lines = comparison_path.read_text().splitlines()
             lines[2:2] = ["Exploratory comparison: prior test results informed further experimentation.", ""]

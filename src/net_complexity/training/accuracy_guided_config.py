@@ -36,6 +36,24 @@ def _number(value):
     return type(value) in (float, int) and math.isfinite(value)
 
 
+def _gate_block_config(cfg):
+    backbone = cfg.get("model", {}).get("backbone", {})
+    candidates = [backbone[key] for key in ("resnet_block", "block") if key in backbone]
+    _require(len(candidates) == 1, "exactly one gated backbone block override is required")
+    block = candidates[0]
+    _require(isinstance(block, dict), "gated backbone block override must be a mapping")
+    return block
+
+
+def _expected_validation_examples(cfg):
+    task = str(cfg.get("dataloaders", {}).get("taskname", "")).replace("-", "").replace("_", "").upper()
+    if task == "CIFAR10":
+        return 5000
+    if task in {"TINYIMAGENET", "TINYIMAGENET200"}:
+        return 10000
+    return None
+
+
 def compose_config(config_name="accuracy_guided_gates_v3", overrides=None):
     name = str(config_name).removesuffix(".yaml")
     _require(re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None, "invalid config name")
@@ -127,7 +145,7 @@ def validate_config_v3(config):
         _require(type(a[key]) is int and a[key] >= (0 if key == "initial_search_warmup" else 1),
                  f"{key} must be an integer in its valid range")
     _require(a["reentry_samples"] >= a["gap_window"], "reentry samples must fill the feedback window")
-    block = cfg["model"]["backbone"]["resnet_block"]
+    block = _gate_block_config(cfg)
     _require(block.get("regularization_normalization") == p["normalization"], "runtime gate normalization differs")
     _require(block.get("train_gate_mode") == "ste_hard" and block.get("eval_gate_mode") == "deterministic_hard",
              "real hard forward is required")
@@ -195,19 +213,28 @@ def inspect_inputs(config, *, load_initializer=True):
                           reference_training_cost=state.get("reference_training_epochs_actually_executed"),
                           reference_quality_claim=False)
         if not p["smoke"]:
-            _require(state.get("validation", {}).get("example_count") == 5000, "reference validation split differs")
+            expected_examples = _expected_validation_examples(cfg)
+            _require(expected_examples is not None, "unsupported full-profile validation dataset")
+            _require(state.get("validation", {}).get("example_count") == expected_examples,
+                     "reference validation split differs")
             if "history_path" not in missing:
                 _require(set(curve) == set(range(1, state["global_epochs_completed"] + 1)),
                          "reference curve must contain every dense training epoch exactly once")
-                _require(all(abs(value * 5000 - round(value * 5000)) < 1e-8 for value in curve.values()),
+                _require(all(abs(value * expected_examples - round(value * expected_examples)) < 1e-8
+                             for value in curve.values()),
                          "reference accuracy is not consistent with weighted validation counts")
     if "config_path" not in missing:
         source = OmegaConf.load(paths["config_path"])
-        for key in ("dataloaders.train_val_ratio", "dataloaders.seed", "dataloaders.loader_seed",
+        for key in ("dataloaders.train_val_ratio", "dataloaders.valid_ratio",
+                    "dataloaders.valid_per_class", "dataloaders.image_size",
+                    "dataloaders.resize", "dataloaders.center_crop",
+                    "dataloaders.seed", "dataloaders.loader_seed",
                     "dataloaders.batch_size", "dataloaders.taskname", "dataloaders._target_", "optimizer",
                     "scheduler", "model.backbone.num_classes", "model.backbone._target_",
                     "model.backbone.stem_kernel_size", "model.backbone.stem_stride", "model.backbone.stem_padding",
-                    "model.backbone.use_maxpool"):
+                    "model.backbone.use_maxpool", "model.backbone.width_mult",
+                    "model.backbone.round_nearest", "model.backbone.inverted_residual_setting",
+                    "model.backbone.dropout"):
             _require(OmegaConf.select(source, key) == OmegaConf.select(config, key), f"reference compatibility differs: {key}")
         _require(any(OmegaConf.select(metric, "_target_") == "net_complexity.metrics.classification.Accuracy"
                      and OmegaConf.select(metric, "return_counts") is True for metric in source.metrics.valid_metrics),

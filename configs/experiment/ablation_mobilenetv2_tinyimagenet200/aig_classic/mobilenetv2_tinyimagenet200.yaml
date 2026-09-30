@@ -1,0 +1,52 @@
+# @package _global_
+#
+# Ablation baseline: classic ConvNet-AIG (Veit & Belongie 2020, Eq. 10
+# target-rate loss) on MobileNetV2/TinyImageNet200. MobileNetV2 counterpart
+# of ablation/aig_classic/resnet50_tinyimagenet200.yaml.
+#
+# Sweep t via: model.regularization_loss.target_rate=0.3
+#
+# Reminder: classic AIG never removes a weight — its parameter count is the
+# same for every t, and compute savings show up in
+# valid_aig_active_flops_per_sample / valid_aig_params_active_ratio. For a
+# statically pruned, params-comparable point see aig_classic_static/.
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200/aig_classic/mobilenetv2_tinyimagenet200
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: mobilenetv2_tinyimagenet200
+  - /method: aig_target_rate_mobilenetv2
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  backbone:
+    block:
+      temperature: 1.0
+
+training_arguments:
+  num_epochs: 150
+
+scheduler:
+  T_max: 150
+
+mlflow:
+  enabled: true
+  experiment_name: classic_aig
+  run_name: "aig_classic_mobilenetv2_tinyimagenet200_t${model.regularization_loss.target_rate}"
+  tags:
+    model_type: "MobileNetV2_AIG"
+    method: "aig_classic"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_aig_classic_mobilenetv2_tinyimagenet200"
+    target_rate: "${model.regularization_loss.target_rate}"

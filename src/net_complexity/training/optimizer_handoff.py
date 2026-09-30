@@ -1,4 +1,4 @@
-"""Optimizer-state migration across structural Bottleneck channel pruning."""
+"""Optimizer-state migration across supported structural channel pruning."""
 from __future__ import annotations
 
 from copy import deepcopy

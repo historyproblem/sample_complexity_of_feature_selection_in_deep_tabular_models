@@ -1,0 +1,20 @@
+# @package _global_
+#
+# MobileNetV2 for TinyImageNet-200 at ImageNet resolution (224x224), i.e.
+# paired with configs/data/tinyimagenet200_resize224.yaml.
+#
+# Unlike mobilenetv2_tinyimagenet200.yaml this keeps the *stock* stride-2
+# stem: at 224x224 the standard MobileNetV2 downsampling schedule (32x in
+# total) lands on the 7x7 final feature map the architecture was designed
+# for. Keeping stem_stride=1 here instead would produce a 14x14 map and
+# roughly quadruple the compute for no architectural reason.
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.MobileNetV2
+    num_classes: 200
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 2
+    dropout: 0.2

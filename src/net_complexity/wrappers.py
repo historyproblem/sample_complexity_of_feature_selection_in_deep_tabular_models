@@ -45,6 +45,16 @@ from .models.feature_selection import (
 )
 from .models.aig import AIGBlockGate
 from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
+from .models.mobilenet_v2 import (
+    AIGInvertedResidual,
+    InvertedResidual,
+    MaskedGumbelInvertedResidual,
+    MobileNetV2,
+    MobileNetV2TinyImageNet200,
+    PrunedInvertedResidual,
+    SkippedInvertedResidual,
+)
+from .models.pruned_mobilenet_v2 import PrunedGumbelInvertedResidual, PrunedMobileNetV2
 from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
@@ -64,6 +74,15 @@ __all__ = [
     "AIGEfficientNetV2",
     "AIGEfficientNetV2M",
     "AIGEfficientNetV2S",
+    "AIGInvertedResidual",
+    "InvertedResidual",
+    "MaskedGumbelInvertedResidual",
+    "MobileNetV2",
+    "MobileNetV2TinyImageNet200",
+    "PrunedGumbelInvertedResidual",
+    "PrunedInvertedResidual",
+    "PrunedMobileNetV2",
+    "SkippedInvertedResidual",
     "CIFARPrunedGumbelBasicBlock",
     "CIFARGumbelBasicBlock",
     "CIFARMaskedGumbelBasicBlock",
