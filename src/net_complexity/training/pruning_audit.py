@@ -189,8 +189,9 @@ def committed_equivalence(carrier, structural, mask, sample, device, *, report_p
     """Allow small FP32 roundoff only if an independent FP64 check also passes.
 
     Narrow convolutions can use different accumulation orders. The fallback
-    checks the SAME entire validation batch on CPU in double precision;
-    small FP32 differences alone are not sufficient to accept the transfer.
+    checks the SAME entire validation batch on CPU in double precision. The
+    wider FP32 ceiling only decides whether that exact fallback may run; it
+    never accepts a transfer by itself.
     """
     validate_mask(carrier, mask)
     clone = deepcopy(carrier).to(device).eval()
@@ -207,9 +208,12 @@ def committed_equivalence(carrier, structural, mask, sample, device, *, report_p
         if report["fp32"]["mismatched_logits"] == 0:
             report["status"] = "passed_fp32"
             return report
-        # Large FP32 discrepancies are not explained away by a second backend.
-        report["fp32_ceiling"] = _equivalence_stats(actual, expected, rtol=1e-4, atol=1e-4)
-        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+        # Structural convolutions can accumulate in a different order. Permit
+        # relative FP32 drift up to 1e-3 to reach the independent FP64 check,
+        # while still rejecting large discrepancies before the expensive CPU
+        # fallback. Acceptance below still requires the strict FP64 assertion.
+        report["fp32_ceiling"] = _equivalence_stats(actual, expected, rtol=1e-3, atol=1e-4)
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
         print(f"[equivalence] FP32 max error={report['fp32']['max_abs_error']:.3g}; "
               "checking the full batch in CPU float64.", flush=True)
         clone.cpu().double()

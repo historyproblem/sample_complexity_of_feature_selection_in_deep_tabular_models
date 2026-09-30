@@ -113,6 +113,75 @@ def test_target5m_recovery_config_maps_adamw_and_restarts_cosine_twice():
     assert report["budget"]["total_unique_training_epochs_all_branches"] == 240
 
 
+def test_target5m_quality_recovery_is_one_fresh_90_epoch_branch():
+    cfg = schema.compose_config(schema.QUALITY_RECOVERY_CONFIG_NAME)
+    assert schema.validate_config(cfg) == 150
+    assert cfg.one_shot.reuse_search_required is True
+    assert cfg.optimizer.lr == pytest.approx(0.001)
+    assert cfg.one_shot.search_scheduler_eta_min == 0
+    plan = schema.resolved_branch_plan(cfg)
+    assert plan == [{
+        "id": "fresh_optimizer_fresh_scheduler__repeat_1",
+        "method": "fresh_optimizer_fresh_scheduler",
+        "repeat": "repeat_1",
+        "training_seed": 42,
+        "model_state": "selected_surviving_state",
+        "optimizer_state": "fresh",
+        "scheduler_state": schema.FRESH_SCHEDULER,
+    }]
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["comparison_axis"] == (
+        "recovery LR, cosine eta_min, or label smoothing; inherited compact weights and fresh state"
+    )
+    assert report["budget"]["per_branch_budget_including_shared_search"] == 150
+    assert report["budget"]["number_of_physical_branches"] == 1
+    assert report["budget"]["total_unique_training_epochs_all_branches"] == 150
+
+    tuned = schema.compose_config(schema.QUALITY_RECOVERY_CONFIG_NAME, overrides=[
+        "scheduler.eta_min=0.00025",
+        "+model.criterion.label_smoothing=0.10",
+    ])
+    assert schema.validate_config(tuned) == 150
+    assert tuned.scheduler.eta_min == pytest.approx(0.00025)
+    assert tuned.model.criterion.label_smoothing == pytest.approx(0.10)
+
+
+def test_parameter_curve_profiles_are_independent_60_plus_90_models():
+    search = schema.compose_config(
+        "experiment/pruning_v3/parameter_curve_search60"
+    )
+    assert schema.validate_config(search) == 150
+    assert search.one_shot.protocol == schema.PROTOCOL
+    assert search.one_shot.search_epochs == 60
+    assert search.one_shot.final_epochs == 90
+    assert search.one_shot.search_scheduler_eta_min == pytest.approx(0.00066443)
+    assert search.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.08)
+    assert search.training_arguments.adaptive_lambda.enabled is True
+    assert search.training_arguments.adaptive_lambda.soft_drop == pytest.approx(0.0125)
+    assert search.training_arguments.adaptive_lambda.hard_drop == pytest.approx(0.0175)
+    assert "label_smoothing" not in search.model.criterion
+
+    recovery = schema.compose_config(
+        "experiment/pruning_v3/parameter_curve_recovery90_ls005"
+    )
+    assert schema.validate_config(recovery) == 150
+    assert recovery.one_shot.protocol == schema.QUALITY_RECOVERY_PROTOCOL
+    assert recovery.one_shot.reuse_search_required is True
+    assert recovery.accuracy_guided.eligibility.min_keep_ratio == pytest.approx(0.08)
+    assert recovery.optimizer.lr == pytest.approx(0.001)
+    assert recovery.scheduler.eta_min == pytest.approx(0.0)
+    assert recovery.model.criterion.label_smoothing == pytest.approx(0.05)
+    assert schema.resolved_branch_plan(recovery) == [{
+        "id": "fresh_optimizer_fresh_scheduler__repeat_1",
+        "method": "fresh_optimizer_fresh_scheduler",
+        "repeat": "repeat_1",
+        "training_seed": 42,
+        "model_state": "selected_surviving_state",
+        "optimizer_state": "fresh",
+        "scheduler_state": schema.FRESH_SCHEDULER,
+    }]
+
+
 @pytest.mark.parametrize("stem,drops", SEARCH_SWEEP.items())
 @pytest.mark.parametrize("step_mode", ["fixed", "auto"])
 def test_search60_nightly_profiles_are_exact_v3_overrides(stem, drops, step_mode):
@@ -164,7 +233,9 @@ def test_resolved_budget_and_output_paths_are_explicit(tmp_path):
     assert report["execution_policy"]["bn_calibration_batches"] == 0
     assert report["execution_policy"]["iterative_recovery_guard_executed"] is False
     assert report["execution_policy"]["shared_search_checkpoint_and_mask"] is True
-    assert report["execution_policy"]["no_feasible_search"] == "stop_before_export_and_branch_training"
+    assert report["execution_policy"]["no_feasible_search"] == (
+        "best_validation_accuracy_among_last_30_search_epochs"
+    )
     assert report["execution_policy"]["inherited_optimizer_state"] == "mapped_adamw_moments_and_step"
     assert report["execution_policy"]["scratch_optimizer_state"] == "fresh"
     assert report["output_paths"]["export_only"] == str(tmp_path / "run/export_only")
@@ -346,14 +417,17 @@ def test_historical_reference_bundle_is_selected_as_a_complete_pair(
     assert result["initializer_path"] == str(tmp_path / "shared_random_seed42.pt")
 
 
-def _relocated_synthetic_inputs(directory, *, historical_bundle=False):
+def _relocated_synthetic_inputs(
+        directory, *, historical_bundle=False, config_name=schema.CONFIG_NAME):
     """Move real zero-epoch fixture artifacts into the user-facing source layout."""
     from net_complexity.training.pruning_synthetic import make_synthetic_config
     old = directory / "original fixture"
     cfg = make_synthetic_config(old)
-    one_shot = schema.compose_config()
+    one_shot = schema.compose_config(config_name)
     OmegaConf.update(cfg, "one_shot", OmegaConf.to_container(one_shot.one_shot), force_add=True)
     cfg.one_shot.search_epochs, cfg.one_shot.final_epochs = 3, 2
+    if "search_scheduler_horizon_epochs" in cfg.one_shot:
+        cfg.one_shot.search_scheduler_horizon_epochs = 3
     cfg.accuracy_guided.total_epochs = cfg.training_arguments.num_epochs = 5
     cfg.accuracy_guided.guard.train_bn_calibration_batches = 0
     cfg.accuracy_guided.stage_plan = one_shot.accuracy_guided.stage_plan
@@ -372,6 +446,27 @@ def _relocated_synthetic_inputs(directory, *, historical_bundle=False):
     cfg.accuracy_guided.initializer.path = paths["initializer_path"]
     old.rmdir()
     return cfg, source, paths
+
+
+def test_quality_recovery_reference_check_allows_only_declared_recovery_axes(tmp_path):
+    cfg, _, _ = _relocated_synthetic_inputs(
+        tmp_path,
+        config_name=schema.QUALITY_RECOVERY_CONFIG_NAME,
+    )
+    cfg.optimizer.lr = 0.002
+    cfg.scheduler.eta_min = 0.00025
+    OmegaConf.update(cfg, "model.criterion.label_smoothing", 0.10, force_add=True)
+
+    result = schema.validate_inputs(cfg)
+    assert result["status"] == "ready"
+    assert result["reference_compatibility_allowed_differences"] == [
+        "optimizer.lr", "scheduler.eta_min", "model.criterion.label_smoothing",
+    ]
+    assert schema.resolved_one_shot(cfg)["inputs"]["status"] == "ready"
+
+    cfg.optimizer.weight_decay = 0.001
+    with pytest.raises(ValueError, match="reference compatibility differs: optimizer"):
+        schema.validate_inputs(cfg)
 
 
 @pytest.mark.parametrize("historical_bundle", [False, True])

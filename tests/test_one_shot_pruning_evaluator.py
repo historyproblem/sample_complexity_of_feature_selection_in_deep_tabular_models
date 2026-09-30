@@ -111,6 +111,7 @@ def test_pair_is_frozen_same_architecture_and_selected_identity(pair):
 @pytest.mark.parametrize("mutation", ["incomplete", "wrong_branch", "gated", "gate_tensor", "weights", "mask",
     "selected_id", "selected_hash", "selected_model_hash", "ledger", "search_clock", "architecture", "normalization",
     "validation", "precision", "cost", "initialization", "selected_epoch", "selection_mask", "selection_reference",
+    "search_policy",
     "missing_scratch", "smoke", "final_policy", "quality_status", "split_provenance"])
 def test_invalid_pair_is_refused_before_test_access(pair, monkeypatch, mutation):
     folder = pair / "scratch"
@@ -156,6 +157,8 @@ def test_invalid_pair_is_refused_before_test_access(pair, monkeypatch, mutation)
         selection["pruning_mask"] = {}
     elif mutation == "selection_reference":
         selection["reference_epoch"] = 51
+    elif mutation == "search_policy":
+        selection["policy"] = "test_accuracy"
     elif mutation == "final_policy":
         state["selection_policy"] = checkpoint["selection_policy"] = "test_accuracy"
     elif mutation == "quality_status":
@@ -183,6 +186,15 @@ def test_check_only_uses_cpu_no_test_data_or_output(pair, monkeypatch):
     assert evaluation.run(args(pair, check_only=True, device="cuda:0")) is None
     assert before == {path: evaluation.file_hash(path) for path in before}
     assert not (pair / "one_shot_test_evaluation").exists()
+
+
+def test_validation_fallback_search_selection_is_accepted(pair):
+    selection = evaluation.read_json(pair / "selection.json")
+    selection["policy"] = "best_validation_last_epochs_fallback"
+    write_json(pair / "selection.json", selection)
+
+    prepared = evaluation.prepare_branches(pair)
+    assert len(prepared) == 2
 
 
 def test_finalized_infeasible_branch_keeps_honest_quality_status(pair):

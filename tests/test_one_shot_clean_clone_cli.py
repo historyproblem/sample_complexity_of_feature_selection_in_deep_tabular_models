@@ -75,6 +75,65 @@ def test_search_only_preview_reports_no_recovery_or_test_cost(tmp_path, monkeypa
     assert not list(tmp_path.iterdir())
 
 
+def test_quality_recovery_preview_requires_reused_search_and_skips_test(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config_name = "experiment/pruning_v3/target5m_quality_recovery90"
+    with pytest.raises(SystemExit) as exc:
+        launcher.main(["--config-name", config_name, "--dry-run"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+
+    report = launcher.main([
+        "--config-name", config_name,
+        "--reuse-search", "completed-search",
+        "--skip-test",
+        "--dry-run",
+    ])
+    assert json.loads(capsys.readouterr().out) == report
+    assert report["mode"] == "reuse_search_then_recovery"
+    assert report["budget"]["search_training_epochs_this_command"] == 0
+    assert report["budget"]["recovery_training_epochs_this_command"] == 90
+    assert report["budget"]["total_unique_training_epochs_this_command"] == 90
+    assert report["official_test_evaluation"]["automatic_after_frozen_deployments"] is False
+    assert report["official_test_evaluation"]["disabled_for_validation_only_tuning"] is True
+    assert not list(tmp_path.iterdir())
+
+
+def test_skip_test_suppresses_official_test_after_completed_recovery(tmp_path, monkeypatch):
+    output = tmp_path / "quality-recovery"
+    monkeypatch.setattr(launcher, "validate_inputs", lambda config: {"status": "ready"})
+    monkeypatch.setattr(
+        launcher,
+        "_run_official_test",
+        lambda *args: pytest.fail("--skip-test reached official test evaluation"),
+    )
+
+    def run(config, destination, *, reuse_search_from):
+        assert config.one_shot.protocol == "pruning_v3_quality_recovery_single_60_90"
+        assert destination == output
+        assert reuse_search_from == tmp_path / "completed-search"
+        destination.mkdir()
+        return {"status": "completed", "test_evaluated": False}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "net_complexity.training.one_shot_pruning",
+        SimpleNamespace(run_one_shot_pruning=run),
+    )
+    result = launcher.main([
+        "--config-name", "experiment/pruning_v3/target5m_quality_recovery90",
+        "--reuse-search", str(tmp_path / "completed-search"),
+        "--output", str(output),
+        "--skip-test",
+    ])
+    assert result["official_test_evaluation"] == {
+        "status": "not_run",
+        "test_evaluated": False,
+        "reason": "disabled by --skip-test for validation-only tuning",
+    }
+
+
 @pytest.mark.parametrize("args", [
     ["--from-scratch", "--dense-source", "old"],
     ["--from-scratch", "--prepare-reference", "new"],

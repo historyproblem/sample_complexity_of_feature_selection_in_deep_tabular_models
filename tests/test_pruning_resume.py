@@ -46,6 +46,24 @@ def test_equivalence_accepts_only_verified_roundoff(tmp_path, offset, status):
         assert result["fp64"]["max_abs_error"] == 0
 
 
+def test_equivalence_routes_bounded_relative_fp32_drift_through_fp64(tmp_path):
+    carrier, structural = LogitProbe(), LogitProbe(fp32_offset=1.5)
+    sample = torch.tensor([[4000.0, -3000.0]]).repeat(17, 1), torch.zeros(17, dtype=torch.long)
+    result = audit.committed_equivalence(
+        carrier,
+        structural,
+        {},
+        sample,
+        "cpu",
+        report_path=tmp_path / "check.json",
+    )
+    assert result["status"] == "passed_fp64_fallback"
+    assert result["fp32"]["mismatched_logits"] == 34
+    assert result["fp32_ceiling"]["mismatched_logits"] == 0
+    assert result["fp32_ceiling"]["rtol"] == pytest.approx(1e-3)
+    assert result["fp64"]["max_abs_error"] == 0
+
+
 @pytest.mark.parametrize("fp32,always,error", [
     (0.0, 1.92e-5, AssertionError),  # Small but REAL transfer error must fail FP64.
     (0.01, 0.0, AssertionError),  # Large FP32-only errors still exceed the hard ceiling.

@@ -17,11 +17,13 @@ from net_complexity.training.one_shot_pruning_config import (
     FRESH_SCHEDULER,
     MAPPED_REPEATS_PROTOCOL,
     MAPPED_OPTIMIZER,
+    QUALITY_RECOVERY_PROTOCOL,
     RESUMED_SCHEDULER,
     resolved_branch_plan,
     to_v3_config,
     validate_config,
 )
+from net_complexity.training.accuracy_guided_pruning import select_checkpoint_records
 from net_complexity.training.pruning_audit import build_structural
 from net_complexity.training.pruning_measurement import isolated_diagnostic_rng, mask_hash, state_hash
 from net_complexity.training.pruning_synthetic import make_synthetic_config
@@ -365,6 +367,71 @@ def test_completed_search_can_feed_two_mapped_recoveries_with_fresh_schedulers(t
     assert ledger["actual_training_epochs_executed"] == 4
 
 
+def test_quality_recovery_applies_label_smoothing_and_nonzero_cosine_floor(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    search_dir = tmp_path / "search"
+    run_one_shot_pruning(cfg, search_dir, search_only=True)
+
+    recovery_cfg = deepcopy(cfg)
+    OmegaConf.update(recovery_cfg, "one_shot", {
+        "protocol": QUALITY_RECOVERY_PROTOCOL,
+        "search_epochs": 3,
+        "final_epochs": 2,
+        "reuse_search_required": True,
+        "search_scheduler_horizon_epochs": 3,
+        "search_scheduler_eta_min": 0.0,
+        "execution_order": "single",
+        "methods": [{
+            "id": "fresh_optimizer_fresh_scheduler",
+            "model_state": "selected_surviving_state",
+            "optimizer_state": "fresh",
+            "scheduler_state": FRESH_SCHEDULER,
+        }],
+        "repeats": [{"id": "repeat_1", "training_seed": 42}],
+    }, merge=False, force_add=True)
+    recovery_cfg.accuracy_guided.stage_plan[2].restart_policy = (
+        "branch_specific_optimizer_scheduler_handoff"
+    )
+    recovery_cfg.accuracy_guided.guard.train_bn_calibration_batches = 1
+    recovery_cfg.scheduler.eta_min = 0.00025
+    OmegaConf.update(
+        recovery_cfg, "model.criterion.label_smoothing", 0.10, force_add=True,
+    )
+    validate_config(recovery_cfg)
+
+    output = tmp_path / "recovery"
+    result = run_one_shot_pruning(
+        recovery_cfg,
+        output,
+        reuse_search_from=search_dir,
+    )
+
+    branch_name = "fresh_optimizer_fresh_scheduler__repeat_1"
+    assert result["status"] == "completed"
+    assert result["export_only"]["bn_calibration_batches"] == 1
+    assert result["export_only"]["trainable_weights_unchanged"] is True
+    assert result["export_only"]["bn_state_recalibrated"] is True
+    assert result["branches"][branch_name]["bn_calibration"]["batches"] == 1
+    assert result["branches"][branch_name]["initialization_state_hash"] != (
+        result["branches"][branch_name]["pre_bn_calibration_state_hash"]
+    )
+    assert result["stages"][branch_name]["scheduler"] == {
+        "_target_": "torch.optim.lr_scheduler.CosineAnnealingLR",
+        "T_max": 2,
+        "eta_min": 0.00025,
+        "interval": "epoch",
+    }
+    first = torch.load(
+        next((output / branch_name).rglob("epoch_0001.pt")),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert first["scheduler_state_dict"]["T_max"] == 2
+    assert first["scheduler_state_dict"]["eta_min"] == pytest.approx(0.00025)
+    resolved = OmegaConf.load(output / "resolved_config.yaml")
+    assert resolved.model.criterion.label_smoothing == pytest.approx(0.10)
+
+
 def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_state(tmp_path):
     cfg = handoff_ablation_fixture(tmp_path / "inputs")
     plan = resolved_branch_plan(cfg)
@@ -423,14 +490,69 @@ def test_handoff_ablation_runs_all_methods_before_repeats_and_transfers_exact_st
     }
 
 
-def test_no_feasible_shared_search_never_starts_a_recovery_branch(tmp_path):
+def test_no_feasible_shared_search_uses_recent_validation_fallback(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", reject_after=1)
     result = run_one_shot_pruning(cfg, tmp_path / "run")
-    assert result["status"] == "no_feasible_search"
-    assert result["branches"] == {}
-    assert result["export_only"] is None
-    assert result["compute_ledger"]["shared_search_epochs"] == 3
-    assert result["compute_ledger"]["actual_training_epochs_executed"] == 3
+    assert result["status"] == "completed"
+    assert result["selection"]["policy"] == "best_validation_last_epochs_fallback"
+    trace = result["selection"]["trace"]
+    assert trace["no_feasible_search"] is True
+    assert trace["fallback_used"] is True
+    assert trace["fallback_last_epochs"] == 30
+    assert trace["fallback_epoch_start"] == 1
+    assert trace["fallback_candidate_count"] == 3
+    expected = min(trace["trace"], key=lambda row: (-row["accuracy"], row["ce_loss"], row["epoch"]))
+    assert result["selection"]["selected_epoch"] == expected["epoch"]
+    assert set(result["branches"]) == {"inherited", "scratch"}
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 7
+
+
+def test_no_feasible_fallback_ignores_better_epochs_outside_recent_window():
+    records = [
+        {"epoch": epoch, "accuracy": 0.50 + epoch / 1000, "ce_loss": 1.0,
+         "physical_cost": 1000 - epoch}
+        for epoch in range(1, 41)
+    ]
+    records[0]["accuracy"] = 0.99
+    records[34]["accuracy"] = 0.90
+    selected, report = select_checkpoint_records(
+        records,
+        reference_accuracy=1.0,
+        hard_drop=0.0,
+        search=True,
+        no_feasible_fallback_last_epochs=30,
+    )
+    assert selected["epoch"] == 35
+    assert report["fallback_epoch_start"] == 11
+    assert report["fallback_candidate_count"] == 30
+
+
+def test_completed_no_feasible_search_can_be_reused_by_global_fallback(tmp_path, monkeypatch):
+    from net_complexity.training import one_shot_pruning as runtime
+
+    cfg = one_shot_fixture(tmp_path / "inputs", reject_after=1)
+    source = tmp_path / "legacy_no_feasible"
+    monkeypatch.setattr(runtime, "NO_FEASIBLE_FALLBACK_LAST_EPOCHS", None)
+    source_result = runtime.run_one_shot_pruning(cfg, source, search_only=True)
+    assert source_result["status"] == "no_feasible_search"
+    assert not (source / "selected_checkpoint.pt").exists()
+
+    monkeypatch.setattr(runtime, "NO_FEASIBLE_FALLBACK_LAST_EPOCHS", 30)
+    output = tmp_path / "recovered"
+    result = runtime.run_one_shot_pruning(cfg, output, reuse_search_from=source)
+
+    assert result["status"] == "completed"
+    assert result["selection"]["policy"] == "best_validation_last_epochs_fallback"
+    assert result["reused_search"] == {
+        "source": str(source.resolve()),
+        "source_protocol": "pruning_v3_one_shot_60_90",
+        "source_status": "no_feasible_search",
+        "training_epochs_reused": 3,
+        "training_epochs_executed_by_this_command": 0,
+        "selection_recomputed_from_completed_trace": True,
+        "fallback_last_epochs": 30,
+    }
+    assert result["compute_ledger"]["actual_training_epochs_executed"] == 4
 
 
 def test_unexplained_actual_gated_export_mismatch_stops_before_branch_training(tmp_path, monkeypatch):
@@ -460,11 +582,13 @@ def test_unexplained_actual_gated_export_mismatch_stops_before_branch_training(t
     assert state["compute_ledger"]["actual_training_epochs_executed"] == 3
     assert diagnostic["blocked_closed_survivors_opened_by_export"] == []
     assert diagnostic["gated_equivalent_on_checked_batch"] is False
-    assert diagnostic["non_equivalence_reason"] == "gated_export_function_difference"
+    assert diagnostic["non_equivalence_reason"] == (
+        "dependency_safe_gated_export_function_difference"
+    )
     assert not (output / "inherited").exists() and not (output / "scratch").exists()
 
 
-def test_known_floor_blocked_survivor_opening_is_measured_and_both_branches_continue(tmp_path):
+def test_floor_retained_closed_survivors_are_materialized_before_export(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
     initial_path = Path(cfg.accuracy_guided.initializer.path)
     payload = torch.load(initial_path, map_location="cpu", weights_only=True)
@@ -481,8 +605,17 @@ def test_known_floor_blocked_survivor_opening_is_measured_and_both_branches_cont
     result = run_one_shot_pruning(cfg, tmp_path / "run")
     diagnostic = result["export_only"]
     assert diagnostic["blocked_closed_survivors_opened_by_export"]
-    assert diagnostic["gated_equivalent_on_checked_batch"] is False
-    assert diagnostic["non_equivalence_reason"] == "blocked_closed_survivors_opened"
+    assert diagnostic["retained_learned_closed_channels"] == (
+        diagnostic["blocked_closed_survivors_opened_by_export"]
+    )
+    assert diagnostic["selection_predictor"] == (
+        "dependency_safe_all_physical_survivors_open"
+    )
+    assert diagnostic["gated_equivalent_on_checked_batch"] is True
+    assert diagnostic["raw_gated_equivalent_on_checked_batch"] is False
+    assert diagnostic["raw_gated_non_equivalence_reason"] == (
+        "retained_learned_closed_channels_opened"
+    )
     assert diagnostic["transfer_equivalence"]["status"].startswith("passed")
     assert diagnostic["weights_and_bn_unchanged"]
     assert result["status"] == "completed"
