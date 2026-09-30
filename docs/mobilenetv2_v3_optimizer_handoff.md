@@ -8,16 +8,24 @@ the ResNet v3 handoff protocol:
 - 90 epochs of physical recovery per branch;
 - 150 training epochs on every compared model path.
 
-The port supports both MobileNetV2 pruning boundaries:
+The generic MobileNetV2 implementation supports both pruning boundaries:
 
 - residual output channels (`features.N.gumbel_layer`);
 - local inverted-bottleneck width (`features.N.mid_gumbel_layer`), including
   non-residual blocks with an expansion convolution.
 
+The checked-in v3 handoff profile disables the residual-output gate and searches
+only the local internal width. This matches the ResNet-50 v3 profile, which sets
+`gate_output: false` and searches its internal Bottleneck boundaries. It also
+uses the same `paper_resnet50` gate-logit initialization; the name is historical,
+but the initialization contract is architecture-independent.
+
 Physical export slices Conv/BatchNorm tensors in original channel coordinates.
 Mapped recovery applies the same slicing to AdamW moments and step counters.
 Depthwise weights are mapped only on their output/group axis; the pointwise
-projection is mapped on both its output and input axes.
+projection is mapped on both its output and input axes. Residual-output scatter,
+when used by another profile, is implemented with index-copy just like ResNet;
+there is no dense selection-matrix multiplication hidden from MAC accounting.
 
 ## Server launch
 

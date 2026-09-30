@@ -75,6 +75,8 @@ def test_mobilenetv2_handoff_profile_preserves_the_v3_contract():
 
     assert schema.validate_config(cfg) == 150
     assert cfg.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2TinyImageNet200"
+    assert cfg.model.gumbel_init_mode == "paper_resnet50"
+    assert cfg.model.backbone.block.gate_output is False
     assert cfg.model.backbone.block.gate_internal_width is True
     assert cfg.model.backbone.block.regularization_normalization == "initial_channels"
     assert cfg.model.backbone.block.train_gate_mode == "ste_hard"

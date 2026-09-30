@@ -16,9 +16,8 @@ residual block output back to its public width. The optional internal gate
 physically narrows ``expand``, ``depthwise`` and the input axis of ``project``.
 The two boundaries can be pruned independently or together.
 
-Only residual blocks (``stride == 1 and inp == oup``) can be pruned: a
-non-residual block's output feeds the next block directly, so narrowing it
-would change that block's input width.
+Only the output boundary requires a residual block (``stride == 1 and inp ==
+oup``). The local internal boundary can also be pruned in non-residual blocks.
 """
 
 from __future__ import annotations
@@ -70,7 +69,18 @@ class PrunedGumbelInvertedResidual(InvertedResidual):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
 
-        disabled = set(int(channel) for channel in (disabled_channels or []))
+        output_disabled = disabled_channels or []
+        mid_disabled_values = disabled_mid_channels or []
+        for label, indices, width in (
+            ("output", output_disabled, oup),
+            ("mid", mid_disabled_values, self.hidden_dim),
+        ):
+            if len(indices) != len(set(indices)) or any(
+                type(index) is not int or not 0 <= index < width for index in indices
+            ):
+                raise ValueError(f"Invalid/duplicate {label} original channel indices.")
+
+        disabled = set(output_disabled)
         if disabled and not self.use_res_connect:
             raise ValueError(
                 "PrunedGumbelInvertedResidual: output channels can only be pruned from "
@@ -89,7 +99,7 @@ class PrunedGumbelInvertedResidual(InvertedResidual):
         n_active = len(active)
         self.n_active = n_active
 
-        mid_disabled = set(int(channel) for channel in (disabled_mid_channels or []))
+        mid_disabled = set(mid_disabled_values)
         if mid_disabled and not self.has_expand:
             raise ValueError(
                 "PrunedGumbelInvertedResidual: the internal width can only be pruned "
@@ -123,19 +133,30 @@ class PrunedGumbelInvertedResidual(InvertedResidual):
         if n_active != oup:
             self.branch.project_bn = norm_layer(n_active)
 
-        active_selection = torch.zeros(oup, n_active)
-        for narrow_index, channel in enumerate(active):
-            active_selection[channel, narrow_index] = 1.0
-        self.register_buffer("active_selection", active_selection)
         self.register_buffer("active_indices", torch.tensor(active, dtype=torch.long))
         self.register_buffer("mid_active_indices", torch.tensor(mid_active, dtype=torch.long))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Legacy snapshots stored a redundant dense one-hot scatter matrix.
+        state_dict.pop(prefix + "active_selection", None)
+        for key in ("active_indices", "mid_active_indices"):
+            saved = state_dict.get(prefix + key)
+            if saved is not None and not torch.equal(saved.cpu(), getattr(self, key).cpu()):
+                error_msgs.append(f"{prefix}{key} disagrees with the constructed pruning topology.")
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         branch = self.branch(x)  # [B, n_active, H, W]
         if not self.use_res_connect:
             return branch
         if self.n_active != self.oup:
-            branch = torch.einsum("pn,bnhw->bphw", self.active_selection, branch)
+            branch = branch.new_zeros(
+                (branch.shape[0], self.oup, *branch.shape[2:])
+            ).index_copy(1, self.active_indices, branch)
         return x + branch
 
 
@@ -211,8 +232,8 @@ def _pruning_spec_by_feature_index(
         else:
             output_channels, mid_channels = value, []
         by_index[int(parts[1])] = {
-            "output": [int(channel) for channel in output_channels],
-            "mid": [int(channel) for channel in mid_channels],
+            "output": list(output_channels),
+            "mid": list(mid_channels),
         }
     return by_index
 

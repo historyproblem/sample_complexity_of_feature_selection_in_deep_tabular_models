@@ -108,6 +108,37 @@ def test_masked_gumbel_mobilenet_gates_block_output_only_on_residual_blocks():
     assert model.features[UNGATED_BLOCK_INDEX].gumbel_layer is None
 
 
+def test_masked_gumbel_mobilenet_can_disable_output_gate_like_resnet50_v3():
+    model = _backbone(
+        block=partial(
+            MaskedGumbelInvertedResidual,
+            gate_output=False,
+            gate_internal_width=True,
+        )
+    )
+
+    modules = get_gumbel_modules(model)
+    assert len(modules) == 16
+    assert all(name.endswith(".mid_gumbel_layer") for name in modules)
+    assert all(
+        block.gumbel_layer is None
+        for block in model.features
+        if isinstance(block, MaskedGumbelInvertedResidual)
+    )
+
+
+def test_masked_gumbel_mobilenet_rejects_output_mask_when_gate_is_disabled():
+    with pytest.raises(ValueError, match="gate_output=False"):
+        MaskedGumbelInvertedResidual(
+            inp=16,
+            oup=16,
+            stride=1,
+            expand_ratio=6,
+            gate_output=False,
+            disabled_channels=[0],
+        )
+
+
 def test_aig_mobilenet_wrapper_drives_entropy_regularization():
     model = ClassificationFeatureSelectionWrapper(
         backbone=_backbone(block=partial(AIGInvertedResidual, gate_regularization="l1_probability")),
@@ -263,6 +294,7 @@ def test_pruned_gumbel_inverted_residual_disabled_channels_come_from_shortcut_on
     assert block.n_active == 14
     assert block.branch.project.out_channels == 14
     assert block.branch.project_bn.num_features == 14
+    assert not hasattr(block, "active_selection")
 
     x = torch.randn(2, 16, 8, 8)
     out = block(x)
@@ -272,6 +304,25 @@ def test_pruned_gumbel_inverted_residual_disabled_channels_come_from_shortcut_on
     torch.testing.assert_close(out[:, 5], x[:, 5])
 
 
+def test_pruned_gumbel_inverted_residual_loads_legacy_dense_selection_state():
+    source = PrunedGumbelInvertedResidual(
+        inp=16, oup=16, stride=1, expand_ratio=6, disabled_channels=[0, 5]
+    )
+    state = source.state_dict()
+    legacy_selection = torch.zeros(16, source.n_active)
+    for narrow_index, channel in enumerate(source.active_indices.tolist()):
+        legacy_selection[channel, narrow_index] = 1.0
+    state["active_selection"] = legacy_selection
+    target = PrunedGumbelInvertedResidual(
+        inp=16, oup=16, stride=1, expand_ratio=6, disabled_channels=[0, 5]
+    )
+
+    target.load_state_dict(state, strict=True)
+
+    assert not hasattr(target, "active_selection")
+    assert torch.equal(target.active_indices, source.active_indices)
+
+
 def test_pruned_gumbel_inverted_residual_rejects_non_residual_and_empty_block():
     with pytest.raises(ValueError, match="residual block"):
         PrunedGumbelInvertedResidual(inp=16, oup=24, stride=1, expand_ratio=6, disabled_channels=[0])
@@ -279,6 +330,30 @@ def test_pruned_gumbel_inverted_residual_rejects_non_residual_and_empty_block():
     with pytest.raises(ValueError, match="All 4 channels are disabled"):
         PrunedGumbelInvertedResidual(
             inp=4, oup=4, stride=1, expand_ratio=6, disabled_channels=[0, 1, 2, 3]
+        )
+
+
+@pytest.mark.parametrize(
+    "keyword,indices",
+    [
+        ("disabled_channels", [1, 1]),
+        ("disabled_channels", [1.5]),
+        ("disabled_channels", [16]),
+        ("disabled_mid_channels", [2, 2]),
+        ("disabled_mid_channels", [2.5]),
+        ("disabled_mid_channels", [96]),
+    ],
+)
+def test_pruned_gumbel_inverted_residual_rejects_invalid_original_indices(
+    keyword, indices
+):
+    with pytest.raises(ValueError, match="Invalid/duplicate"):
+        PrunedGumbelInvertedResidual(
+            inp=16,
+            oup=16,
+            stride=1,
+            expand_ratio=6,
+            **{keyword: indices},
         )
 
 

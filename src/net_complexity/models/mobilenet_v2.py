@@ -271,6 +271,7 @@ class MaskedGumbelInvertedResidual(InvertedResidual):
         eval_gate_mode: str | None = None,
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
+        gate_output: bool = True,
         gate_internal_width: bool = False,
         disabled_mid_channels: list[int] | None = None,
         regularization_normalization: str = "enabled_channels",
@@ -289,9 +290,12 @@ class MaskedGumbelInvertedResidual(InvertedResidual):
             regularization_normalization=regularization_normalization,
         )
 
+        self.gate_output = bool(gate_output)
+        if not self.gate_output and disabled_channels:
+            raise ValueError("Cannot disable output channels with gate_output=False.")
         self.gumbel_layer = (
             MaskedGumbelLayer(input_dim=oup, disabled_channels=disabled_channels, **gate_kwargs)
-            if self.use_res_connect
+            if self.use_res_connect and self.gate_output
             else None
         )
 

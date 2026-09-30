@@ -14,11 +14,12 @@ device: cuda:0
 
 model:
   lambda_coef: 0.001
-  gumbel_init_mode: paper
+  gumbel_init_mode: paper_resnet50
   entropy_regularization: plus_negative_entropy
   entropy_regularization_coef: 0.0
   backbone:
     block:
+      gate_output: false
       gate_internal_width: true
       train_gate_mode: ste_hard
       eval_gate_mode: deterministic_hard
