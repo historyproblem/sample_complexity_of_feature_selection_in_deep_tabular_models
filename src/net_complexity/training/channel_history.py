@@ -32,6 +32,9 @@ CHANNEL_HISTORY_FIELDNAMES = [
 _CIFAR_SELECTOR_RE = re.compile(
     r"^backbone\.(?P<stage_name>layer(?P<stage_index>\d+))\.(?P<block_index>\d+)\.(?P<selector_name>[A-Za-z0-9_]+)$"
 )
+_MOBILENET_SELECTOR_RE = re.compile(
+    r"^backbone\.features\.(?P<block_index>\d+)\.(?P<selector_name>gumbel_layer|mid_gumbel_layer)$"
+)
 
 
 def _to_float_list(value: torch.Tensor) -> list[float]:
@@ -141,6 +144,52 @@ class CifarResNet20GumbelCollector(BaseChannelHistoryCollector):
         return rows
 
 
+class MobileNetV2GumbelCollector(BaseChannelHistoryCollector):
+    """Collect original-coordinate MobileNetV2 output/internal gate history."""
+
+    def collect(self, model: nn.Module, epoch: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        modules = []
+        for layer_name, module in get_gumbel_modules(model).items():
+            match = _MOBILENET_SELECTOR_RE.match(layer_name)
+            if match is None:
+                raise ValueError(
+                    "Unsupported selector module name for MobileNetV2 channel history: "
+                    f"'{layer_name}'. Expected names like "
+                    "'backbone.features.3.mid_gumbel_layer'."
+                )
+            modules.append((int(match.group("block_index")), layer_name, module))
+        for block_index, layer_name, module in sorted(modules):
+            selection_probs = _to_float_list(module.get_selection_probs())
+            logits = module.logits.detach().cpu()
+            if logits.ndim != 2 or logits.shape[1] != 2:
+                raise ValueError(
+                    "Gumbel channel history expects selector logits with shape [channels, 2], "
+                    f"got {tuple(logits.shape)} for '{layer_name}'."
+                )
+            for channel_index, (selection_prob, pair) in enumerate(
+                    zip(selection_probs, logits.tolist())):
+                logit_off, logit_on = (float(pair[0]), float(pair[1]))
+                rows.append({
+                    "epoch": int(epoch),
+                    "stage_name": "features",
+                    "stage_index": int(block_index),
+                    "block_index": int(block_index),
+                    "layer_name": layer_name,
+                    "channel_index": int(channel_index),
+                    "selection_prob": float(selection_prob),
+                    "zero_prob": float(1.0 - selection_prob),
+                    "mu": None,
+                    "sigma": None,
+                    "logit_off": logit_off,
+                    "logit_on": logit_on,
+                    "logit_margin": float(logit_on - logit_off),
+                    "temperature": float(module.temperature),
+                    "beta": float(module.beta),
+                })
+        return rows
+
+
 _COLLECTORS: dict[_CollectorSpec, BaseChannelHistoryCollector] = {
     _CollectorSpec(
         backbone_target="net_complexity.wrappers.CIFARResNet20",
@@ -162,12 +211,24 @@ _COLLECTORS: dict[_CollectorSpec, BaseChannelHistoryCollector] = {
         backbone_target="net_complexity.wrappers.ResNet50",
         block_target="net_complexity.wrappers.MaskedGumbelBottleneckLayer",
     ): CifarResNet20GumbelCollector(),
+    _CollectorSpec(
+        backbone_target="net_complexity.wrappers.MobileNetV2TinyImageNet200",
+        block_target="net_complexity.wrappers.MaskedGumbelInvertedResidual",
+    ): MobileNetV2GumbelCollector(),
+    _CollectorSpec(
+        backbone_target="net_complexity.wrappers.MobileNetV2",
+        block_target="net_complexity.wrappers.MaskedGumbelInvertedResidual",
+    ): MobileNetV2GumbelCollector(),
 }
 
 
 def resolve_channel_history_collector(config: DictConfig) -> BaseChannelHistoryCollector:
     backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
-    block_target = str(OmegaConf.select(config, "model.backbone.resnet_block._target_") or "")
+    block_target = str(
+        OmegaConf.select(config, "model.backbone.resnet_block._target_")
+        or OmegaConf.select(config, "model.backbone.block._target_")
+        or ""
+    )
     collector = _COLLECTORS.get(
         _CollectorSpec(
             backbone_target=backbone_target,
@@ -178,6 +239,6 @@ def resolve_channel_history_collector(config: DictConfig) -> BaseChannelHistoryC
         raise ValueError(
             "No channel history collector is registered for this model configuration: "
             f"model.backbone._target_='{backbone_target}', "
-            f"model.backbone.resnet_block._target_='{block_target}'."
+            f"model.backbone block target='{block_target}'."
         )
     return collector

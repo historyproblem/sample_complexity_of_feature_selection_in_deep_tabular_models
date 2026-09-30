@@ -1,0 +1,23 @@
+# Four independent MobileNetV2/TinyImageNet-200 models. Every point consumes
+# 60 adaptive-search epochs plus one 90-epoch physical recovery; the shared
+# dense150 validation reference is external to each model's 150-epoch budget.
+#
+# ResNet50's requested 4/9/13/18M absolute sizes cannot be copied literally:
+# dense physical MobileNetV2 is only 2,480,072 parameters. The hints below keep
+# the same broad curve shape in MobileNet scale. They are reporting landmarks,
+# never pruning quotas; learned gates and validation-only selection decide size.
+name: mobilenetv2_parameter_curve_60_90_nightly
+search_config: experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_search60
+recovery_config: experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_recovery90
+reference_output: outputs/runs/mobilenetv2_dense_reference_seed42
+output: outputs/runs/mobilenetv2_parameter_curve_60_90
+data: data/tiny-imagenet-200
+test_config: configs/evaluation/one_shot_test_mobilenetv2_tinyimagenet200.yaml
+run_official_test: true
+dense_physical_parameters: 2480072
+minimum_physical_parameters: 818984
+points:
+  - {id: target_1p90m, soft_drop: 0.0050, hard_drop: 0.0100, target_hint_parameters: 1900000, resnet50_analogue_parameters: 18000000}
+  - {id: target_1p37m, soft_drop: 0.0075, hard_drop: 0.0100, target_hint_parameters: 1370000, resnet50_analogue_parameters: 13000000}
+  - {id: target_0p95m, soft_drop: 0.0100, hard_drop: 0.0150, target_hint_parameters: 950000, resnet50_analogue_parameters: 9000000}
+  - {id: target_0p82m, soft_drop: 0.0125, hard_drop: 0.0175, target_hint_parameters: 820000, resnet50_analogue_parameters: 4000000}

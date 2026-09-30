@@ -1,0 +1,43 @@
+# @package _global_
+# MobileNetV2/TinyImageNet-200 search half of one parameter/quality point.
+# The nightly launcher supplies one of four validation-drop bands. Each point
+# gets an independent 60-epoch adaptive search from the same seed42 initializer.
+defaults:
+  - /accuracy_guided_gates_v3_mobilenetv2_tinyimagenet200
+  - _self_
+
+one_shot:
+  protocol: pruning_v3_one_shot_60_90
+  search_epochs: 60
+  final_epochs: 90
+  search_scheduler_eta_min: 0.00066443
+  branches: [inherited, scratch]
+  scratch_initialization: pytorch_default_all_trainable_and_bn
+  inherited_optimizer_state: mapped_adamw_moments_and_step
+
+accuracy_guided:
+  eligibility:
+    # Safety floor, not a parameter quota. With every eligible internal width
+    # at this floor, the physical MobileNetV2 has 818,984 parameters.
+    min_keep_ratio: 0.08
+  guard:
+    train_bn_calibration_batches: 0
+  stage_plan:
+    - {id: shared_search, kind: search, epochs: 60, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: export_only, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: final_recovery, kind: recovery, epochs: 90, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+
+training_arguments:
+  adaptive_lambda:
+    enabled: true
+    # Least aggressive curve point; overridden from the checked nightly queue.
+    soft_drop: 0.005
+    hard_drop: 0.010
+    update_every_search_epochs: 1
+    log_step: auto
+
+mlflow:
+  run_name: mobilenetv2_tinyimagenet200_parameter_curve_search60
+
+run_history:
+  run_name: mobilenetv2_tinyimagenet200_parameter_curve_search60

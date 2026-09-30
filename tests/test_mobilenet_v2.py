@@ -38,6 +38,10 @@ from net_complexity.models.pruning_budget import PhysicalBudget
 from net_complexity.training.optimizer_handoff import transfer_adamw_state_to_structural
 from net_complexity.training.cyclic_aig import _extract_layer_g_probs, _pruneable_param_counts
 from net_complexity.training.cyclic_channel_pruning import _channel_param_cost
+from net_complexity.training.channel_history import (
+    MobileNetV2GumbelCollector,
+    resolve_channel_history_collector,
+)
 
 CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
 MOBILENET_FAMILY = "ablation_mobilenetv2_tinyimagenet200"
@@ -125,6 +129,44 @@ def test_masked_gumbel_mobilenet_can_disable_output_gate_like_resnet50_v3():
         for block in model.features
         if isinstance(block, MaskedGumbelInvertedResidual)
     )
+
+
+def test_mobilenet_v3_resolves_and_collects_original_channel_history():
+    cfg = OmegaConf.create({
+        "model": {
+            "backbone": {
+                "_target_": "net_complexity.wrappers.MobileNetV2TinyImageNet200",
+                "block": {
+                    "_target_": "net_complexity.wrappers.MaskedGumbelInvertedResidual",
+                },
+            },
+        },
+    })
+    collector = resolve_channel_history_collector(cfg)
+    model = ClassificationFeatureSelectionWrapper(
+        backbone=_backbone(block=partial(
+            MaskedGumbelInvertedResidual,
+            gate_output=False,
+            gate_internal_width=True,
+        )),
+        lambda_coef=0.1,
+    )
+    modules = get_gumbel_modules(model)
+    first_name, first_gate = next(iter(modules.items()))
+    with torch.no_grad():
+        first_gate.channel_mask[0] = 0
+    rows = collector.collect(model, epoch=3)
+
+    assert isinstance(collector, MobileNetV2GumbelCollector)
+    assert len(rows) == sum(gate.logits.shape[0] for gate in modules.values())
+    assert {row["layer_name"] for row in rows} == set(modules)
+    assert {row["stage_name"] for row in rows} == {"features"}
+    assert all(row["stage_index"] == row["block_index"] for row in rows)
+    masked = next(row for row in rows
+                  if row["layer_name"] == first_name and row["channel_index"] == 0)
+    assert masked["epoch"] == 3
+    assert masked["selection_prob"] == 0.0
+    assert masked["zero_prob"] == 1.0
 
 
 def test_masked_gumbel_mobilenet_rejects_output_mask_when_gate_is_disabled():
