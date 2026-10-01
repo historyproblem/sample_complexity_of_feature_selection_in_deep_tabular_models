@@ -1,0 +1,17 @@
+# @package _global_
+# Physical 90-epoch recovery paired with resnet50_cifar10_curve60_search.
+# It preserves BN200, plain CE, fresh AdamW at lr=1e-3/weight_decay=5e-4,
+# and a fresh cosine schedule ending at zero.
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_60_90_recovery
+  - _self_
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.001
+
+mlflow:
+  run_name: resnet50_cifar10_curve60_recovery
+
+run_history:
+  run_name: resnet50_cifar10_curve60_recovery
