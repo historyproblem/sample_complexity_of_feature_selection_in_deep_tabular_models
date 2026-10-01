@@ -26,8 +26,10 @@ from net_complexity.training.one_shot_progress import phase_progress, progress_m
 
 DEFAULT_REFERENCE_OUTPUT = Path("outputs/runs/one_shot_dense_reference_seed42")
 MOBILENET_REFERENCE_OUTPUT = Path("outputs/runs/mobilenetv2_dense_reference_seed42")
+MOBILENET_CIFAR10_REFERENCE_OUTPUT = Path("outputs/runs/mobilenetv2_cifar10_dense_reference_seed42")
 DEFAULT_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test.yaml"
 MOBILENET_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test_mobilenetv2_tinyimagenet200.yaml"
+MOBILENET_CIFAR10_TEST_CONFIG = ROOT / "configs/evaluation/one_shot_test_mobilenetv2_cifar10.yaml"
 
 
 def _run_official_test(output, config_path):
@@ -121,9 +123,16 @@ def main(argv=None):
                         help="Explicit configuration override; strict one-shot constraints still apply")
     args = parser.parse_args(argv)
     is_mobilenet = "mobilenetv2" in str(args.config_name).lower()
-    default_reference_output = MOBILENET_REFERENCE_OUTPUT if is_mobilenet else DEFAULT_REFERENCE_OUTPUT
+    is_cifar10 = "cifar10" in str(args.config_name).lower()
+    if is_mobilenet and is_cifar10:
+        default_reference_output = MOBILENET_CIFAR10_REFERENCE_OUTPUT
+    else:
+        default_reference_output = MOBILENET_REFERENCE_OUTPUT if is_mobilenet else DEFAULT_REFERENCE_OUTPUT
     if args.test_config is None:
-        args.test_config = MOBILENET_TEST_CONFIG if is_mobilenet else DEFAULT_TEST_CONFIG
+        if is_mobilenet and is_cifar10:
+            args.test_config = MOBILENET_CIFAR10_TEST_CONFIG
+        else:
+            args.test_config = MOBILENET_TEST_CONFIG if is_mobilenet else DEFAULT_TEST_CONFIG
     if args.reference_output is not None and not args.from_scratch:
         parser.error("--reference-output requires --from-scratch; use --prepare-reference PATH for preparation alone")
     if args.prepare_reference is not None and args.output is not None:

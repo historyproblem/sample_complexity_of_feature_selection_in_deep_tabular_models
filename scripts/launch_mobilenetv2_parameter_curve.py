@@ -1,4 +1,4 @@
-"""Run the checked four-point MobileNetV2 adaptive-pruning curve overnight."""
+"""Run a checked four-point MobileNetV2 adaptive-pruning curve overnight."""
 from __future__ import annotations
 
 import argparse
@@ -33,11 +33,11 @@ from net_complexity.training.pruning_audit import build_structural
 
 
 ONE_SHOT = ROOT / "scripts/launch_one_shot_pruning.py"
-DEFAULT_PLAN = "mobilenetv2_parameter_curve_60_90_nightly"
+DEFAULT_PLAN = "mobilenetv2_cifar10_parameter_curve_60_90_nightly"
 PLAN_FIELDS = {
-    "name", "search_config", "recovery_config", "reference_output", "output",
-    "data", "test_config", "run_official_test", "dense_physical_parameters",
-    "minimum_physical_parameters", "points",
+    "dataset", "image_size", "name", "search_config", "recovery_config",
+    "reference_output", "output", "data", "test_config", "run_official_test",
+    "dense_physical_parameters", "minimum_physical_parameters", "points",
 }
 POINT_FIELDS = {
     "id", "soft_drop", "hard_drop", "target_hint_parameters",
@@ -71,6 +71,13 @@ def load_plan(config_name=DEFAULT_PLAN):
         )
     if raw["name"] != name:
         raise ValueError("Plan name must equal its YAML filename")
+    if raw["dataset"] not in ("cifar10", "tinyimagenet200"):
+        raise ValueError("dataset must be cifar10 or tinyimagenet200")
+    expected_image_size = 32 if raw["dataset"] == "cifar10" else 64
+    if raw["image_size"] != expected_image_size:
+        raise ValueError(
+            f"{raw['dataset']} must use its native {expected_image_size}x{expected_image_size} input"
+        )
     if not isinstance(raw["run_official_test"], bool):
         raise ValueError("run_official_test must be boolean")
     for key in ("dense_physical_parameters", "minimum_physical_parameters"):
@@ -136,7 +143,7 @@ def _compose_profiles(plan, dense_source=None):
     return profiles
 
 
-def _validate_dataset(data_root):
+def _validate_tinyimagenet(data_root):
     root = Path(data_root)
     wnids = root / "wnids.txt"
     annotations = root / "val/val_annotations.txt"
@@ -155,7 +162,37 @@ def _validate_dataset(data_root):
         raise FileNotFoundError(f"TinyImageNet-200 train split is missing {len(absent_train)} class image directories")
 
 
-def _validate_test_config(path, data_root):
+def _prepare_and_validate_cifar10(data_root, search_config):
+    """Download/cache CIFAR-10 and exercise the exact deterministic split."""
+    data = instantiate(
+        search_config.dataloaders,
+        path_to_data=str(data_root),
+        include_test=True,
+        num_workers=0,
+    )
+    sizes = (
+        len(data.train_dataloader.dataset),
+        len(data.valid_dataloader.dataset),
+        len(data.test_dataloader.dataset),
+    )
+    if sizes != (45_000, 5_000, 10_000):
+        raise ValueError(f"CIFAR-10 must resolve to the checked 45k/5k/10k split, got {sizes}")
+    images, labels = next(iter(data.valid_dataloader))
+    if tuple(images.shape[1:]) != (3, 32, 32):
+        raise ValueError(f"CIFAR-10 validation tensors must be 3x32x32, got {tuple(images.shape[1:])}")
+    if labels.numel() == 0 or int(labels.min()) < 0 or int(labels.max()) >= 10:
+        raise ValueError("CIFAR-10 validation labels are outside [0, 9]")
+    return {"train_examples": sizes[0], "validation_examples": sizes[1], "test_examples": sizes[2]}
+
+
+def _prepare_and_validate_dataset(plan, data_root, search_config):
+    if plan["dataset"] == "cifar10":
+        return _prepare_and_validate_cifar10(data_root, search_config)
+    _validate_tinyimagenet(data_root)
+    return {"train_examples": 90_000, "validation_examples": 10_000, "test_examples": 10_000}
+
+
+def _validate_test_config(path, data_root, dataset):
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Official-test config does not exist: {path}")
@@ -168,8 +205,10 @@ def _validate_test_config(path, data_root):
         raise ValueError(
             f"Training and official-test data roots differ: {data_root} != {configured_data}"
         )
-    if values.get("download") is not False:
-        raise ValueError("TinyImageNet official-test config must never download implicitly")
+    expected_download = dataset == "cifar10"
+    if values.get("download") is not expected_download:
+        policy = "allow the checked torchvision download" if expected_download else "never download implicitly"
+        raise ValueError(f"{dataset} official-test config must {policy}")
 
 
 def _model_preflight(plan, search_config, *, require_cuda):
@@ -202,7 +241,8 @@ def _model_preflight(plan, search_config, *, require_cuda):
         raise RuntimeError("CUDA unavailable; refusing an overnight CPU launch")
     device = torch.device("cuda:0")
     probe = instantiate(search_config.model).to(device).train()
-    x = torch.randn(2, 3, 64, 64, device=device)
+    image_size = int(plan["image_size"])
+    x = torch.randn(2, 3, image_size, image_size, device=device)
     y = torch.tensor([0, 1], device=device)
     output = probe(x, y)
     if not torch.isfinite(output.loss):
@@ -359,10 +399,11 @@ def main(argv=None):
 
     data = _root_path(plan["data"])
     test_config = _root_path(plan["test_config"])
-    _validate_dataset(data)
-    _validate_test_config(test_config, data)
     profiles = _compose_profiles(plan, dense_source=dense_source)
+    dataset = _prepare_and_validate_dataset(plan, data, profiles[0][1])
+    _validate_test_config(test_config, data, plan["dataset"])
     preflight = _model_preflight(plan, profiles[0][1], require_cuda=True)
+    preflight["dataset"] = {"name": plan["dataset"], **dataset}
     if dense_source is not None:
         for _, search, recovery in profiles:
             validate_inputs(search)
@@ -384,7 +425,7 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=False)
     state_path = output / "nightly_state.json"
     state = {
-        "protocol": "mobilenetv2_parameter_curve_60_90_v1",
+        "protocol": f"mobilenetv2_{plan['dataset']}_parameter_curve_60_90_v1",
         "status": "running", "started_unix": time(),
         "plan": deepcopy(plan), "preflight": preflight,
         "dense_source": str(dense_source) if dense_source else None,

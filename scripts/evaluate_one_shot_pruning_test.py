@@ -1,8 +1,8 @@
 """Evaluate frozen one-shot physical branches on one official test loader.
 
 Training outputs are read-only. Checkpoint validation finishes before test data
-is opened; evaluation performs no training, selection, or BN calibration. Both
-CIFAR-10/ResNet and TinyImageNet-200/MobileNetV2 profiles are supported.
+is opened; evaluation performs no training, selection, or BN calibration.
+CIFAR-10 and TinyImageNet-200 profiles support both ResNet and MobileNetV2.
 """
 from __future__ import annotations
 

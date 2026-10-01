@@ -1,0 +1,24 @@
+# Four independent MobileNetV2/CIFAR-10 models. Every point consumes 60
+# adaptive-search epochs plus one 90-epoch physical recovery; the dense150
+# validation reference is external to each model's 150-epoch budget.
+#
+# Parameter hints report CIFAR-10 equivalents of the earlier TinyImageNet
+# landmarks after replacing the 200-way classifier with a 10-way classifier.
+# They remain reporting landmarks, never pruning quotas.
+dataset: cifar10
+image_size: 32
+name: mobilenetv2_cifar10_parameter_curve_60_90_nightly
+search_config: experiment/pruning_v3/mobilenetv2_cifar10_parameter_curve_search60
+recovery_config: experiment/pruning_v3/mobilenetv2_cifar10_parameter_curve_recovery90
+reference_output: outputs/runs/mobilenetv2_cifar10_dense_reference_seed42
+output: outputs/runs/mobilenetv2_cifar10_parameter_curve_60_90
+data: data
+test_config: configs/evaluation/one_shot_test_mobilenetv2_cifar10.yaml
+run_official_test: true
+dense_physical_parameters: 2236682
+minimum_physical_parameters: 575594
+points:
+  - {id: target_1p66m, soft_drop: 0.0050, hard_drop: 0.0100, target_hint_parameters: 1660000, resnet50_analogue_parameters: 18000000}
+  - {id: target_1p13m, soft_drop: 0.0075, hard_drop: 0.0100, target_hint_parameters: 1130000, resnet50_analogue_parameters: 13000000}
+  - {id: target_0p71m, soft_drop: 0.0100, hard_drop: 0.0150, target_hint_parameters: 710000, resnet50_analogue_parameters: 9000000}
+  - {id: target_0p58m, soft_drop: 0.0125, hard_drop: 0.0175, target_hint_parameters: 580000, resnet50_analogue_parameters: 4000000}

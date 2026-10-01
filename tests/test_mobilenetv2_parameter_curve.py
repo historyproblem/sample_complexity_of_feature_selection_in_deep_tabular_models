@@ -30,12 +30,14 @@ EXPECTED_DROPS = [
 ]
 
 
-def test_nightly_plan_has_four_checked_drop_bands_and_feasible_mobilenet_hints():
+def test_cifar10_nightly_plan_has_four_checked_drop_bands_and_feasible_mobilenet_hints():
     plan = curve.load_plan()
 
+    assert plan["dataset"] == "cifar10"
+    assert plan["image_size"] == 32
     assert [(point["soft_drop"], point["hard_drop"]) for point in plan["points"]] == EXPECTED_DROPS
     assert [point["target_hint_parameters"] for point in plan["points"]] == [
-        1_900_000, 1_370_000, 950_000, 820_000,
+        1_660_000, 1_130_000, 710_000, 580_000,
     ]
     assert [point["resnet50_analogue_parameters"] for point in plan["points"]] == [
         18_000_000, 13_000_000, 9_000_000, 4_000_000,
@@ -46,14 +48,17 @@ def test_nightly_plan_has_four_checked_drop_bands_and_feasible_mobilenet_hints()
     assert max(point["target_hint_parameters"] for point in plan["points"]) < plan["dense_physical_parameters"]
 
 
-def test_all_curve_profiles_are_adaptive_independent_60_plus_90_mobilenet_models():
+def test_all_cifar10_curve_profiles_are_adaptive_independent_60_plus_90_mobilenet_models():
     plan = curve.load_plan()
     profiles = curve._compose_profiles(plan)
 
     assert len(profiles) == 4
     for expected, (point, search, recovery) in zip(EXPECTED_DROPS, profiles):
-        assert search.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2TinyImageNet200"
-        assert recovery.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2TinyImageNet200"
+        assert search.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2"
+        assert recovery.model.backbone._target_ == "net_complexity.wrappers.MobileNetV2"
+        assert search.model.backbone.num_classes == 10
+        assert search.model.backbone.stem_stride == 1
+        assert search.dataloaders.taskname == "CIFAR10"
         assert search.model.backbone.block.gate_output is False
         assert search.model.backbone.block.gate_internal_width is True
         assert search.training_arguments.adaptive_lambda.enabled is True
@@ -76,22 +81,22 @@ def test_all_curve_profiles_are_adaptive_independent_60_plus_90_mobilenet_models
         assert point["soft_drop"] == expected[0]
 
 
-def test_checked_dense_size_and_minimum_structural_floor_are_exact():
+def test_checked_cifar10_dense_size_and_minimum_structural_floor_are_exact():
     plan = curve.load_plan()
     _, search, _ = curve._compose_profiles(plan)[0]
     model = instantiate(search.model)
 
-    assert sum(parameter.numel() for parameter in model.parameters()) == 2_494_280
-    assert PhysicalBudget(model, {}).total() == plan["dense_physical_parameters"] == 2_480_072
+    assert sum(parameter.numel() for parameter in model.parameters()) == 2_250_890
+    assert PhysicalBudget(model, {}).total() == plan["dense_physical_parameters"] == 2_236_682
     ratio = float(search.accuracy_guided.eligibility.min_keep_ratio)
     mask = {}
     for name, gate in gates(model).items():
         keep = max(1, math.ceil(gate.initial_channels * ratio))
         mask[name] = list(range(keep, gate.initial_channels))
-    assert PhysicalBudget(model, mask).total() == plan["minimum_physical_parameters"] == 818_984
+    assert PhysicalBudget(model, mask).total() == plan["minimum_physical_parameters"] == 575_594
     assert curve._model_preflight(plan, search, require_cuda=False) == {
-        "dense_physical_parameters": 2_480_072,
-        "minimum_physical_parameters": 818_984,
+        "dense_physical_parameters": 2_236_682,
+        "minimum_physical_parameters": 575_594,
     }
 
 
@@ -200,11 +205,11 @@ def test_real_mobilenet_dense_search_export_and_physical_recovery_smoke(tmp_path
     try:
         reference = tmp_path / "reference"
         search_cfg = _smoke_config(
-            "experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_search60",
+            "experiment/pruning_v3/mobilenetv2_cifar10_parameter_curve_search60",
             reference,
         )
         recovery_cfg = _smoke_config(
-            "experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_recovery90",
+            "experiment/pruning_v3/mobilenetv2_cifar10_parameter_curve_recovery90",
             reference,
         )
         reference_state = prepare_dense_reference(search_cfg, reference)

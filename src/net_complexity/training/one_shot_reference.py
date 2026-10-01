@@ -59,7 +59,7 @@ def prepare_dense_reference(config, output_root):
         and int(OmegaConf.select(config, "model.backbone.num_classes", default=0)) == 10
         and OmegaConf.select(config, "model.backbone.base_width", default=64) == 64
     )
-    mobilenet_profile = (
+    mobilenet_tinyimagenet_profile = (
         classic_loader
         and taskname in ("tinyimagenet", "tinyimagenet200")
         and backbone_target == "net_complexity.wrappers.MobileNetV2TinyImageNet200"
@@ -67,10 +67,20 @@ def prepare_dense_reference(config, output_root):
         and float(OmegaConf.select(config, "model.backbone.width_mult", default=1.0)) == 1.0
         and int(OmegaConf.select(config, "model.backbone.stem_stride", default=1)) == 1
     )
-    if not smoke and not (resnet_profile or mobilenet_profile):
+    mobilenet_cifar10_profile = (
+        classic_loader
+        and taskname == "cifar10"
+        and backbone_target == "net_complexity.wrappers.MobileNetV2"
+        and int(OmegaConf.select(config, "model.backbone.num_classes", default=0)) == 10
+        and float(OmegaConf.select(config, "model.backbone.width_mult", default=1.0)) == 1.0
+        and int(OmegaConf.select(config, "model.backbone.stem_stride", default=1)) == 1
+    )
+    if not smoke and not (
+        resnet_profile or mobilenet_tinyimagenet_profile or mobilenet_cifar10_profile
+    ):
         raise ValueError(
             "Full dense reference requires either standard ResNet50/CIFAR10 or "
-            "MobileNetV2TinyImageNet200/TinyImageNet-200; synthetic inputs require smoke=True"
+            "MobileNetV2 on CIFAR-10/TinyImageNet-200; synthetic inputs require smoke=True"
         )
     device, seed = str(config.device), int(config.seed)
     if device.startswith("cuda") and not torch.cuda.is_available():
@@ -96,11 +106,12 @@ def prepare_dense_reference(config, output_root):
         data = instantiate(config.dataloaders, include_test=False, loader_seed=seed)
         sample = next(iter(data.valid_dataloader))
     train_count, valid_count = len(data.train_dataloader.dataset), len(data.valid_dataloader.dataset)
-    expected_split = (45000, 5000) if resnet_profile else (90000, 10000)
+    cifar_profile = resnet_profile or mobilenet_cifar10_profile
+    expected_split = (45000, 5000) if cifar_profile else (90000, 10000)
     if not smoke and (train_count, valid_count) != expected_split:
         raise ValueError(
             f"Dense reference requires the matched "
-            f"{'CIFAR10' if resnet_profile else 'TinyImageNet-200'} "
+            f"{'CIFAR10' if cifar_profile else 'TinyImageNet-200'} "
             f"{expected_split[0]}/{expected_split[1]} split"
         )
     split_hash = mask_hash({name: list(getattr(loader.dataset, "indices", range(len(loader.dataset))))

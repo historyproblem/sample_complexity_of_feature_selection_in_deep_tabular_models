@@ -1,0 +1,16 @@
+# @package _global_
+# MobileNetV2 adapted to native 32x32 CIFAR-10 inputs.
+#
+# A stride-1 stem preserves a 2x2 feature map before global pooling. Keeping
+# the stock stride-2 stem would collapse the spatial grid to 1x1 too early for
+# the small-input recipe used by the repository's CIFAR experiments.
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.MobileNetV2
+    num_classes: 10
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 1
+    dropout: 0.2

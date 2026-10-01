@@ -6,6 +6,8 @@
 # dense physical MobileNetV2 is only 2,480,072 parameters. The hints below keep
 # the same broad curve shape in MobileNet scale. They are reporting landmarks,
 # never pruning quotas; learned gates and validation-only selection decide size.
+dataset: tinyimagenet200
+image_size: 64
 name: mobilenetv2_parameter_curve_60_90_nightly
 search_config: experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_search60
 recovery_config: experiment/pruning_v3/mobilenetv2_tinyimagenet200_parameter_curve_recovery90

@@ -1,0 +1,8 @@
+one_shot_test:
+  run_dir: outputs/runs/mobilenetv2_cifar10_parameter_curve_60_90
+  data: data
+  device: cuda:0
+  output_subdir: test_evaluation
+  batch_size: 128
+  num_workers: 2
+  download: true
