@@ -1,0 +1,70 @@
+# @package _global_
+#
+# DepGraph structural pruning (Fang et al., CVPR 2023), pretrained family —
+# the same flow as Torch-Pruning's reproduce/main_imagenet.py, transferred to
+# TinyImageNet: ImageNet weights -> task fine-tune (../plain_baseline.yaml)
+# -> prune that checkpoint to target_speedup -> fine-tune the narrowed model
+# here. Group-L2-norm importance by default; override
+# depgraph_pruning.importance for magnitude_l1 | random | bn_scale | lamp.
+#
+# The classifier head is excluded from pruning automatically.
+#
+# Required override before running:
+#   depgraph_pruning.source_run_dir=outputs/runs/<pretrained plain_baseline run>
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200_pretrained/depgraph/mobilenetv2_tinyimagenet200 \
+#       depgraph_pruning.source_run_dir=outputs/runs/<run>
+
+defaults:
+  - /data: tinyimagenet200_resize224_imagenet_norm
+  - /model: mobilenetv2_tinyimagenet200_224_pretrained
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw_finetune
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+training_arguments:
+  num_epochs: 30
+
+scheduler:
+  T_max: 30
+
+depgraph_pruning:
+  enabled: true
+  source_checkpoint: null
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  importance: magnitude_l2
+  sparsity_learning: false
+  target_speedup: 2.0
+  global_pruning: true
+  iterative_steps: 75
+  # Must match the training input (224x224 here) — the FLOPs speedup is
+  # measured on this shape.
+  example_input_size: [3, 224, 224]
+  random_seed: 42
+
+mlflow:
+  enabled: true
+  experiment_name: mobilenetv2_pretrained_depgraph
+  run_name: "depgraph_pretrained_mobilenetv2_tinyimagenet200_${depgraph_pruning.importance}_speedup${depgraph_pruning.target_speedup}"
+  tags:
+    model_type: "MobileNetV2_DepGraph"
+    method: "depgraph"
+    dataset: "tinyimagenet200"
+    init: "${model.backbone.pretrained_weights}"
+    recipe: "ablation_pretrained_depgraph_mobilenetv2_tinyimagenet200"
+    importance: "${depgraph_pruning.importance}"
+    sparsity_learning: "false"
+    target_speedup: "${depgraph_pruning.target_speedup}"

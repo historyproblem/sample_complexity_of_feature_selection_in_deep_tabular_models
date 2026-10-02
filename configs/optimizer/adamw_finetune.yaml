@@ -1,0 +1,16 @@
+# @package _global_
+#
+# AdamW for fine-tuning from pretrained weights: adamw.yaml plus
+# pretrained_lr_scale. Parameters loaded from the checkpoint train at
+# lr * pretrained_lr_scale (1e-4), so the ImageNet features are adapted
+# rather than overwritten; everything new — the 200-way classifier and the
+# AIG/Gumbel gates — keeps lr (1e-3), the value the gate recipes (lambda,
+# adaptive-lambda steps) were tuned with in the from-scratch runs.
+#
+# Logged per epoch as `lr` (new parameters) and `lr_pretrained`.
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.001
+  weight_decay: 0.0005
+  pretrained_lr_scale: 0.1

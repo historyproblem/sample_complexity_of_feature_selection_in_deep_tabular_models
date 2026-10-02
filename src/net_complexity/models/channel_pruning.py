@@ -351,6 +351,9 @@ def build_pruned_mobilenet_model(
     inverted_residual_setting = (
         OmegaConf.to_container(setting_cfg, resolve=True) if setting_cfg is not None else None
     )
+    # Same pretrained start as the search runs: each pruned block keeps the
+    # ImageNet values of its surviving channels.
+    pretrained_weights = OmegaConf.select(config, "model.backbone.pretrained_weights")
 
     backbone = PrunedMobileNetV2(
         pruning_spec=pruning_spec,
@@ -361,6 +364,7 @@ def build_pruned_mobilenet_model(
         round_nearest=round_nearest,
         dropout=dropout,
         stem_stride=stem_stride,
+        pretrained_weights=pretrained_weights,
     )
 
     lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)

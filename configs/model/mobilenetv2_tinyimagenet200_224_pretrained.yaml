@@ -1,0 +1,30 @@
+# @package _global_
+#
+# MobileNetV2 at 224x224 initialised from torchvision's ImageNet-1k weights:
+# mobilenetv2_tinyimagenet200_224.yaml plus `pretrained_weights`.
+#
+# Every block type this repository builds loads them — plain, AIG- and
+# Gumbel-gated (the gates themselves keep their own init), and the physically
+# pruned recovery models (each block keeps the ImageNet values of the
+# channels that survived). The classifier is 200-way, so it stays freshly
+# initialised.
+#
+# pretrained_weights: IMAGENET1K_V1 | IMAGENET1K_V2 | /path/to/weights.pth
+#   Named weights are downloaded once into $TORCH_HOME/hub/checkpoints — the
+#   cache torchvision itself uses. On an offline server, copy
+#   https://download.pytorch.org/models/mobilenet_v2-b0353104.pth there, or
+#   point pretrained_weights at the file directly.
+#
+# The weights expect ImageNet-normalised inputs: pair this preset with
+# configs/data/tinyimagenet200_resize224_imagenet_norm.yaml.
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.MobileNetV2
+    num_classes: 200
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 2
+    dropout: 0.2
+    pretrained_weights: IMAGENET1K_V2

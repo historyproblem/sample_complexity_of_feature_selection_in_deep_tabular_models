@@ -53,6 +53,13 @@ class OptimizerBuildInfo:
     gate_param_group_enabled: bool = False
     num_gates: int = 0
     num_gate_param_tensors: int = 0
+    pretrained_lr_scale: float | None = None
+    num_pretrained_param_tensors: int = 0
+
+
+# Keys of the `optimizer` config section consumed by _build_optimizer itself
+# rather than passed to the optimizer class.
+_OPTIMIZER_EXTENSION_KEYS = frozenset({"gate_weight_decay_scale", "pretrained_lr_scale"})
 
 
 @dataclass(frozen=True)
@@ -197,10 +204,36 @@ def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
     return gate_specs
 
 
+def _pretrained_parameter_ids(model: nn.Module) -> set[int]:
+    """ids of the parameters a backbone filled from a pretrained checkpoint.
+
+    Backbones that load pretrained weights (``MobileNetV2``) list them in
+    ``pretrained_parameter_names``, relative to themselves. Names that no
+    longer resolve — e.g. a block since replaced by layer skipping — are
+    skipped.
+    """
+    parameter_ids: set[int] = set()
+    for module in model.modules():
+        for name in getattr(module, "pretrained_parameter_names", ()):
+            try:
+                parameter_ids.add(id(module.get_parameter(name)))
+            except AttributeError:
+                continue
+    return parameter_ids
+
+
 def _build_optimizer(
     config: DictConfig,
     model: nn.Module,
 ) -> tuple[torch.optim.Optimizer, OptimizerBuildInfo]:
+    """Build the optimizer, optionally with extra param groups.
+
+    ``optimizer.gate_weight_decay_scale`` puts the gate parameters in their
+    own group with a rescaled weight decay. ``optimizer.pretrained_lr_scale``
+    gives the parameters loaded from a pretrained checkpoint ``lr * scale``
+    while everything new (gates, a re-initialised classifier) keeps ``lr`` —
+    the usual fine-tuning split. Both default to off.
+    """
     optimizer_cfg = getattr(config, "optimizer", None)
     if optimizer_cfg is None:
         raise ValueError("optimizer config must be defined.")
@@ -208,59 +241,93 @@ def _build_optimizer(
     optimizer_kwargs = {
         key: value
         for key, value in optimizer_cfg.items()
-        if key != "gate_weight_decay_scale"
+        if key not in _OPTIMIZER_EXTENSION_KEYS
     }
     gate_weight_decay_scale = getattr(optimizer_cfg, "gate_weight_decay_scale", None)
-    if gate_weight_decay_scale is None:
+    pretrained_lr_scale = getattr(optimizer_cfg, "pretrained_lr_scale", None)
+    if gate_weight_decay_scale is None and pretrained_lr_scale is None:
         return (
             instantiate(optimizer_kwargs, params=model.parameters(), _convert_="all"),
             OptimizerBuildInfo(),
         )
 
-    gate_weight_decay_scale = float(gate_weight_decay_scale)
-    if gate_weight_decay_scale < 0.0:
-        raise ValueError("optimizer.gate_weight_decay_scale must be >= 0.")
+    info_kwargs: dict[str, Any] = {}
+    base_weight_decay = float(getattr(optimizer_cfg, "weight_decay", 0.0))
 
-    gate_specs = _iter_gate_parameter_specs(model)
-    num_gates = sum(spec.num_gates for spec in gate_specs)
-    if num_gates <= 0:
-        return (
-            instantiate(optimizer_kwargs, params=model.parameters(), _convert_="all"),
-            OptimizerBuildInfo(gate_weight_decay_scale=gate_weight_decay_scale),
-        )
+    gate_parameters: list[nn.Parameter] = []
+    gate_weight_decay = base_weight_decay
+    if gate_weight_decay_scale is not None:
+        gate_weight_decay_scale = float(gate_weight_decay_scale)
+        if gate_weight_decay_scale < 0.0:
+            raise ValueError("optimizer.gate_weight_decay_scale must be >= 0.")
+        info_kwargs["gate_weight_decay_scale"] = gate_weight_decay_scale
 
-    gate_parameter_ids = {id(parameter) for spec in gate_specs for parameter in spec.parameters}
+        gate_specs = _iter_gate_parameter_specs(model)
+        num_gates = sum(spec.num_gates for spec in gate_specs)
+        if num_gates <= 0 and pretrained_lr_scale is None:
+            return (
+                instantiate(optimizer_kwargs, params=model.parameters(), _convert_="all"),
+                OptimizerBuildInfo(**info_kwargs),
+            )
+        if num_gates > 0:
+            gate_parameters = [parameter for spec in gate_specs for parameter in spec.parameters]
+            gate_weight_decay = base_weight_decay * gate_weight_decay_scale / float(num_gates)
+            info_kwargs.update(
+                gate_weight_decay=gate_weight_decay,
+                gate_param_group_enabled=True,
+                num_gates=num_gates,
+                num_gate_param_tensors=len(gate_parameters),
+            )
+
+    gate_parameter_ids = {id(parameter) for parameter in gate_parameters}
     base_parameters = [
         parameter
         for parameter in model.parameters()
         if parameter.requires_grad and id(parameter) not in gate_parameter_ids
     ]
-    gate_parameters = [parameter for spec in gate_specs for parameter in spec.parameters]
 
-    base_weight_decay = float(getattr(optimizer_cfg, "weight_decay", 0.0))
-    gate_weight_decay = base_weight_decay * gate_weight_decay_scale / float(num_gates)
+    pretrained_parameters: list[nn.Parameter] = []
+    if pretrained_lr_scale is not None:
+        pretrained_lr_scale = float(pretrained_lr_scale)
+        if pretrained_lr_scale < 0.0:
+            raise ValueError("optimizer.pretrained_lr_scale must be >= 0.")
+        base_lr = getattr(optimizer_cfg, "lr", None)
+        if base_lr is None:
+            raise ValueError("optimizer.lr must be set explicitly to use pretrained_lr_scale.")
+        pretrained_ids = _pretrained_parameter_ids(model)
+        pretrained_parameters = [p for p in base_parameters if id(p) in pretrained_ids]
+        base_parameters = [p for p in base_parameters if id(p) not in pretrained_ids]
+        info_kwargs.update(
+            pretrained_lr_scale=pretrained_lr_scale,
+            num_pretrained_param_tensors=len(pretrained_parameters),
+        )
+        if not pretrained_parameters:
+            print(
+                "[optimizer] pretrained_lr_scale is set but the model reports no "
+                "pretrained parameters — every parameter trains at optimizer.lr."
+            )
+
     param_groups: list[dict[str, Any]] = []
     if base_parameters:
         param_groups.append({
             "params": base_parameters,
             "weight_decay": base_weight_decay,
         })
-    param_groups.append({
-        "params": gate_parameters,
-        "weight_decay": gate_weight_decay,
-    })
+    if pretrained_parameters:
+        param_groups.append({
+            "params": pretrained_parameters,
+            "weight_decay": base_weight_decay,
+            "lr": float(base_lr) * pretrained_lr_scale,
+            "name": "pretrained",
+        })
+    if gate_parameters:
+        param_groups.append({
+            "params": gate_parameters,
+            "weight_decay": gate_weight_decay,
+        })
 
     optimizer = instantiate(optimizer_kwargs, params=param_groups, _convert_="all")
-    return (
-        optimizer,
-        OptimizerBuildInfo(
-            gate_weight_decay_scale=gate_weight_decay_scale,
-            gate_weight_decay=gate_weight_decay,
-            gate_param_group_enabled=True,
-            num_gates=num_gates,
-            num_gate_param_tensors=len(gate_parameters),
-        ),
-    )
+    return optimizer, OptimizerBuildInfo(**info_kwargs)
 
 
 def _to_float(value: Any) -> float | None:
@@ -1738,6 +1805,9 @@ def train(model: nn.Module,
             train_metrics.update(gradient_norm_logger.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+        for group in optimizer.param_groups:
+            if group.get("name") == "pretrained":
+                train_metrics["lr_pretrained"] = float(group["lr"])
         train_metrics.update({f"train_{key}": value for key, value in epoch_grad_norms.items()})
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
@@ -2123,6 +2193,11 @@ def log_training_metadata(
             "optimizer.num_gates": optimizer_build_info.num_gates,
             "optimizer.num_gate_param_tensors": optimizer_build_info.num_gate_param_tensors,
             "optimizer.gate_weight_decay": optimizer_build_info.gate_weight_decay,
+        })
+    if optimizer_build_info is not None and optimizer_build_info.pretrained_lr_scale is not None:
+        params.update({
+            "optimizer.pretrained_lr_scale": optimizer_build_info.pretrained_lr_scale,
+            "optimizer.num_pretrained_param_tensors": optimizer_build_info.num_pretrained_param_tensors,
         })
     mlflow_logger.log_params({
         key: value for key, value in params.items() if value is not None

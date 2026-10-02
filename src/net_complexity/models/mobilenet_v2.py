@@ -25,6 +25,10 @@ Differences from the torchvision original, all additive:
   keyed by the block's ``features`` index — used by
   ``pruned_mobilenet_v2.PrunedMobileNetV2`` to hand each block its own list
   of physically removed channels.
+* ``pretrained_weights`` loads torchvision's ImageNet-1k checkpoint into the
+  backbone (see ``load_imagenet_pretrained_weights``). It works for every
+  block type — plain, AIG-gated, Gumbel-gated and physically pruned — so each
+  setting of the ablation can start from the same pretrained weights.
 
 Gating follows the same rule as ``EfficientNetV2AIGBlock``: only blocks with
 a residual connection (``stride == 1 and inp == oup``) carry a gate, because
@@ -33,9 +37,11 @@ only there does "gate closed" degenerate cleanly to identity.
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -55,6 +61,45 @@ MOBILENET_V2_INVERTED_RESIDUAL_SETTING: list[list[int]] = [
     [6, 160, 3, 2],
     [6, 320, 1, 1],
 ]
+
+# torchvision's published ImageNet-1k checkpoints for MobileNetV2
+# (baselines/vision-main/torchvision/models/mobilenetv2.py,
+# MobileNet_V2_Weights). V1 (top-1 71.878) is the classic one — what
+# torchvision's legacy ``pretrained=True`` and Torch-Pruning's reproduce
+# scripts load; V2 (72.154) comes from torchvision's newer training recipe.
+MOBILENET_V2_IMAGENET_WEIGHTS: dict[str, str] = {
+    "IMAGENET1K_V1": "https://download.pytorch.org/models/mobilenet_v2-b0353104.pth",
+    "IMAGENET1K_V2": "https://download.pytorch.org/models/mobilenet_v2-7ebf99e0.pth",
+}
+
+# torchvision names a block's conv stack positionally (``conv.0.0`` ...), this
+# port names it (``branch.expand.0`` ...). Order and shapes are identical, so
+# the mapping is a pure rename, keyed by whether the block has an expand conv.
+_TORCHVISION_BLOCK_RENAME_WITH_EXPAND = {
+    "0.0": "expand.0",
+    "0.1": "expand.1",
+    "1.0": "depthwise.0",
+    "1.1": "depthwise.1",
+    "2": "project",
+    "3": "project_bn",
+}
+_TORCHVISION_BLOCK_RENAME_NO_EXPAND = {
+    "0.0": "depthwise.0",
+    "0.1": "depthwise.1",
+    "1": "project",
+    "2": "project_bn",
+}
+_TORCHVISION_BLOCK_KEY_RE = re.compile(r"^features\.(?P<index>\d+)\.conv\.(?P<rest>.+)$")
+
+# State-dict entries an ImageNet checkpoint cannot provide: the gates (new,
+# trained from scratch) and the index buffers of physically pruned blocks.
+_NON_PRETRAINED_KEY_MARKERS = (
+    ".gate.",
+    "gumbel_layer.",
+    "active_selection",
+    "active_indices",
+    "mid_active_indices",
+)
 
 
 def _make_divisible(value: float, divisor: int = 8, min_value: int | None = None) -> int:
@@ -373,6 +418,13 @@ class MobileNetV2(nn.Module):
     ``layer_skipping``/``cyclic_aig`` for ResNet — ``features.0`` is the stem
     and the last entry is the 1x1 head conv, so only the indices in between
     are gateable blocks.
+
+    ``pretrained_weights`` — ``None`` (default, random init), a key of
+    ``MOBILENET_V2_IMAGENET_WEIGHTS`` (downloaded once into the torch hub
+    cache), or a path to a torchvision-format ``.pth`` for offline machines.
+    The names of the parameters it filled are kept in
+    ``pretrained_parameter_names`` so the optimizer can give them their own
+    learning rate (``optimizer.pretrained_lr_scale``).
     """
 
     def __init__(
@@ -387,6 +439,7 @@ class MobileNetV2(nn.Module):
         dropout: float = 0.2,
         stem_stride: int = 2,
         block_kwargs_by_index: dict[int, dict] | None = None,
+        pretrained_weights: str | None = None,
     ) -> None:
         super().__init__()
         if block is None:
@@ -447,6 +500,19 @@ class MobileNetV2(nn.Module):
         )
 
         self._init_weights()
+        # _init_weights' blanket Conv2d init also hits the AIG routers and
+        # wipes the gate's own init (low-variance final conv, keep_prob_init
+        # on-bias) — restore it, as EfficientNetV2AIG does.
+        for module in self.modules():
+            if isinstance(module, AIGBlockGate):
+                module.reset_parameters()
+
+        self.pretrained_weights = pretrained_weights
+        self.pretrained_parameter_names: frozenset[str] = frozenset()
+        if pretrained_weights:
+            self.pretrained_parameter_names = load_imagenet_pretrained_weights(
+                self, pretrained_weights
+            )
 
     def _init_weights(self) -> None:
         for module in self.modules():
@@ -487,3 +553,143 @@ def MobileNetV2TinyImageNet200(
 def mobilenet_v2_aig_block(**gate_kwargs) -> Callable[..., AIGInvertedResidual]:
     """``partial(AIGInvertedResidual, **gate_kwargs)`` — convenience for Hydra configs."""
     return partial(AIGInvertedResidual, **gate_kwargs)
+
+
+def _read_torchvision_state_dict(source: str) -> dict[str, torch.Tensor]:
+    """Fetch a torchvision MobileNetV2 state_dict by weights name or local path."""
+    url = MOBILENET_V2_IMAGENET_WEIGHTS.get(str(source))
+    if url is not None:
+        # Same cache torchvision itself uses ($TORCH_HOME/hub/checkpoints), and
+        # the same sha256-prefix check on the file name.
+        return torch.hub.load_state_dict_from_url(
+            url, map_location="cpu", progress=True, check_hash=True
+        )
+
+    path = Path(str(source)).expanduser()
+    if not path.is_file():
+        known = ", ".join(sorted(MOBILENET_V2_IMAGENET_WEIGHTS))
+        raise FileNotFoundError(
+            f"pretrained_weights={source!r} is neither a known weights name ({known}) "
+            "nor an existing file. On a machine without internet access, download "
+            f"{MOBILENET_V2_IMAGENET_WEIGHTS['IMAGENET1K_V1']} elsewhere and point "
+            "pretrained_weights at the local copy."
+        )
+    return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def _torchvision_to_ours_state_dict(
+    tv_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Rename torchvision MobileNetV2 keys to this port's names.
+
+    Stem, head conv and classifier share names already; inside a block,
+    torchvision's positional ``conv.*`` becomes ``branch.<name>.*``. A block
+    has an expand conv iff torchvision stores a fourth ``conv.3`` entry (its
+    project BN).
+    """
+    blocks_with_expand = {
+        int(match["index"])
+        for match in map(_TORCHVISION_BLOCK_KEY_RE.match, tv_state)
+        if match is not None and match["rest"].startswith("3.")
+    }
+
+    renamed: dict[str, torch.Tensor] = {}
+    for key, tensor in tv_state.items():
+        match = _TORCHVISION_BLOCK_KEY_RE.match(key)
+        if match is None:
+            if not key.startswith(("features.", "classifier.")):
+                raise ValueError(
+                    f"Unexpected key {key!r}: pretrained_weights must be a torchvision "
+                    "MobileNetV2 state_dict (keys 'features.*' / 'classifier.*'), not a "
+                    "training checkpoint of this repository."
+                )
+            renamed[key] = tensor
+            continue
+
+        index = int(match["index"])
+        module_path, attr = match["rest"].rsplit(".", 1)
+        rename = (
+            _TORCHVISION_BLOCK_RENAME_WITH_EXPAND
+            if index in blocks_with_expand
+            else _TORCHVISION_BLOCK_RENAME_NO_EXPAND
+        )
+        if module_path not in rename:
+            raise ValueError(f"Unexpected torchvision MobileNetV2 block key {key!r}.")
+        renamed[f"features.{index}.branch.{rename[module_path]}.{attr}"] = tensor
+    return renamed
+
+
+def load_imagenet_pretrained_weights(model: MobileNetV2, source: str) -> frozenset[str]:
+    """Load torchvision's ImageNet MobileNetV2 weights into ``model`` in place.
+
+    Works for every block type this repository builds on MobileNetV2:
+
+    * plain / AIG-gated / Gumbel-gated blocks share the ``branch.*`` weights,
+      so those load as-is and the gates keep their own init;
+    * physically pruned blocks (``PrunedGumbelInvertedResidual``) expose
+      ``narrow_full_width_state``, which slices the full-width ImageNet
+      tensors down to the channels the block kept.
+
+    The classifier is loaded only when its shape matches (1000 classes);
+    otherwise it keeps its fresh init. Every other backbone tensor must be
+    covered by the checkpoint — a partial load raises instead of silently
+    training a half-random model.
+
+    Returns the names of the parameters that were filled from the checkpoint.
+    """
+    state = _torchvision_to_ours_state_dict(_read_torchvision_state_dict(source))
+
+    for index, block in enumerate(model.features):
+        narrow = getattr(block, "narrow_full_width_state", None)
+        if narrow is None:
+            continue
+        prefix = f"features.{index}."
+        block_keys = [key for key in state if key.startswith(prefix)]
+        block_state = {key[len(prefix):]: state.pop(key) for key in block_keys}
+        state.update({prefix + key: value for key, value in narrow(block_state).items()})
+
+    target = model.state_dict()
+    classifier_keys = [key for key in state if key.startswith("classifier.")]
+    classifier_loaded = all(
+        key in target and target[key].shape == state[key].shape for key in classifier_keys
+    )
+    if not classifier_loaded:
+        for key in classifier_keys:
+            del state[key]
+
+    for key, tensor in state.items():
+        if key not in target:
+            raise ValueError(
+                f"Pretrained tensor {key!r} has no counterpart in this model — the "
+                "architecture differs from the stock MobileNetV2."
+            )
+        if target[key].shape != tensor.shape:
+            raise ValueError(
+                f"Pretrained tensor {key!r} has shape {tuple(tensor.shape)}, the model "
+                f"expects {tuple(target[key].shape)}. ImageNet weights require "
+                "width_mult=1.0, in_channels=3 and the stock inverted_residual_setting."
+            )
+
+    missing, _ = model.load_state_dict(state, strict=False)
+    uncovered = [
+        key
+        for key in missing
+        if not key.startswith("classifier.")
+        and not any(marker in key for marker in _NON_PRETRAINED_KEY_MARKERS)
+    ]
+    if uncovered:
+        raise RuntimeError(
+            f"The pretrained checkpoint left {len(uncovered)} backbone tensor(s) "
+            f"uninitialised, e.g. {uncovered[:5]}."
+        )
+
+    loaded = frozenset(name for name, _ in model.named_parameters() if name in state)
+    loaded_numel = sum(p.numel() for name, p in model.named_parameters() if name in loaded)
+    classifier_note = (
+        "loaded" if classifier_loaded else f"fresh ({model.classifier[-1].out_features} classes)"
+    )
+    print(
+        f"[pretrained] MobileNetV2 <- {source}: {loaded_numel:,} parameters loaded; "
+        f"classifier {classifier_note}; {len(missing)} tensor(s) keep their own init."
+    )
+    return loaded

@@ -1,0 +1,57 @@
+# @package _global_
+#
+# Plain MobileNetV2 fine-tuned on TinyImageNet-200 from ImageNet-1k weights —
+# the reference point of the pretrained ablation family, in the same role as
+# ablation_mobilenetv2_tinyimagenet200/plain_baseline.yaml for the
+# from-scratch one:
+#   * depgraph/ prunes THIS run's checkpoint (depgraph_pruning.source_run_dir);
+#   * ours_iterative_*/ can use its per-epoch accuracy as the adaptive-lambda
+#     baseline (training_arguments.adaptive_lambda.baseline_history_dir);
+#   * it is the "no pruning" accuracy/params/FLOPs point of the comparison.
+#
+# Shared by every config in this folder: 224x224 inputs with ImageNet
+# normalisation, torchvision IMAGENET1K_V1 weights loaded into every model
+# the run builds, AdamW with the pretrained backbone at lr 1e-4 and the new
+# parameters (classifier, gates) at 1e-3 — see
+# configs/model/mobilenetv2_tinyimagenet200_224_pretrained.yaml,
+# configs/data/tinyimagenet200_resize224_imagenet_norm.yaml and
+# configs/optimizer/adamw_finetune.yaml.
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200_pretrained/plain_baseline
+
+defaults:
+  - /data: tinyimagenet200_resize224_imagenet_norm
+  - /model: mobilenetv2_tinyimagenet200_224_pretrained
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw_finetune
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+# Fine-tuning from ImageNet converges far faster than training from scratch.
+training_arguments:
+  num_epochs: 30
+
+scheduler:
+  T_max: 30
+
+mlflow:
+  enabled: true
+  experiment_name: mobilenetv2_pretrained_baseline
+  run_name: "baseline_pretrained_mobilenetv2_tinyimagenet200"
+  tags:
+    model_type: "MobileNetV2"
+    method: "plain"
+    dataset: "tinyimagenet200"
+    init: "${model.backbone.pretrained_weights}"
+    recipe: "ablation_pretrained_plain_baseline_mobilenetv2_tinyimagenet200"

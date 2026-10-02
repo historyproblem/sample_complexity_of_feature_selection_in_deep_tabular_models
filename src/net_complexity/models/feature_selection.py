@@ -69,6 +69,11 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                 f"backbone_weight_init must be one of: {allowed}. Got: {backbone_weight_init!r}"
             )
         if self.backbone_weight_init == "paper_kaiming_normal":
+            if getattr(backbone, "pretrained_weights", None):
+                raise ValueError(
+                    "backbone_weight_init='paper_kaiming_normal' would overwrite the "
+                    "backbone's pretrained weights; use backbone_weight_init='default'."
+                )
             apply_paper_style_conv_init(self.backbone)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()

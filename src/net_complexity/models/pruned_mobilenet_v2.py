@@ -12,11 +12,10 @@ produces for that channel. That keeps this a drop-in replacement inside
 ``MobileNetV2.features``.
 
 Compute savings vs. the full block (``n_active = oup - |disabled|``):
-  ``project`` and ``project_bn`` shrink proportionally to ``n_active``;
-  ``expand``/``depthwise`` are untouched — the inverted bottleneck's internal
-  width is not narrowed here, only the block's residual *output*. This
-  mirrors the ResNet path, where ``conv1``/``conv2`` likewise stay at full
-  width while ``conv3``'s output is narrowed.
+  ``project`` and ``project_bn`` shrink proportionally to ``n_active``. The
+  inverted bottleneck's internal width (``expand``/``depthwise``/``project``
+  input) is a separate, optional boundary — see
+  ``PrunedGumbelInvertedResidual``'s ``disabled_mid_channels``.
 
 Only residual blocks (``stride == 1 and inp == oup``) can be pruned: a
 non-residual block's output feeds the next block directly, so narrowing it
@@ -132,6 +131,31 @@ class PrunedGumbelInvertedResidual(InvertedResidual):
         self.register_buffer("active_indices", torch.tensor(active, dtype=torch.long))
         self.register_buffer("mid_active_indices", torch.tensor(mid_active, dtype=torch.long))
 
+    def narrow_full_width_state(
+        self, state: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Slice a full-width block state_dict down to the channels this block kept.
+
+        ``state`` holds an unpruned block's tensors with keys relative to the
+        block (``branch.expand.0.weight`` ...), e.g. ImageNet weights. The
+        internal width indexes dim 0 of expand/depthwise (conv and BN alike)
+        and dim 1 of project; the output width indexes dim 0 of project and
+        project_bn. Scalars (``num_batches_tracked``) pass through.
+        """
+        narrowed: dict[str, torch.Tensor] = {}
+        for key, tensor in state.items():
+            module_name = key.rsplit(".", 1)[0]
+            if tensor.dim() > 0:
+                if module_name.startswith(("branch.expand.", "branch.depthwise.")):
+                    tensor = tensor.index_select(0, self.mid_active_indices)
+                elif module_name == "branch.project":
+                    tensor = tensor.index_select(0, self.active_indices)
+                    tensor = tensor.index_select(1, self.mid_active_indices)
+                elif module_name == "branch.project_bn":
+                    tensor = tensor.index_select(0, self.active_indices)
+            narrowed[key] = tensor
+        return narrowed
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         branch = self.branch(x)  # [B, n_active, H, W]
         if not self.use_res_connect:
@@ -153,6 +177,10 @@ class PrunedMobileNetV2(MobileNetV2):
     one key there where the Bottleneck needs two (mid1/mid2), because
     ``depthwise`` preserves channel identity. Blocks absent from
     ``pruning_spec`` keep all channels.
+
+    ``pretrained_weights`` loads the ImageNet checkpoint with each pruned
+    block keeping the pretrained values of its surviving channels (see
+    ``PrunedGumbelInvertedResidual.narrow_full_width_state``).
     """
 
     def __init__(
@@ -166,6 +194,7 @@ class PrunedMobileNetV2(MobileNetV2):
         norm_layer: Callable[..., nn.Module] | None = None,
         dropout: float = 0.2,
         stem_stride: int = 2,
+        pretrained_weights: str | None = None,
     ) -> None:
         block_kwargs_by_index = {
             index: {
@@ -185,6 +214,7 @@ class PrunedMobileNetV2(MobileNetV2):
             dropout=dropout,
             stem_stride=stem_stride,
             block_kwargs_by_index=block_kwargs_by_index,
+            pretrained_weights=pretrained_weights,
         )
         self.pruning_spec = dict(pruning_spec)
 

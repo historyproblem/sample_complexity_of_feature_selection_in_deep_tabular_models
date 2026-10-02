@@ -1,0 +1,54 @@
+# @package _global_
+#
+# Classic ConvNet-AIG (Veit & Belongie 2020, Eq. 10 target-rate loss) on
+# MobileNetV2/TinyImageNet200, starting from ImageNet-1k weights. Same recipe
+# as ablation_mobilenetv2_tinyimagenet200/aig_classic/, with this folder's
+# shared pretrained setup (see plain_baseline.yaml): the backbone starts from
+# ImageNet, the AIG gates from their own init.
+#
+# Sweep t via: model.regularization_loss.target_rate=0.3
+#
+# Classic AIG never removes a weight — compute savings show up in
+# valid_aig_active_flops_per_sample / valid_aig_params_active_ratio. For a
+# statically pruned, params-comparable point see aig_classic_static/.
+#
+# Launch:
+#   python src/net_complexity/train.py \
+#       experiment=ablation_mobilenetv2_tinyimagenet200_pretrained/aig_classic/mobilenetv2_tinyimagenet200
+
+defaults:
+  - /data: tinyimagenet200_resize224_imagenet_norm
+  - /model: mobilenetv2_tinyimagenet200_224_pretrained
+  - /method: aig_target_rate_mobilenetv2
+  - /train: resnet50_best_practice
+  - /optimizer: adamw_finetune
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  backbone:
+    block:
+      temperature: 1.0
+
+training_arguments:
+  num_epochs: 30
+
+scheduler:
+  T_max: 30
+
+mlflow:
+  enabled: true
+  experiment_name: mobilenetv2_pretrained_classic_aig
+  run_name: "aig_classic_pretrained_mobilenetv2_tinyimagenet200_t${model.regularization_loss.target_rate}"
+  tags:
+    model_type: "MobileNetV2_AIG"
+    method: "aig_classic"
+    dataset: "tinyimagenet200"
+    init: "${model.backbone.pretrained_weights}"
+    recipe: "ablation_pretrained_aig_classic_mobilenetv2_tinyimagenet200"
+    target_rate: "${model.regularization_loss.target_rate}"
