@@ -106,7 +106,9 @@ def validate_config(config):
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        optional_fields = {"search_scheduler_eta_min"}
+        optional_fields = {
+            "search_scheduler_eta_min", "search_scheduler_horizon_epochs",
+        }
         _require(required_fields <= set(one) <= required_fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
                  f"missing={sorted(required_fields - set(one))}")
@@ -120,6 +122,10 @@ def validate_config(config):
             eta_min = one["search_scheduler_eta_min"]
             _require(type(eta_min) in (float, int) and 0 <= eta_min < plain["optimizer"]["lr"],
                      "search_scheduler_eta_min must be in [0, optimizer.lr)")
+        if "search_scheduler_horizon_epochs" in one:
+            horizon = one["search_scheduler_horizon_epochs"]
+            _require(type(horizon) is int and horizon > 0,
+                     "search_scheduler_horizon_epochs must be a positive integer")
     elif protocol in {
         HANDOFF_PROTOCOL, MAPPED_REPEATS_PROTOCOL, *QUALITY_RECOVERY_PROTOCOLS,
     }:

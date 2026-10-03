@@ -437,10 +437,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
     try:
         with cooperative_signals():
             if reuse_search_from is None:
-                search_scheduler_horizon = (
-                    int(config.one_shot.search_scheduler_horizon_epochs)
-                    if protocol == HANDOFF_PROTOCOL else search_epochs
-                )
+                search_scheduler_horizon = int(getattr(
+                    config.one_shot,
+                    "search_scheduler_horizon_epochs",
+                    search_epochs,
+                ))
                 search_scheduler_eta_min = float(
                     getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
                 )

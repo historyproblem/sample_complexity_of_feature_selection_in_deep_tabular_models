@@ -268,6 +268,7 @@ def test_one_shared_search_feeds_export_and_both_branches_with_distinct_compute_
 def test_search_only_stops_after_selected_checkpoint_and_physical_export(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
     OmegaConf.update(cfg, "one_shot.search_scheduler_eta_min", 0.0005, force_add=True)
+    OmegaConf.update(cfg, "one_shot.search_scheduler_horizon_epochs", 7, force_add=True)
     output = tmp_path / "run"
 
     result = run_one_shot_pruning(cfg, output, search_only=True)
@@ -277,8 +278,15 @@ def test_search_only_stops_after_selected_checkpoint_and_physical_export(tmp_pat
     assert result["branches"] == {}
     assert result["compute_ledger"]["shared_search_epochs"] == 3
     assert result["compute_ledger"]["actual_training_epochs_executed"] == 3
-    assert result["stages"]["shared_search"]["scheduler"]["T_max"] == 3
+    assert result["stages"]["shared_search"]["scheduler"]["T_max"] == 7
     assert result["stages"]["shared_search"]["scheduler"]["eta_min"] == 0.0005
+    last_checkpoint = torch.load(
+        next((output / "shared_search").rglob("epoch_0003.pt")),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert last_checkpoint["scheduler_state_dict"]["T_max"] == 7
+    assert last_checkpoint["scheduler_step_count"] == 3
     assert (output / "selected_checkpoint.pt").is_file()
     assert (output / "selection.json").is_file()
     assert (output / "export_only/deployment.pt").is_file()
