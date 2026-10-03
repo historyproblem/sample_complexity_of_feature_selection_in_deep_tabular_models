@@ -1,10 +1,10 @@
-"""Run a validation-only 30-epoch ResNet50 pruning LR/scheduler grid.
+"""Run a validation-only 30-epoch ResNet50 pruning initial-LR grid.
 
-The grid crosses two cosine horizons (30 and 75 epochs) with six initial/base
-AdamW learning rates. Every job executes exactly 30 adaptive-pruning epochs,
-uses eta_min=0, and promotes the epoch-30 checkpoint to ``last_checkpoint.pt``.
-The standard validation-selected checkpoint remains untouched. No recovery or
-test evaluation is performed by this tuning study.
+Every job executes exactly 30 adaptive-pruning epochs with a matching 30-epoch
+cosine schedule and one of six initial/base AdamW learning rates. The scheduler
+uses eta_min=0. The launcher promotes the epoch-30 checkpoint to
+``last_checkpoint.pt`` while leaving the standard validation-selected
+checkpoint untouched. No recovery or test evaluation is performed.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ SEARCH_EPOCHS = 30
 RECOVERY_EPOCHS = 120
 ETA_MIN = 0.0
 INITIAL_LRS = (0.001, 0.0008, 0.0006, 0.0004, 0.0002, 0.0001)
-T_MAX_VALUES = (30, 75)
+T_MAX = 30
 EXPECTED_HOURS_PER_SEARCH = 0.75
 
 
@@ -60,14 +60,13 @@ def _lr_id(value):
 def _profiles():
     return [
         {
-            "id": f"tmax{t_max}_lr{_lr_id(lr)}",
-            "t_max": t_max,
+            "id": f"lr{_lr_id(lr)}",
+            "t_max": T_MAX,
             "initial_lr": lr,
             "eta_min": ETA_MIN,
             "search_epochs": SEARCH_EPOCHS,
             "recovery_epochs_reserved": RECOVERY_EPOCHS,
         }
-        for t_max in T_MAX_VALUES
         for lr in INITIAL_LRS
     ]
 
@@ -77,7 +76,6 @@ def _overrides(row):
         f"optimizer.lr={row['initial_lr']:.12g}",
         f"scheduler.eta_min={row['eta_min']:.12g}",
         f"one_shot.search_scheduler_eta_min={row['eta_min']:.12g}",
-        f"one_shot.search_scheduler_horizon_epochs={row['t_max']}",
     )
 
 
@@ -107,8 +105,8 @@ def validate_grid_configs():
         _require(int(config.one_shot.search_epochs) == SEARCH_EPOCHS
                  and int(config.one_shot.final_epochs) == RECOVERY_EPOCHS,
                  f"{row['id']}: configured epoch split changed")
-        _require(int(config.one_shot.search_scheduler_horizon_epochs) == row["t_max"],
-                 f"{row['id']}: cosine horizon override was not resolved")
+        _require(row["t_max"] == SEARCH_EPOCHS,
+                 f"{row['id']}: cosine horizon differs from search length")
         _require(float(config.optimizer.lr) == row["initial_lr"],
                  f"{row['id']}: initial LR override was not resolved")
         _require(float(config.scheduler.eta_min) == ETA_MIN
@@ -216,8 +214,8 @@ def _verify_completed(run_dir, row):
     config = OmegaConf.load(config_path)
     _require(float(config.optimizer.lr) == row["initial_lr"],
              f"Completed run LR differs: {run_dir}")
-    _require(int(config.one_shot.search_scheduler_horizon_epochs) == row["t_max"],
-             f"Completed run T_max differs: {run_dir}")
+    _require(int(config.one_shot.search_epochs) == row["t_max"],
+             f"Completed run search length/T_max differs: {run_dir}")
     return _promote_last_checkpoint(run_dir, row)
 
 
@@ -258,7 +256,7 @@ def main(argv=None):
     reference_result = epoch_split._reference_result(reference)
     preflight = {
         "status": "ready",
-        "protocol": "resnet50_cifar10_pruning30_initial_lr_tmax_grid_v1",
+        "protocol": "resnet50_cifar10_pruning30_initial_lr_grid_v1",
         "profiles": profiles,
         "fresh_searches": sum(not _run_dir(output, row).exists() for row in profiles),
         "estimated_single_gpu_hours": sum(

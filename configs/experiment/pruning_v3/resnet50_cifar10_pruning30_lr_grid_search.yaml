@@ -8,7 +8,6 @@ defaults:
   - _self_
 
 one_shot:
-  search_scheduler_horizon_epochs: 30
   search_scheduler_eta_min: 0.0
 
 accuracy_guided:
