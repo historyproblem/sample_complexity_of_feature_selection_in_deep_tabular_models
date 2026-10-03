@@ -25,7 +25,7 @@ from net_complexity.models.feature_selection import (
     get_gate_normalization_metadata, validate_gate_normalization_metadata,
     get_gate_regularization_diagnostics,
 )
-from net_complexity.models.pruning_budget import gates, select_learned_closed
+from net_complexity.models.pruning_budget import gates, select_pruning_mask
 from .cyclic_aig import _configure_run_history, _set_num_epochs
 from .engine import run_training
 from .interruption import TrainingInterrupted, cooperative_signals, check_stop
@@ -344,7 +344,12 @@ def run_accuracy_guided_pruning(config, output_root, *, resume_from=None):
                 proposal, report = mask, {"params_after": sum(p.numel() for p in evaluated.parameters())}
             else:
                 validate_gate_normalization_metadata(evaluated, normalization)
-                proposal, report = select_learned_closed(evaluated, mask, float(c.eligibility.min_keep_ratio))
+                proposal, report = select_pruning_mask(
+                    evaluated,
+                    mask,
+                    float(c.eligibility.min_keep_ratio),
+                    drop_mode=str(config.accuracy_guided.drop_mode),
+                )
             records.append({"epoch": int(payload["epoch"]), "path": str(path),
                 "accuracy": float(metrics["valid_accuracy"]), "ce_loss": float(metrics["valid_ce_loss"]),
                 "physical_cost": report["params_after"], "proposal_mask": proposal, "selector": report})
@@ -383,8 +388,12 @@ def run_accuracy_guided_pruning(config, output_root, *, resume_from=None):
                 search, selected, selection = stage(search_spec, carrier, accepted_mask,
                                                      structural=False, rebase=pending_rebase)
                 pending_rebase = None
-                proposal_mask, selector_report = select_learned_closed(search, accepted_mask,
-                                                                       float(c.eligibility.min_keep_ratio))
+                proposal_mask, selector_report = select_pruning_mask(
+                    search,
+                    accepted_mask,
+                    float(c.eligibility.min_keep_ratio),
+                    drop_mode=str(config.accuracy_guided.drop_mode),
+                )
                 if selection["no_feasible_search"]:
                     proposal_mask = deepcopy(accepted_mask)
                     proposed = deepcopy(selector_report)

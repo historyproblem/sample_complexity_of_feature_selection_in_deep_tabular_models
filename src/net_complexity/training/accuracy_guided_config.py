@@ -19,6 +19,8 @@ from omegaconf import OmegaConf
 PROTOCOL = "accuracy_guided_gates_v3"
 SCHEMA_VERSION = 3
 ROOT = Path(__file__).resolve().parents[3]
+SUPPORTED_DROP_MODES = {"learned_closed_gates", "expected_open_count"}
+SUPPORTED_ENTROPY_BETAS = {0.0, 0.3}
 
 
 def _require(condition, message):
@@ -60,8 +62,12 @@ def validate_config_v3(config):
     _require(p["smoke"] or p["total_epochs"] == 150, "a full new run must allocate 150 epochs")
     _require(not p["smoke"] or p["total_epochs"] < 150, "smoke must have a short separate budget")
     for key, expected in {"normalization": "initial_channels", "scaling_contract": "survivor_equivalent_v1",
-                          "drop_mode": "learned_closed_gates", "carry_policy": "carry"}.items():
+                          "carry_policy": "carry"}.items():
         _require(p[key] == expected, f"{key} must be {expected}")
+    _require(
+        p["drop_mode"] in SUPPORTED_DROP_MODES,
+        f"drop_mode must be one of {sorted(SUPPORTED_DROP_MODES)}",
+    )
     _keys(p["eligibility"], {"min_keep_ratio"}, "eligibility")
     ratio = p["eligibility"]["min_keep_ratio"]
     _require(_number(ratio) and 0 < ratio <= 1, "min_keep_ratio must be in (0,1]")
@@ -135,7 +141,16 @@ def validate_config_v3(config):
              "legacy gate mode overrides conflict with explicit runtime modes")
     _require(_number(block.get("gate_threshold")) and 0 <= block["gate_threshold"] <= 1, "invalid hard threshold")
     _require(cfg["model"].get("lambda_coef") == a["alpha_init"], "model alpha differs from controller alpha_init")
-    _require(cfg["model"].get("entropy_regularization_coef") == 0.0, "base protocol entropy coefficient must be zero")
+    entropy_mode = cfg["model"].get("entropy_regularization")
+    entropy_beta = cfg["model"].get("entropy_regularization_coef")
+    _require(
+        entropy_mode == "plus_negative_entropy",
+        "entropy mode must remain plus_negative_entropy",
+    )
+    _require(
+        _number(entropy_beta) and float(entropy_beta) in SUPPORTED_ENTROPY_BETAS,
+        f"entropy beta must be one of {sorted(SUPPORTED_ENTROPY_BETAS)}",
+    )
     _require(cfg["optimizer"].get("_target_") == "torch.optim.AdamW"
              and cfg["optimizer"].get("gate_weight_decay_scale") == 0.0, "AdamW with zero gate decay is required")
     _require(cfg["scheduler"].get("_target_") == "torch.optim.lr_scheduler.CosineAnnealingLR", "cosine scheduler required")
@@ -310,7 +325,9 @@ def resolved_v3(
             "loss_contract": {"normalization": p["normalization"], "scaling_contract": p["scaling_contract"],
                               "formula": "alpha / M0 * sum_b sum_j(m_bj * p_raw_bj) / n_b0",
                               "effective_lambda_b": "alpha * n_bt / n_b0", "second_alpha_decay": False},
-            "pruning": {"drop_mode": p["drop_mode"], "mandatory_quota": None,
+            "pruning": {"drop_mode": p["drop_mode"],
+                        "mandatory_quota": ("round_half_up(sum raw p_open) per gate boundary"
+                                            if p["drop_mode"] == "expected_open_count" else None),
                         "eligibility": p["eligibility"], "no_candidates": "legal no-op; continue recovery/plan"},
             "handoff": {"gate_policy": "carry surviving raw logits", "backbone": "selected physical Conv/BN weights",
                         "optimizer": "new stage optimizer/scheduler; weights preserved, optimizer state restarted",

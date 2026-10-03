@@ -1,0 +1,26 @@
+# Standalone suite manifest consumed by launch_resnet50_expected_open_four_runs.py.
+# These are the accepted 60/90 controller points that produced approximately
+# 12.7M and 4.6M physical parameters in the earlier fixed-threshold study.
+protocol: resnet50_cifar10_expected_open_four_runs_v1
+search_config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_expected_open_recovery
+drop_mode: expected_open_count
+search_epochs: 60
+recovery_epochs: 90
+runs:
+  - id: target12m_beta0
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    entropy_beta: 0.0
+  - id: target12m_beta03
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    entropy_beta: 0.3
+  - id: target5m_beta0
+    soft_drop: 0.01
+    hard_drop: 0.02
+    entropy_beta: 0.0
+  - id: target5m_beta03
+    soft_drop: 0.01
+    hard_drop: 0.02
+    entropy_beta: 0.3

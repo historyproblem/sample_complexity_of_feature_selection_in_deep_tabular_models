@@ -20,7 +20,12 @@ from net_complexity.models.feature_selection import (
     ClassificationFeatureSelectionWrapper,
 )
 from net_complexity.models.pruned_bottleneck import PrunedGumbelBottleneck
-from net_complexity.models.pruning_budget import select_learned_closed, PhysicalBudget
+from net_complexity.models.pruning_budget import (
+    PhysicalBudget,
+    select_expected_open_count,
+    select_learned_closed,
+    select_pruning_mask,
+)
 
 
 def set_prob(gate, probabilities):
@@ -248,6 +253,41 @@ def test_selector_all_open_is_noop_and_two_closed_only():
     apply_channel_mask(model, mask)
     assert select_learned_closed(model, mask, .5)[0] == mask
     assert select_learned_closed(model, mask, .5)[1]["eligible"] == []
+
+
+def test_expected_open_selector_keeps_top_sum_probability_count_per_boundary():
+    model = tiny_open()
+    gate = model.layer1[0].mid1_gumbel_layer
+    set_prob(gate, [.2, .4, .49, .9])
+
+    threshold_mask, _ = select_learned_closed(model, {}, .25)
+    expected_mask, report = select_expected_open_count(model, {}, .25)
+
+    assert threshold_mask == {"layer1.0.mid1_gumbel_layer": [0, 1, 2]}
+    assert expected_mask == {"layer1.0.mid1_gumbel_layer": [0, 1]}
+    boundary = report["boundaries"]["layer1.0.mid1_gumbel_layer"]
+    assert boundary["sum_raw_p_open"] == pytest.approx(1.99)
+    assert boundary["rounded_expected_open"] == 2
+    assert boundary["kept_channels"] == 2
+    assert report["rounding"] == "round_half_up"
+    assert report["selection_scope"] == "independent_gate_boundary"
+    assert select_pruning_mask(
+        model, {}, .25, drop_mode="expected_open_count"
+    ) == (expected_mask, report)
+
+
+def test_expected_open_selector_respects_floor_and_breaks_probability_ties_by_id():
+    model = tiny_open()
+    gate = model.layer1[0].mid1_gumbel_layer
+    set_prob(gate, [.01, .01, .01, .01])
+
+    mask, report = select_expected_open_count(model, {}, .5)
+
+    assert mask == {"layer1.0.mid1_gumbel_layer": [2, 3]}
+    boundary = report["boundaries"]["layer1.0.mid1_gumbel_layer"]
+    assert boundary["rounded_expected_open"] == 0
+    assert boundary["keep_floor"] == 2
+    assert boundary["kept_channels"] == 2
 
 
 def test_selector_blocks_bias_open_floors_dependencies_deterministically():

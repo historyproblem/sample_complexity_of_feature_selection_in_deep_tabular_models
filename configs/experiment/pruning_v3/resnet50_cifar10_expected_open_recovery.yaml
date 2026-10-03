@@ -1,0 +1,16 @@
+# @package _global_
+# One physical 90-epoch recovery for each suite entry. Structural recovery has
+# no gates, so entropy beta has no training effect here; retaining the matching
+# value records and validates which search configuration produced the mask.
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_60_90_recovery
+  - _self_
+
+accuracy_guided:
+  drop_mode: expected_open_count
+
+mlflow:
+  run_name: resnet50_cifar10_expected_open_recovery
+
+run_history:
+  run_name: resnet50_cifar10_expected_open_recovery

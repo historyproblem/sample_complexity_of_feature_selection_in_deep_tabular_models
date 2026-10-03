@@ -10,6 +10,7 @@ import torch
 from .feature_selection import MaskedGumbelBottleneckLayer, MaskedGumbelLayer
 
 BOUNDARIES = {"gumbel_layer": 2, "mid1_gumbel_layer": 0, "mid2_gumbel_layer": 1}
+SUPPORTED_DROP_MODES = {"learned_closed_gates", "expected_open_count"}
 
 
 def gates(model):
@@ -150,6 +151,148 @@ def select_learned_closed(model, previous, min_keep_ratio=0.0, *, dependency_gro
         "compression_achieved": costs.total() < before,
     }
     return mask, report
+
+
+def select_expected_open_count(model, previous, min_keep_ratio=0.0):
+    """Keep the top channels matching each gate's expected open count.
+
+    For every independently gated boundary, the learned Bernoulli posterior
+    implies an expected number of active channels ``sum(p_open)``.  Materialize
+    that expectation by rounding half up to the nearest integer and retaining
+    the channels with the largest raw checkpoint probabilities.  The existing
+    original-width keep floor remains a safety constraint, not a target.
+
+    Raw probabilities are intentional: they are the posterior optimized by the
+    gate regularizer.  The accepted pruning-v3 protocol has no open-bias path,
+    so raw and effective probabilities are identical there; both are recorded
+    to make any future disagreement visible.
+    """
+    validate_mask(model, previous, min_keep_ratio=min_keep_ratio)
+    available = gates(model)
+    costs = PhysicalBudget(model, previous)
+    before = costs.total()
+    mask = deepcopy(previous)
+    boundaries = {}
+    removed = []
+    retained = []
+
+    for name, gate in sorted(available.items()):
+        survivor = gate.get_permanent_survivor_mask()
+        disabled = set((~survivor).nonzero().flatten().tolist())
+        if disabled != set(previous.get(name, [])):
+            raise ValueError(
+                f"Checkpoint permanent mask differs from supplied previous mask at {name}"
+            )
+        if gate.initial_channels != gate.logits.shape[0]:
+            raise ValueError(
+                "Expected-open selection requires the original-coordinate carrier"
+            )
+
+        raw = gate.get_raw_selection_probs()
+        effective = gate.get_effective_selection_probs()
+        if not bool(torch.isfinite(raw).all() and torch.isfinite(effective).all()):
+            raise FloatingPointError(f"Non-finite checkpoint probabilities in {name}")
+
+        survivor_ids = survivor.nonzero().flatten().tolist()
+        expected_open = float(raw[survivor].sum().item())
+        rounded_expected = int(math.floor(expected_open + 0.5))
+        keep_floor = max(1, math.ceil(gate.initial_channels * min_keep_ratio))
+        keep_count = min(
+            len(survivor_ids),
+            max(keep_floor, rounded_expected),
+        )
+        ranked = sorted(
+            survivor_ids,
+            key=lambda index: (-float(raw[index].item()), index),
+        )
+        kept_ids = set(ranked[:keep_count])
+        removed_ids = sorted(index for index in survivor_ids if index not in kept_ids)
+
+        for index in removed_ids:
+            record = {
+                "gate": name,
+                "original_id": index,
+                "raw_probability": float(raw[index].item()),
+                "effective_probability": float(effective[index].item()),
+                "threshold": gate.gate_threshold,
+            }
+            costs.remove(name)
+            mask.setdefault(name, []).append(index)
+            removed.append(record)
+        retained.extend(
+            {
+                "gate": name,
+                "original_id": index,
+                "raw_probability": float(raw[index].item()),
+                "effective_probability": float(effective[index].item()),
+                "retained_by_floor": rounded_expected < keep_floor,
+            }
+            for index in sorted(kept_ids)
+        )
+        boundaries[name] = {
+            "surviving_channels_before": len(survivor_ids),
+            "sum_raw_p_open": expected_open,
+            "sum_effective_p_open": float(effective[survivor].sum().item()),
+            "rounded_expected_open": rounded_expected,
+            "keep_floor": keep_floor,
+            "kept_channels": keep_count,
+            "removed_channels": len(removed_ids),
+        }
+
+    mask = {name: sorted(indices) for name, indices in mask.items() if indices}
+    validate_mask(model, mask, previous=previous, min_keep_ratio=min_keep_ratio)
+    report = {
+        "drop_mode": "expected_open_count",
+        "probability_source": "raw_checkpoint_p_open",
+        "rounding": "round_half_up",
+        "selection_scope": "independent_gate_boundary",
+        "params_before": before,
+        "params_after": costs.total(),
+        "removed_params": before - costs.total(),
+        "removed": removed,
+        "retained": retained,
+        "removed_original_ids": {
+            name: sorted(set(mask.get(name, [])) - set(previous.get(name, [])))
+            for name in mask
+            if set(mask[name]) - set(previous.get(name, []))
+        },
+        "boundaries": boundaries,
+        "min_keep_ratio": float(min_keep_ratio),
+        "minimum_channels": 1,
+        "no_op_reason": None if removed else "expected_count_keeps_all",
+        "learned_candidates_materialized": len(removed),
+        "compression_achieved": costs.total() < before,
+    }
+    return mask, report
+
+
+def select_pruning_mask(
+    model,
+    previous,
+    min_keep_ratio=0.0,
+    *,
+    drop_mode="learned_closed_gates",
+    dependency_groups=None,
+):
+    """Dispatch a checked pruning-v3 channel materialization policy."""
+    mode = str(drop_mode)
+    if mode == "learned_closed_gates":
+        return select_learned_closed(
+            model,
+            previous,
+            min_keep_ratio,
+            dependency_groups=dependency_groups,
+        )
+    if mode == "expected_open_count":
+        if dependency_groups:
+            raise ValueError(
+                "expected_open_count does not support cross-boundary dependency groups"
+            )
+        return select_expected_open_count(model, previous, min_keep_ratio)
+    raise ValueError(
+        f"Unsupported pruning drop_mode {mode!r}; expected one of "
+        f"{sorted(SUPPORTED_DROP_MODES)}"
+    )
 
 
 class PhysicalBudget:

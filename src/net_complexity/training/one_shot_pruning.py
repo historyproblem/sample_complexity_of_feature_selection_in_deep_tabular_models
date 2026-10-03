@@ -21,7 +21,7 @@ from net_complexity.models.channel_pruning import build_structurally_pruned_mode
 from net_complexity.models.feature_selection import (
     get_gate_normalization_metadata, validate_gate_normalization_metadata,
 )
-from net_complexity.models.pruning_budget import gates, select_learned_closed, validate_mask
+from net_complexity.models.pruning_budget import gates, select_pruning_mask, validate_mask
 from .accuracy_guided_config import code_provenance, file_hash
 from .accuracy_guided_pruning import atomic_checkpoint, select_checkpoint_records
 from .cyclic_aig import _configure_run_history, _set_num_epochs
@@ -463,7 +463,12 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 ):
                     for index, path in enumerate(paths, 1):
                         model, checkpoint = load_model(path, carrier)
-                        mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
+                        mask, selector = select_pruning_mask(
+                            model,
+                            {},
+                            float(cfg.accuracy_guided.eligibility.min_keep_ratio),
+                            drop_mode=str(cfg.accuracy_guided.drop_mode),
+                        )
                         materialized = materialize_physical_survivor_carrier(model, mask)
                         with isolated_diagnostic_rng(data.valid_dataloader):
                             materialized_validation = evaluate_deployment(
@@ -635,6 +640,13 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                         else ""
                     ),
                 )
+            selected_drop_mode = selected.get("selector", {}).get("drop_mode")
+            configured_drop_mode = str(cfg.accuracy_guided.drop_mode)
+            if selected_drop_mode != configured_drop_mode:
+                raise ValueError(
+                    "Selected search mask drop mode differs from the recovery config: "
+                    f"{selected_drop_mode!r} != {configured_drop_mode!r}"
+                )
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:
                 raise ValueError("Selected search checkpoint has no optimizer_state_dict for handoff.")
@@ -665,6 +677,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 "selected_checkpoint_hash": selected_hash,
                 "selected_model_state_hash": state_hash(selected_carrier.state_dict()), "mask_hash": mask_hash(mask)}
             selection = {**identity, "pruning_mask": mask, "selected_epoch": selected["epoch"],
+                "drop_mode": selected_drop_mode,
                 "quality_threshold": selection_trace["quality_threshold"], "reference_epoch": search_epochs,
                 "policy": selection_trace["policy"], "trace": selection_trace,
                 "selection_predictor": "dependency_safe_all_physical_survivors_open",

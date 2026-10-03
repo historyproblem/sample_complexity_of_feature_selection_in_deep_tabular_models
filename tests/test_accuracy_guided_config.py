@@ -79,6 +79,22 @@ def test_no_seed_job_name_whitelist():
     assert validate_config_v3(cfg) == 150
 
 
+def test_entropy_beta_point_three_is_an_explicit_supported_ablation():
+    cfg = compose_config()
+    cfg.model.entropy_regularization_coef = 0.3
+
+    assert validate_config_v3(cfg) == 150
+
+
+@pytest.mark.parametrize("beta", [-0.3, 0.1, 1.0])
+def test_other_entropy_betas_remain_rejected(beta):
+    cfg = compose_config()
+    cfg.model.entropy_regularization_coef = beta
+
+    with pytest.raises(ValueError, match="entropy beta"):
+        validate_config_v3(cfg)
+
+
 @pytest.fixture
 def input_config(tmp_path):
     cfg = compose_config()

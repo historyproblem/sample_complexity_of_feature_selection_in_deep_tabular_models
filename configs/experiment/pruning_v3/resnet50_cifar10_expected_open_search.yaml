@@ -1,0 +1,17 @@
+# @package _global_
+# Shared search profile for the four-run expected-open-count ablation. The suite
+# manifest supplies the two validation-drop pairs and entropy beta in explicit
+# per-model overrides. Mask materialization keeps top-K channels per gate
+# boundary, with K = round_half_up(sum(raw p_open)).
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_60_90_search
+  - _self_
+
+accuracy_guided:
+  drop_mode: expected_open_count
+
+mlflow:
+  run_name: resnet50_cifar10_expected_open_search
+
+run_history:
+  run_name: resnet50_cifar10_expected_open_search

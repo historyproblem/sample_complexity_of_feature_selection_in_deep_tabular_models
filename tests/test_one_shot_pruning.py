@@ -288,6 +288,22 @@ def test_search_only_stops_after_selected_checkpoint_and_physical_export(tmp_pat
     assert not (output / "scratch").exists()
 
 
+def test_expected_open_count_search_exports_a_mode_identified_mask(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    cfg.accuracy_guided.drop_mode = "expected_open_count"
+    validate_config(cfg)
+
+    output = tmp_path / "run"
+    result = run_one_shot_pruning(cfg, output, search_only=True)
+
+    assert result["status"] == "search_only_completed"
+    assert result["selection"]["drop_mode"] == "expected_open_count"
+    diagnostics = json.loads((output / "export_only/diagnostics.json").read_text())
+    assert diagnostics["selector"]["drop_mode"] == "expected_open_count"
+    assert diagnostics["selector"]["rounding"] == "round_half_up"
+    assert diagnostics["selector"]["selection_scope"] == "independent_gate_boundary"
+
+
 def test_completed_search_can_feed_two_mapped_recoveries_with_fresh_schedulers(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
     OmegaConf.update(cfg, "one_shot.search_scheduler_eta_min", 0.0005, force_add=True)
