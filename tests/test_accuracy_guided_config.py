@@ -26,6 +26,7 @@ def test_full_profile_preserves_current_plan_and_runtime_contract():
     assert cfg.optimizer.lr == 0.001 and cfg.optimizer.gate_weight_decay_scale == 0
     assert cfg.seed == 42 and cfg.dataloaders.batch_size == 128
     assert cfg.training_arguments.adaptive_lambda.initial_search_warmup == 10
+    assert cfg.training_arguments.adaptive_lambda.log_step == "auto"
 
 
 def test_smoke_is_separately_marked_short_profile():

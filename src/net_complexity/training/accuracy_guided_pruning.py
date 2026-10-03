@@ -280,6 +280,7 @@ def run_accuracy_guided_pruning(config, output_root, *, resume_from=None):
                          "structural": structural, "mask": mask}, merge=False, force_add=True)
         OmegaConf.update(cfg, "training_arguments.accuracy_guided_stage", {
             "id": spec["id"], "kind": spec["kind"], "end_global_epoch": end_epoch,
+            "controller_horizon_epochs": int(c.total_epochs),
             "provenance": provenance, "held_alpha": held_alpha,
             "original_gate_normalization_metadata": normalization,
             "held_controller_state": deepcopy(controller_state) if structural else None}, force_add=True)

@@ -175,7 +175,7 @@ def test_real_engine_snapshots_actual_ledger_and_exact_epoch_resume(tmp_path):
     first_path = history.checkpoints_dir / "epoch_0001.pt"
     first = torch.load(first_path, weights_only=True)
     event = first["epoch_event"]
-    assert event["alpha_used"] == .001 and event["alpha_next"] == pytest.approx(.002)
+    assert event["alpha_used"] == .001 and event["alpha_next"] == pytest.approx(10.0)
     assert event["consumed_ledger"]["optimizer_updates"] == 3
     assert event["controller_after_feedback"]["runtime"]["next_update_epoch"] == 2
     assert checkpoint_runtime_status(first)["exact_resume"]

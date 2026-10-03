@@ -54,7 +54,7 @@ training_arguments:
     update_every_search_epochs: 3
     initial_search_warmup: 10
     reentry_samples: 3
-    log_step: 0.6931471805599453
+    log_step: auto
 metrics:
   _target_: net_complexity.meta.Metrics
   train_metrics:

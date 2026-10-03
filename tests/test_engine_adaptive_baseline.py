@@ -110,11 +110,21 @@ def test_accuracy_only_auto_log_step_reuses_first_third_resolver():
         _LambdaModel(1.0e-3),
         baseline_accuracy_by_epoch={epoch: 0.9 for epoch in range(1, 61)},
     )
+    missing_log_step_arguments = OmegaConf.create(
+        OmegaConf.to_container(training_arguments, resolve=True)
+    )
+    del missing_log_step_arguments.adaptive_lambda.log_step
+    default_controller = engine._build_adaptive_lambda(
+        missing_log_step_arguments,
+        _LambdaModel(1.0e-3),
+        baseline_accuracy_by_epoch={epoch: 0.9 for epoch in range(1, 61)},
+    )
 
     # First third of 60 epochs is epoch 20. With a 10-epoch controller warmup
     # and per-epoch decisions there are ten increases from 1e-3 to 10.
     expected = math.log(10.0 / 1.0e-3) / 10.0
     assert controller.summary_state()["adaptive_lambda_step"] == pytest.approx(expected)
+    assert default_controller.summary_state()["adaptive_lambda_step"] == pytest.approx(expected)
 
 
 def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(tmp_path, monkeypatch):

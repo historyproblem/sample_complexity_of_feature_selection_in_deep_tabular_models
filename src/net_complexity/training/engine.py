@@ -1416,6 +1416,7 @@ def _build_adaptive_lambda(
     model: nn.Module,
     *,
     baseline_accuracy_by_epoch: Mapping[int, float] | None = None,
+    adaptive_lambda_state: Mapping[str, Any] | None = None,
 ) -> AdaptiveLambdaController | None:
     cfg = getattr(training_arguments, "adaptive_lambda", None)
     if cfg is None or not bool(getattr(cfg, "enabled", False)):
@@ -1439,15 +1440,34 @@ def _build_adaptive_lambda(
             raise ValueError(f"accuracy_only rejects unknown/legacy controller options: {sorted(unknown)}")
         if baseline_accuracy_by_epoch is None:
             raise ValueError("accuracy_only requires a supplied immutable validation reference")
-        if _is_auto_log_step(data.get("log_step", math.log(2.0))):
-            auto_cfg = OmegaConf.create({"log_step_init": "auto"})
-            data["log_step"] = _resolve_adaptive_lambda_log_step_init(
-                training_arguments,
-                auto_cfg,
-                initial_lambda_coef=float(initial_lambda_coef),
-                warmup_epochs=int(data["initial_search_warmup"]),
-                update_every_epochs=int(data["update_every_search_epochs"]),
+        if _is_auto_log_step(data.get("log_step", "auto")):
+            restored_config = (
+                adaptive_lambda_state.get("config")
+                if isinstance(adaptive_lambda_state, Mapping)
+                else None
             )
+            if isinstance(restored_config, Mapping) and "log_step" in restored_config:
+                data["log_step"] = float(restored_config["log_step"])
+            else:
+                stage_cfg = getattr(training_arguments, "accuracy_guided_stage", None)
+                controller_horizon_epochs = (
+                    getattr(stage_cfg, "controller_horizon_epochs", None)
+                    if stage_cfg is not None
+                    else None
+                )
+                auto_training_arguments = training_arguments
+                if controller_horizon_epochs is not None:
+                    auto_training_arguments = OmegaConf.create(
+                        {"num_epochs": int(controller_horizon_epochs)}
+                    )
+                auto_cfg = OmegaConf.create({"log_step_init": "auto"})
+                data["log_step"] = _resolve_adaptive_lambda_log_step_init(
+                    auto_training_arguments,
+                    auto_cfg,
+                    initial_lambda_coef=float(initial_lambda_coef),
+                    warmup_epochs=int(data["initial_search_warmup"]),
+                    update_every_epochs=int(data["update_every_search_epochs"]),
+                )
         kwargs = {key: value for key, value in data.items()
                   if key not in {"enabled", "control_mode", "alpha_init"}}
         return AccuracyOnlyLambdaController(initial_lambda_coef=initial_lambda_coef,
@@ -1745,6 +1765,7 @@ def train(model: nn.Module,
                 if baseline_accuracy_reference is not None else None
             )
         ),
+        adaptive_lambda_state=adaptive_lambda_state,
     )
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
