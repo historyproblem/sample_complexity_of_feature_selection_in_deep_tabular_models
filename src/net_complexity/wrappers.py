@@ -1,9 +1,17 @@
+from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
+from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_from_config
 from .models.feature_selection import (
     AIGBottleneckLayer,
+    AIGRegularizationLoss,
+    AIGTargetRateLoss,
+    apply_paper_style_conv_init,
+    PrunedBottleneck,
+    PrunedCIFARBasicBlock,
     CIFARGumbelBasicBlock,
     CIFARMaskedGumbelBasicBlock,
     CIFARSTGBasicBlock,
     CIFARResNet20,
+    SkippedCIFARBasicBlock,
     CIFARResNet32,
     CIFARResNet44,
     CIFARResNet56,
@@ -13,6 +21,7 @@ from .models.feature_selection import (
     GumbelBottleneckLayer,
     GumbelLayer,
     GumbleSoftmax,
+    MaskedGumbelBottleneckLayer,
     MaskedGumbelLayer,
     ResNet50,
     ResNet101,
@@ -40,6 +49,16 @@ from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_fr
 from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
 __all__ = [
+    "AIGRegularizationLoss",
+    "AIGTargetRateLoss",
+    "apply_paper_style_conv_init",
+    "MaskedGumbelBottleneckLayer",
+    "CIFARPrunedGumbelBasicBlock",
+    "PrunedBottleneck",
+    "PrunedCIFARBasicBlock",
+    "PrunedCIFARResNet",
+    "apply_layer_skipping",
+    "apply_layer_skipping_from_config",
     "AIGBlockGate",
     "AIGBottleneckLayer",
     "AIGEfficientNetV2",
@@ -50,6 +69,7 @@ __all__ = [
     "CIFARMaskedGumbelBasicBlock",
     "CIFARSTGBasicBlock",
     "CIFARResNet20",
+    "SkippedCIFARBasicBlock",
     "CIFARResNet32",
     "CIFARResNet44",
     "CIFARResNet56",

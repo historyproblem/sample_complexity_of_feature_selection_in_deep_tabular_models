@@ -1,0 +1,18 @@
+# @package _global_
+# ResNet50/CIFAR-10 search profile for the dense 60/90 parameter curve.
+# The lower keep floor is fixed for every curve point. Actual size is still
+# selected from learned gates using validation only; planning targets never
+# participate in checkpoint selection.
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_60_90_search
+  - _self_
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.001
+
+mlflow:
+  run_name: resnet50_cifar10_curve60_search
+
+run_history:
+  run_name: resnet50_cifar10_curve60_search

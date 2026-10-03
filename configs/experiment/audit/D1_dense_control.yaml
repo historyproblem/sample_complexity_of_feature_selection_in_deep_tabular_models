@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /experiment/audit/_daytime
+  - _self_
+model:
+  lambda_coef: 0.0
+cyclic_channel_pruning:
+  max_param_fraction: 0.0
+mlflow:
+  run_name: D1_dense_control

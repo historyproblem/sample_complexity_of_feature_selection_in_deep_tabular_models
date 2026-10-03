@@ -8,8 +8,10 @@ import csv
 import gzip
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
@@ -184,12 +186,35 @@ _LAYER_NAME_RE = re.compile(
     r"(?:backbone\.)?(?P<key>layer\d+\.\d+)\.gumbel_layer$"
 )
 
+# Bottleneck-only: same idea, but also recognizes the optional mid1/mid2
+# internal-width gates (MaskedGumbelBottleneckLayer(gate_internal_width=True),
+# see feature_selection.py) alongside the "output" gate every
+# MaskedGumbelBottleneckLayer has.
+_BOTTLENECK_LAYER_NAME_RE = re.compile(
+    r"(?:backbone\.)?(?P<key>layer\d+\.\d+)\.(?P<gate>gumbel_layer|mid1_gumbel_layer|mid2_gumbel_layer)$"
+)
+
+_BOTTLENECK_GATE_SPEC_KEY = {
+    "gumbel_layer": "output",
+    "mid1_gumbel_layer": "mid1",
+    "mid2_gumbel_layer": "mid2",
+}
+
 _NUM_BLOCKS_BY_TARGET = {
     "CIFARResNet20": [3, 3, 3],
     "CIFARResNet32": [5, 5, 5],
     "CIFARResNet44": [7, 7, 7],
     "CIFARResNet56": [9, 9, 9],
     "CIFARResNet110": [18, 18, 18],
+}
+
+# Bottleneck-based ResNet50/101/152 (net_complexity.models.resnet.ResNet) —
+# distinct from the CIFARResNet family above, which uses BasicBlock and a
+# 3-stage layout.
+_BOTTLENECK_LAYER_LIST_BY_TARGET = {
+    "ResNet50": [3, 4, 6, 3],
+    "ResNet101": [3, 4, 23, 3],
+    "ResNet152": [3, 8, 36, 3],
 }
 
 
@@ -201,6 +226,27 @@ def _mask_dict_to_pruning_spec(mask_dict: dict[str, list[int]]) -> dict[str, lis
         if m:
             spec[m.group("key")] = channels
     return spec
+
+
+def _mask_dict_to_bottleneck_pruning_spec(
+    mask_dict: dict[str, list[int]],
+) -> dict[str, dict[str, list[int]]]:
+    """Convert channel_history layer-name keys to PrunedResNet's nested pruning_spec.
+
+    Bottleneck-only counterpart of ``_mask_dict_to_pruning_spec``: recognizes
+    all three MaskedGumbelBottleneckLayer gates (output/mid1/mid2, see
+    ``_BOTTLENECK_LAYER_NAME_RE``) instead of only the output gate, and
+    groups them per block into ``{"layerN.B": {"output": [...], "mid1":
+    [...], "mid2": [...]}}`` (only keys with a non-empty channel list are
+    included) so ``PrunedResNet``/``PrunedGumbelBottleneck`` can prune each
+    boundary independently.
+    """
+    spec: dict[str, dict[str, list[int]]] = defaultdict(dict)
+    for layer_name, channels in mask_dict.items():
+        m = _BOTTLENECK_LAYER_NAME_RE.search(layer_name)
+        if m:
+            spec[m.group("key")][_BOTTLENECK_GATE_SPEC_KEY[m.group("gate")]] = channels
+    return dict(spec)
 
 
 def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
@@ -228,32 +274,83 @@ def _load_mask_dict(cfg: DictConfig) -> dict[str, list[int]]:
         )
 
 
-def build_structurally_pruned_model_from_config(
+def _is_bottleneck_backbone_target(backbone_target: str) -> bool:
+    return any(name in backbone_target for name in _BOTTLENECK_LAYER_LIST_BY_TARGET)
+
+
+def build_pruned_bottleneck_model(
     config: DictConfig,
-    cfg: DictConfig,
+    pruning_spec: dict[str, list[int] | dict[str, list[int]]],
 ) -> nn.Module:
-    """Build a PrunedCIFARResNet wrapped in ClassificationFeatureSelectionWrapper.
+    """Build a Bottleneck-based ``PrunedResNet`` wrapped in ``ClassificationFeatureSelectionWrapper``.
 
-    Reads the channel mask (from channel_history file or explicit YAML),
-    converts it to a per-block pruning_spec, and constructs a fresh model
-    whose residual branches are physically narrowed to the active channels.
-
-    The returned model has the same interface as the standard training model:
-    forward(X, y) -> ClassifModelOutput.
+    Bottleneck (ResNet50/101/152) counterpart of the CIFARResNet path in
+    ``build_structurally_pruned_model_from_config``. Unlike that function,
+    this one takes the pruning spec directly (already in ``{"layerN.B":
+    [channel_indices]}`` form) so callers that already hold it in memory —
+    e.g. the iterative channel-pruning cycle — do not need to round-trip it
+    through a mask file.
     """
+    from .feature_selection import ClassificationFeatureSelectionWrapper
+    from .pruned_bottleneck import PrunedResNet
+
+    num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 1000)
+    in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
+    stem_kernel_size = int(OmegaConf.select(config, "model.backbone.stem_kernel_size") or 7)
+    stem_stride = int(OmegaConf.select(config, "model.backbone.stem_stride") or 2)
+    stem_padding = int(OmegaConf.select(config, "model.backbone.stem_padding") or 3)
+    use_maxpool_cfg = OmegaConf.select(config, "model.backbone.use_maxpool")
+    use_maxpool = True if use_maxpool_cfg is None else bool(use_maxpool_cfg)
+
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+    layer_list = next(
+        (v for k, v in _BOTTLENECK_LAYER_LIST_BY_TARGET.items() if k in backbone_target),
+        None,
+    )
+    if layer_list is None:
+        raise ValueError(
+            "build_pruned_bottleneck_model: could not infer ResNet50/101/152 depth from "
+            f"model.backbone._target_={backbone_target!r}."
+        )
+
+    backbone = PrunedResNet(
+        pruning_spec=pruning_spec,
+        layer_list=layer_list,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        stem_kernel_size=stem_kernel_size,
+        stem_stride=stem_stride,
+        stem_padding=stem_padding,
+        use_maxpool=use_maxpool,
+        base_width=int(OmegaConf.select(config, "model.backbone.base_width", default=64)),
+    )
+
+    lambda_coef = float(OmegaConf.select(config, "model.lambda_coef") or 0.0)
+    criterion_cfg = OmegaConf.select(config, "model.criterion")
+    criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
+
+    total_disabled = sum(len(v) for v in pruning_spec.values())
+    print(
+        f"[channel_pruning] Structural pruning applied (Bottleneck): "
+        f"{len(pruning_spec)} blocks affected, "
+        f"{total_disabled} channels removed from residual branches."
+    )
+
+    return ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=lambda_coef,
+        criterion=criterion,
+        regularization_loss=lambda m: 0,
+    )
+
+
+def _build_pruned_cifar_model(
+    config: DictConfig,
+    pruning_spec: dict[str, list[int]],
+) -> nn.Module:
     from .feature_selection import ClassificationFeatureSelectionWrapper
     from .pruned_resnet import PrunedCIFARResNet
 
-    mask_dict = _load_mask_dict(cfg)
-    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
-
-    if not pruning_spec:
-        print(
-            "[channel_pruning] WARNING: no prunable layers found in mask - "
-            "PrunedCIFARResNet will be equivalent to the full model."
-        )
-
-    # Read backbone parameters from model config
     num_classes = int(OmegaConf.select(config, "model.backbone.num_classes") or 10)
     in_channels = int(OmegaConf.select(config, "model.backbone.in_channels") or 3)
     shortcut_option = str(
@@ -280,7 +377,6 @@ def build_structurally_pruned_model_from_config(
     criterion_cfg = OmegaConf.select(config, "model.criterion")
     criterion = instantiate(criterion_cfg) if criterion_cfg is not None else nn.CrossEntropyLoss()
 
-    # Log a summary of the pruning
     total_disabled = sum(len(v) for v in pruning_spec.values())
     print(
         f"[channel_pruning] Structural pruning applied: "
@@ -294,3 +390,418 @@ def build_structurally_pruned_model_from_config(
         criterion=criterion,
         regularization_loss=lambda m: 0,
     )
+
+
+def build_structurally_pruned_model_from_config(
+    config: DictConfig,
+    cfg: DictConfig,
+) -> nn.Module:
+    """Build a physically channel-pruned model wrapped in ClassificationFeatureSelectionWrapper.
+
+    Reads the channel mask (from channel_history file or explicit YAML),
+    converts it to a per-block pruning_spec, and constructs a fresh model
+    whose residual branches are physically narrowed to the active channels.
+    Dispatches to the CIFARResNet (BasicBlock) or Bottleneck (ResNet50/101/152)
+    builder based on ``model.backbone._target_``.
+
+    The returned model has the same interface as the standard training model:
+    forward(X, y) -> ClassifModelOutput.
+    """
+    mask_dict = _load_mask_dict(cfg)
+    backbone_target = str(OmegaConf.select(config, "model.backbone._target_") or "")
+
+    if _is_bottleneck_backbone_target(backbone_target):
+        pruning_spec = _mask_dict_to_bottleneck_pruning_spec(mask_dict)
+        if not pruning_spec:
+            print(
+                "[channel_pruning] WARNING: no prunable layers found in mask - "
+                "the pruned model will be equivalent to the full model."
+            )
+        return build_pruned_bottleneck_model(config, pruning_spec)
+
+    pruning_spec = _mask_dict_to_pruning_spec(mask_dict)
+    if not pruning_spec:
+        print(
+            "[channel_pruning] WARNING: no prunable layers found in mask - "
+            "the pruned model will be equivalent to the full model."
+        )
+    return _build_pruned_cifar_model(config, pruning_spec)
+
+
+# ---------------------------------------------------------------------------
+# Weight handoff for Bottleneck channel pruning.
+# ---------------------------------------------------------------------------
+
+def _unwrap_backbone(model: nn.Module) -> nn.Module:
+    return getattr(model, "backbone", model)
+
+
+def _bottleneck_blocks(backbone: nn.Module) -> dict[str, nn.Module]:
+    blocks: dict[str, nn.Module] = {}
+    for stage_index in range(1, 5):
+        stage_name = f"layer{stage_index}"
+        stage = getattr(backbone, stage_name, None)
+        if stage is None:
+            raise TypeError(
+                "Bottleneck weight handoff expects a ResNet backbone with "
+                f"{stage_name}."
+            )
+        for block_index, block in enumerate(stage):
+            blocks[f"{stage_name}.{block_index}"] = block
+    return blocks
+
+
+def _copy_tensor(target: torch.Tensor, source: torch.Tensor) -> None:
+    target.copy_(source.to(device=target.device, dtype=target.dtype))
+
+
+def _copy_batch_norm_subset(
+    source: nn.BatchNorm2d,
+    target: nn.BatchNorm2d,
+    indices: torch.Tensor,
+) -> None:
+    indices = indices.to(source.weight.device)
+    if source.affine != target.affine:
+        raise ValueError("Source and target BatchNorm affine settings differ.")
+    if source.track_running_stats != target.track_running_stats:
+        raise ValueError("Source and target BatchNorm running-stat settings differ.")
+    if source.affine:
+        _copy_tensor(target.weight, source.weight.index_select(0, indices))
+        _copy_tensor(target.bias, source.bias.index_select(0, indices))
+    if source.track_running_stats:
+        _copy_tensor(target.running_mean, source.running_mean.index_select(0, indices))
+        _copy_tensor(target.running_var, source.running_var.index_select(0, indices))
+        _copy_tensor(target.num_batches_tracked, source.num_batches_tracked)
+
+
+def _scatter_batch_norm_subset(
+    source: nn.BatchNorm2d,
+    target: nn.BatchNorm2d,
+    indices: torch.Tensor,
+) -> None:
+    indices = indices.to(target.weight.device)
+    if source.affine != target.affine:
+        raise ValueError("Source and target BatchNorm affine settings differ.")
+    if source.track_running_stats != target.track_running_stats:
+        raise ValueError("Source and target BatchNorm running-stat settings differ.")
+    if source.affine:
+        target.weight.index_copy_(0, indices, source.weight.to(target.weight))
+        target.bias.index_copy_(0, indices, source.bias.to(target.bias))
+    if source.track_running_stats:
+        target.running_mean.index_copy_(
+            0, indices, source.running_mean.to(target.running_mean)
+        )
+        target.running_var.index_copy_(
+            0, indices, source.running_var.to(target.running_var)
+        )
+        _copy_tensor(target.num_batches_tracked, source.num_batches_tracked)
+
+
+def _copy_same_shape_module(source: nn.Module | None, target: nn.Module | None, name: str) -> None:
+    if source is None and target is None:
+        return
+    if source is None or target is None:
+        raise ValueError(f"Source and target disagree about the presence of {name}.")
+    target.load_state_dict(source.state_dict(), strict=True)
+
+
+def _copy_resnet_shared_weights(source: nn.Module, target: nn.Module) -> None:
+    """Copy the ResNet tensors whose shapes do not change under block pruning."""
+    for name in ("conv1", "batch_norm1", "fc"):
+        _copy_same_shape_module(getattr(source, name), getattr(target, name), name)
+
+
+def _validate_bottleneck_pair(
+    source_blocks: dict[str, nn.Module],
+    target_blocks: dict[str, nn.Module],
+) -> None:
+    if source_blocks.keys() != target_blocks.keys():
+        raise ValueError(
+            "Source and target ResNet topologies differ; cannot transfer channel weights."
+        )
+
+
+@dataclass(frozen=True)
+class ParameterTensorMapping:
+    """Original-coordinate mapping from one gated parameter to one compact parameter.
+
+    ``indices_by_dimension`` contains the exact original channel ids retained on
+    each narrowed tensor dimension.  The same mapping is valid for the model
+    parameter and for every parameter-shaped optimizer state tensor (Adam's
+    ``exp_avg``/``exp_avg_sq`` and optional ``max_exp_avg_sq``).
+    """
+
+    source_name: str
+    target_name: str
+    source_parameter: nn.Parameter
+    target_parameter: nn.Parameter
+    indices_by_dimension: tuple[tuple[int, torch.Tensor], ...] = ()
+
+    def select_source_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tuple(tensor.shape) != tuple(self.source_parameter.shape):
+            raise ValueError(
+                f"State tensor for {self.source_name} has shape {tuple(tensor.shape)}, "
+                f"expected {tuple(self.source_parameter.shape)}."
+            )
+        selected = tensor
+        for dimension, indices in self.indices_by_dimension:
+            if indices.dtype != torch.long or indices.ndim != 1:
+                raise TypeError(
+                    f"Invalid channel-index tensor for {self.target_name} dimension {dimension}."
+                )
+            selected = selected.index_select(dimension, indices.to(selected.device))
+        if tuple(selected.shape) != tuple(self.target_parameter.shape):
+            raise ValueError(
+                f"Mapped tensor for {self.target_name} has shape {tuple(selected.shape)}, "
+                f"expected {tuple(self.target_parameter.shape)}."
+            )
+        return selected
+
+
+def build_gated_to_structural_parameter_mappings(
+    gated_model: nn.Module,
+    structural_model: nn.Module,
+) -> tuple[ParameterTensorMapping, ...]:
+    """Return the complete trainable-parameter mapping for Bottleneck pruning.
+
+    Parameter names alone are insufficient once channel axes are compacted.
+    This manifest binds every compact parameter to its source ``Parameter`` and
+    to the same original-coordinate index lists used by the physical model.
+    Gate parameters intentionally have no compact target and are omitted.
+    """
+    from .feature_selection import MaskedGumbelBottleneckLayer
+    from .pruned_bottleneck import PrunedGumbelBottleneck
+
+    source_backbone = _unwrap_backbone(gated_model)
+    target_backbone = _unwrap_backbone(structural_model)
+    source_blocks = _bottleneck_blocks(source_backbone)
+    target_blocks = _bottleneck_blocks(target_backbone)
+    _validate_bottleneck_pair(source_blocks, target_blocks)
+
+    source_names = {id(parameter): name for name, parameter in gated_model.named_parameters()}
+    target_parameters = dict(structural_model.named_parameters())
+    target_names = {id(parameter): name for name, parameter in target_parameters.items()}
+    mappings: dict[str, ParameterTensorMapping] = {}
+
+    def add(
+        source_parameter: nn.Parameter | None,
+        target_parameter: nn.Parameter | None,
+        *indices_by_dimension: tuple[int, torch.Tensor],
+    ) -> None:
+        if source_parameter is None and target_parameter is None:
+            return
+        if source_parameter is None or target_parameter is None:
+            raise ValueError("Source and structural parameters disagree about an optional tensor.")
+        source_name = source_names.get(id(source_parameter))
+        target_name = target_names.get(id(target_parameter))
+        if source_name is None or target_name is None:
+            raise ValueError("Could not resolve a pruning parameter to its model-qualified name.")
+        if target_name in mappings:
+            raise ValueError(f"Duplicate structural parameter mapping for {target_name}.")
+        mappings[target_name] = ParameterTensorMapping(
+            source_name=source_name,
+            target_name=target_name,
+            source_parameter=source_parameter,
+            target_parameter=target_parameter,
+            indices_by_dimension=tuple(
+                (int(dimension), indices.detach().to(device="cpu", dtype=torch.long).clone())
+                for dimension, indices in indices_by_dimension
+            ),
+        )
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, MaskedGumbelBottleneckLayer):
+            raise TypeError(
+                f"Expected MaskedGumbelBottleneckLayer at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, PrunedGumbelBottleneck):
+            raise TypeError(
+                f"Expected PrunedGumbelBottleneck at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = target.active_indices
+        mid1_indices = target.mid1_active_indices
+        mid2_indices = target.mid2_active_indices
+
+        add(source.conv1.weight, target.conv1.weight, (0, mid1_indices))
+        add(source.conv1.bias, target.conv1.bias, (0, mid1_indices))
+        add(source.batch_norm1.weight, target.batch_norm1.weight, (0, mid1_indices))
+        add(source.batch_norm1.bias, target.batch_norm1.bias, (0, mid1_indices))
+
+        add(source.conv2.weight, target.conv2.weight, (0, mid2_indices), (1, mid1_indices))
+        add(source.conv2.bias, target.conv2.bias, (0, mid2_indices))
+        add(source.batch_norm2.weight, target.batch_norm2.weight, (0, mid2_indices))
+        add(source.batch_norm2.bias, target.batch_norm2.bias, (0, mid2_indices))
+
+        add(source.conv3.weight, target.conv3.weight, (0, output_indices), (1, mid2_indices))
+        add(source.conv3.bias, target.conv3.bias, (0, output_indices))
+        add(source.batch_norm3.weight, target.batch_norm3.weight, (0, output_indices))
+        add(source.batch_norm3.bias, target.batch_norm3.bias, (0, output_indices))
+
+    source_parameters = dict(gated_model.named_parameters())
+    for target_name, target_parameter in target_parameters.items():
+        if target_name in mappings:
+            continue
+        source_parameter = source_parameters.get(target_name)
+        if source_parameter is None:
+            raise ValueError(f"No gated source parameter corresponds to {target_name}.")
+        if tuple(source_parameter.shape) != tuple(target_parameter.shape):
+            raise ValueError(
+                f"Shape-changing parameter {target_name} has no channel mapping: "
+                f"{tuple(source_parameter.shape)} -> {tuple(target_parameter.shape)}."
+            )
+        add(source_parameter, target_parameter)
+
+    if set(mappings) != set(target_parameters):
+        missing = sorted(set(target_parameters) - set(mappings))
+        raise AssertionError(f"Incomplete structural parameter mapping: {missing[:5]}.")
+    return tuple(mappings[name] for name in target_parameters)
+
+
+@torch.no_grad()
+def transfer_gated_weights_to_structural(
+    gated_model: nn.Module,
+    structural_model: nn.Module,
+) -> None:
+    """Slice a full gated Bottleneck ResNet into its structural counterpart.
+
+    The structural model owns the cumulative active-index buffers. They use
+    coordinates of the original full-width block, so they can directly select
+    the surviving Conv/BatchNorm tensors from ``gated_model``.
+    """
+    from .feature_selection import MaskedGumbelBottleneckLayer
+    from .pruned_bottleneck import PrunedGumbelBottleneck
+
+    source_backbone = _unwrap_backbone(gated_model)
+    target_backbone = _unwrap_backbone(structural_model)
+    source_blocks = _bottleneck_blocks(source_backbone)
+    target_blocks = _bottleneck_blocks(target_backbone)
+    _validate_bottleneck_pair(source_blocks, target_blocks)
+    _copy_resnet_shared_weights(source_backbone, target_backbone)
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, MaskedGumbelBottleneckLayer):
+            raise TypeError(
+                f"Expected MaskedGumbelBottleneckLayer at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, PrunedGumbelBottleneck):
+            raise TypeError(
+                f"Expected PrunedGumbelBottleneck at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = target.active_indices.to(source.conv3.weight.device)
+        mid1_indices = target.mid1_active_indices.to(source.conv1.weight.device)
+        mid2_indices = target.mid2_active_indices.to(source.conv2.weight.device)
+
+        _copy_tensor(target.conv1.weight, source.conv1.weight.index_select(0, mid1_indices))
+        if source.conv1.bias is not None:
+            _copy_tensor(target.conv1.bias, source.conv1.bias.index_select(0, mid1_indices))
+        _copy_batch_norm_subset(source.batch_norm1, target.batch_norm1, mid1_indices)
+
+        conv2_weight = source.conv2.weight.index_select(0, mid2_indices)
+        conv2_weight = conv2_weight.index_select(1, mid1_indices)
+        _copy_tensor(target.conv2.weight, conv2_weight)
+        if source.conv2.bias is not None:
+            _copy_tensor(target.conv2.bias, source.conv2.bias.index_select(0, mid2_indices))
+        _copy_batch_norm_subset(source.batch_norm2, target.batch_norm2, mid2_indices)
+
+        conv3_weight = source.conv3.weight.index_select(0, output_indices)
+        conv3_weight = conv3_weight.index_select(1, mid2_indices)
+        _copy_tensor(target.conv3.weight, conv3_weight)
+        if source.conv3.bias is not None:
+            _copy_tensor(target.conv3.bias, source.conv3.bias.index_select(0, output_indices))
+        _copy_batch_norm_subset(source.batch_norm3, target.batch_norm3, output_indices)
+
+        _copy_same_shape_module(
+            source.i_downsample,
+            target.i_downsample,
+            f"{block_name}.i_downsample",
+        )
+
+
+def _scatter_conv_weight(
+    source: nn.Conv2d,
+    target: nn.Conv2d,
+    output_indices: torch.Tensor,
+    input_indices: torch.Tensor,
+) -> None:
+    output_indices = output_indices.to(target.weight.device)
+    input_indices = input_indices.to(target.weight.device)
+    source_weight = source.weight.to(target.weight)
+    if source_weight.shape[:2] != (output_indices.numel(), input_indices.numel()):
+        raise ValueError(
+            "Pruned Conv2d shape does not match the supplied active channel indices."
+        )
+    for local_output, full_output in enumerate(output_indices.tolist()):
+        target.weight[full_output].index_copy_(
+            0,
+            input_indices,
+            source_weight[local_output],
+        )
+    if source.bias is not None:
+        if target.bias is None:
+            raise ValueError("Source Conv2d has bias but target Conv2d does not.")
+        target.bias.index_copy_(0, output_indices, source.bias.to(target.bias))
+
+
+@torch.no_grad()
+def transfer_structural_weights_to_gated(
+    structural_model: nn.Module,
+    gated_model: nn.Module,
+) -> None:
+    """Scatter fine-tuned surviving weights back into a full gated carrier.
+
+    Permanently disabled positions in ``gated_model`` are intentionally left
+    untouched: channel masks keep them inactive. Keeping the full carrier lets
+    the existing Gumbel search and channel-history code run unchanged in the
+    next cycle, while every active tensor comes from the physically pruned
+    recovery model.
+    """
+    from .feature_selection import MaskedGumbelBottleneckLayer
+    from .pruned_bottleneck import PrunedGumbelBottleneck
+
+    source_backbone = _unwrap_backbone(structural_model)
+    target_backbone = _unwrap_backbone(gated_model)
+    source_blocks = _bottleneck_blocks(source_backbone)
+    target_blocks = _bottleneck_blocks(target_backbone)
+    _validate_bottleneck_pair(source_blocks, target_blocks)
+    _copy_resnet_shared_weights(source_backbone, target_backbone)
+
+    for block_name, source in source_blocks.items():
+        target = target_blocks[block_name]
+        if not isinstance(source, PrunedGumbelBottleneck):
+            raise TypeError(
+                f"Expected PrunedGumbelBottleneck at {block_name}, "
+                f"got {type(source).__name__}."
+            )
+        if not isinstance(target, MaskedGumbelBottleneckLayer):
+            raise TypeError(
+                f"Expected MaskedGumbelBottleneckLayer at {block_name}, "
+                f"got {type(target).__name__}."
+            )
+
+        output_indices = source.active_indices.to(target.conv3.weight.device)
+        mid1_indices = source.mid1_active_indices.to(target.conv1.weight.device)
+        mid2_indices = source.mid2_active_indices.to(target.conv2.weight.device)
+
+        all_conv1_inputs = torch.arange(target.conv1.in_channels, device=target.conv1.weight.device)
+        _scatter_conv_weight(source.conv1, target.conv1, mid1_indices, all_conv1_inputs)
+        _scatter_batch_norm_subset(source.batch_norm1, target.batch_norm1, mid1_indices)
+
+        _scatter_conv_weight(source.conv2, target.conv2, mid2_indices, mid1_indices)
+        _scatter_batch_norm_subset(source.batch_norm2, target.batch_norm2, mid2_indices)
+
+        _scatter_conv_weight(source.conv3, target.conv3, output_indices, mid2_indices)
+        _scatter_batch_norm_subset(source.batch_norm3, target.batch_norm3, output_indices)
+
+        _copy_same_shape_module(
+            source.i_downsample,
+            target.i_downsample,
+            f"{block_name}.i_downsample",
+        )

@@ -1,0 +1,16 @@
+# .venv/bin/python scripts/launch_adaptive_pruning.py --config-name pruning_adaptive_day
+# Matched rerun of A1: same random initialization, 3 x 18% parameter budgets,
+# 20 + 15 + 20 + 15 + 20 + 60 = 150 total epochs. No extra fine-tuning.
+name: pruning_adaptive_day
+protocol: adaptive_lambda_v1
+jobs:
+  - A1_internal_p18
+# Keep each gate's penalty denominator at its original layer width across pruning.
+gate_regularization_normalization: initial_channels
+# Reuse only the verified validation reference and its ZERO-EPOCH initializer.
+dense_source: outputs/runs/20260907_134446_507828_pruning_dense_control
+hours: 4
+data: data
+evaluate_test: true
+run_history:
+  root_dir: outputs/runs

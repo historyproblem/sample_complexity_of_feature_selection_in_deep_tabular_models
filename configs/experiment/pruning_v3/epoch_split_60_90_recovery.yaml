@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/epoch_split_recovery_base
+  - _self_
+
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.0005
+    hard_drop: 0.001
+
+mlflow:
+  run_name: epoch_split_60_90_recovery
+
+run_history:
+  run_name: epoch_split_60_90_recovery

@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet101_tinyimagenet200
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: aig
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+training_arguments:
+  num_epochs: 240
+
+scheduler:
+  T_max: 240
+
+model:
+  lambda_coef: 0.01
+  bypass_on_zero_lambda: false
+  backbone:
+    resnet_block:
+      temperature: 1.0
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "best_practice_resnet101_aig_on_tinyimagenet200_lambda_${model.lambda_coef}"
+  tags:
+    model_type: "ResNet101_AIG"
+    method: "aig"
+    dataset: "tinyimagenet200"
+    recipe: "best_practice_resnet101_aig_on_tinyimagenet200"

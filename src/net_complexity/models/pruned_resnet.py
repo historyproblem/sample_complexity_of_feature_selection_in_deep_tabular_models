@@ -27,7 +27,7 @@ class CIFARPrunedGumbelBasicBlock(nn.Module):
 
     Channels in disabled_channels are completely excluded from conv/BN
     computation.  Their output values come from the shortcut connection
-    only - the same value that would have been passed through the identity
+    only — the same value that would have been passed through the identity
     (or zero-padded) skip connection in the original block.
 
     Because input and output retain the full `planes` dimensionality, this
@@ -50,14 +50,14 @@ class CIFARPrunedGumbelBasicBlock(nn.Module):
         active = [ch for ch in range(planes) if ch not in disabled]
         if not active:
             raise ValueError(
-                f"All {planes} channels are disabled - the residual branch "
+                f"All {planes} channels are disabled — the residual branch "
                 "would be empty. Provide at least one active channel."
             )
         n_active = len(active)
         self.planes = planes
         self.n_active = n_active
 
-        # Pruned residual branch operates on n_active channels only.
+        # Pruned residual branch — operates on n_active channels only
         self.conv1 = nn.Conv2d(
             in_planes, n_active, kernel_size=3, stride=stride, padding=1, bias=False
         )
@@ -67,7 +67,7 @@ class CIFARPrunedGumbelBasicBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm2d(n_active)
 
-        # Shortcut uses the same logic as CIFARBasicBlock (option A or B).
+        # Shortcut — same logic as CIFARBasicBlock (option A or B)
         self.shortcut: nn.Module = nn.Identity()
         if stride != 1 or in_planes != planes:
             if option == "A":
@@ -91,7 +91,7 @@ class CIFARPrunedGumbelBasicBlock(nn.Module):
                 raise ValueError("option must be 'A' or 'B'.")
 
         # active_selection[ch, j] = 1 iff active[j] == ch
-        # Used to scatter [B, n_active, H, W] to [B, planes, H, W] via einsum.
+        # Used to scatter [B, n_active, H, W] → [B, planes, H, W] via einsum.
         # Registered as buffer so it moves with .to(device) and is
         # saved in checkpoints, but is not a trainable parameter.
         active_sel = torch.zeros(planes, n_active)
@@ -112,7 +112,7 @@ class CIFARPrunedGumbelBasicBlock(nn.Module):
         # Scatter residual back to full planes dimension.
         # einsum is autograd-compatible and device-agnostic.
         # active_selection: [planes, n_active], res: [B, n_active, H, W]
-        # full_res: [B, planes, H, W]
+        # → full_res: [B, planes, H, W]
         full_res = torch.einsum("pn,bnhw->bphw", self.active_selection, res)
 
         return F.relu(self.shortcut(x) + full_res)

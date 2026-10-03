@@ -3,6 +3,9 @@ from .aig import AIGBlockGate
 from .efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .feature_selection import (
     AIGBottleneckLayer,
+    AIGRegularizationLoss,
+    PrunedBottleneck,
+    PrunedCIFARBasicBlock,
     CIFARGumbelBasicBlock,
     CIFARMaskedGumbelBasicBlock,
     CIFARSTGBasicBlock,
@@ -45,6 +48,9 @@ from .resnet import Block, Bottleneck, ResNet
 __all__ = [
     "AIGBlockGate",
     "AIGBottleneckLayer",
+    "AIGRegularizationLoss",
+    "PrunedBottleneck",
+    "PrunedCIFARBasicBlock",
     "AIGEfficientNetV2",
     "AIGEfficientNetV2M",
     "AIGEfficientNetV2S",

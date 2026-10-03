@@ -56,11 +56,25 @@ class AIGActivationsMetric(BaseMetric):
 
 class AIGFLOPsMetric(BaseMetric):
     """
-    Static and AIG-adjusted FLOPs estimate.
+    Static and AIG-adjusted FLOPs/parameter-count estimate.
 
-    `ComputeCollector` gives the full forward cost. For shape-safe AIG blocks we
-    additionally estimate skipped residual-branch FLOPs from the latest hard gate
+    `ComputeCollector` gives the full forward cost (and, per layer, the
+    parameter count). For shape-safe AIG blocks we additionally estimate
+    skipped residual-branch FLOPs *and parameters* from the latest hard gate
     values and report the adjusted cost.
+
+    The parameter numbers answer a different question than
+    ``aig_static_flops``/params reported elsewhere (e.g.
+    ``WeightStatisticsMetric``): classic AIG never removes a weight tensor
+    from the model — ``aig_static_params`` is therefore constant across a
+    whole t-sweep, same as the raw parameter count. ``aig_active_params`` is
+    instead the *expected* number of parameters actually exercised by a
+    single inference, averaging over the dataset's realized per-block gate
+    decisions — i.e. an always-on block's weights count fully, a block open
+    for e.g. 30% of validation images contributes 30% of its branch weights
+    to the expectation. It is an average over inputs, not a property of any
+    single forward pass (a real input either fully uses or fully skips a
+    given block's branch).
     """
 
     def __init__(
@@ -97,19 +111,25 @@ class AIGFLOPsMetric(BaseMetric):
 
         gated_branch_macs = 0.0
         active_branch_macs = 0.0
+        gated_branch_params = 0.0
+        active_branch_params = 0.0
         gate_means = []
 
         for name, module in aig_modules.items():
-            branch_macs = float(self._branch_macs(name, per_layer))
-            if branch_macs <= 0.0:
+            branch_macs = float(self._branch_metric_sum(name, per_layer, "macs"))
+            branch_params = float(self._branch_metric_sum(name, per_layer, "num_params"))
+            if branch_macs <= 0.0 and branch_params <= 0.0:
                 continue
 
             gate_mean = self._dataset_gate_mean(name, module)
             gated_branch_macs += branch_macs
             active_branch_macs += branch_macs * gate_mean
+            gated_branch_params += branch_params
+            active_branch_params += branch_params * gate_mean
             gate_means.append(gate_mean)
 
         skipped_branch_macs = max(gated_branch_macs - active_branch_macs, 0.0)
+        skipped_branch_params = max(gated_branch_params - active_branch_params, 0.0)
         batch_size = max(int(model_metrics.batch_size), 1)
         executed_macs_per_image = float(model_metrics.macs) / batch_size
         ideal_routed_macs_per_image = max(
@@ -138,6 +158,9 @@ class AIGFLOPsMetric(BaseMetric):
         skipped_branch_flops = 2.0 * skipped_branch_macs
         active_flops = max(static_flops - skipped_branch_flops, 0.0)
 
+        static_params = float(sum(layer_metrics.num_params for layer_metrics in per_layer.values()))
+        active_params = max(static_params - skipped_branch_params, 0.0)
+
         return {
             **canonical,
             "aig_static_flops": static_flops,
@@ -156,6 +179,23 @@ class AIGFLOPsMetric(BaseMetric):
             "aig_flops_active_ratio": (
                 active_flops / static_flops
                 if static_flops > 0.0
+                else 1.0
+            ),
+            # Params, unlike FLOPs, don't scale with batch_size — a single
+            # architecture trace already gives the whole-model count, so
+            # there's no "_per_sample" variant here.
+            "aig_static_params": static_params,
+            "aig_active_params": active_params,
+            "aig_skipped_params": skipped_branch_params,
+            "aig_gated_branch_params": gated_branch_params,
+            "aig_params_skip_ratio": (
+                skipped_branch_params / static_params
+                if static_params > 0.0
+                else 0.0
+            ),
+            "aig_params_active_ratio": (
+                active_params / static_params
+                if static_params > 0.0
                 else 1.0
             ),
             "aig_num_gated_blocks": len(gate_means),
@@ -198,12 +238,17 @@ class AIGFLOPsMetric(BaseMetric):
         return self._gate_mean(module)
 
     @staticmethod
-    def _branch_macs(name: str, per_layer) -> int:
+    def _branch_metric_sum(name: str, per_layer, attr: str) -> int:
+        """Sum ``getattr(layer_metrics, attr)`` (e.g. "macs"/"num_params")
+        over the sub-modules belonging to the gated residual branch of block
+        ``name`` — everything the AIG gate can skip, excluding the always-on
+        stem/downsample/fc.
+        """
         if name.endswith(".gate"):
             block_prefix = name[: -len(".gate")]
             branch_prefix = f"{block_prefix}.branch."
             return sum(
-                layer_metrics.macs
+                getattr(layer_metrics, attr)
                 for layer_name, layer_metrics in per_layer.items()
                 if layer_name.startswith(branch_prefix)
             )
@@ -216,7 +261,7 @@ class AIGFLOPsMetric(BaseMetric):
             f"{name}.conv3",
         )
         return sum(
-            layer_metrics.macs
+            getattr(layer_metrics, attr)
             for layer_name, layer_metrics in per_layer.items()
             if layer_name.startswith(legacy_prefixes)
         )

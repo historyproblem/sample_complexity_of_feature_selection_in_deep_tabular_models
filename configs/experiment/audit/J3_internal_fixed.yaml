@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /experiment/audit/_base
+  - _self_
+model:
+  backbone:
+    resnet_block:
+      gate_output: false
+      gate_internal_width: true
+cyclic_channel_pruning:
+  max_param_fraction: 0.18
+  min_keep_ratio: 0.5
+mlflow:
+  run_name: J3_internal_fixed

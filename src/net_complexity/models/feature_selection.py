@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import re
 from functools import partial
@@ -6,15 +8,49 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .aig import (
-    AIGBlockGate,
-    bernoulli_kl_from_closed_open_log_odds,
-    entropy_regularization_sign,
-    normalize_posterior_kl_reduction,
-)
+from .aig import AIGBlockGate, entropy_regularization_sign
 from .cifar_resnet import CIFARBasicBlock, CIFARResNet
 from .outputs import ClassifModelOutput
 from .resnet import Block, Bottleneck, ResNet
+
+
+_VALID_BACKBONE_WEIGHT_INITS = {"default", "paper_kaiming_normal"}
+_VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS = {"enabled_channels", "initial_channels"}
+
+
+def _normalize_channel_regularization(value: str) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in _VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS:
+        allowed = ", ".join(sorted(_VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS))
+        raise ValueError(
+            f"regularization_normalization must be one of: {allowed}. Got: {value!r}"
+        )
+    return normalized
+
+
+def apply_paper_style_conv_init(model: nn.Module) -> None:
+    """Kaiming-normal Conv2d init matching the reference ConvNet-AIG backbone.
+
+    ``convnet_aig.py`` initializes every Conv2d as
+    ``weight.data.normal_(0, sqrt(2. / (kh * kw * out_channels)))``, then
+    overwrites the gate's *final* router conv ("fc2") with a low-variance
+    ``normal_(0, 0.001)`` for its low-variance gate init. We reproduce the
+    same net effect: apply the general init everywhere except each
+    ``AIGBlockGate``'s final router conv, which keeps whatever
+    ``AIGBlockGate.reset_parameters()`` already set (that already matches the
+    reference's low-variance gate init exactly).
+
+    This is opt-in (``ClassificationFeatureSelectionWrapper(backbone_weight_init=
+    "paper_kaiming_normal")``) — PyTorch's default Conv2d init (kaiming-uniform)
+    remains the default for every existing config that doesn't request this.
+    """
+    gate_final_conv_ids = {
+        id(gate.router[-1]) for gate in model.modules() if isinstance(gate, AIGBlockGate)
+    }
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d) and id(module) not in gate_final_conv_ids:
+            fan = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+            nn.init.normal_(module.weight, mean=0.0, std=math.sqrt(2.0 / fan))
 
 
 class ClassificationFeatureSelectionWrapper(nn.Module):
@@ -24,7 +60,8 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
                  gumbel_init_mode: str = "auto",
                  bypass_on_zero_lambda: bool = True,
                  entropy_regularization: str = "disabled",
-                 posterior_kl_reduction: str = "mean",
+                 entropy_regularization_coef: float = 1.0,
+                 backbone_weight_init: str = "default",
                  criterion=nn.CrossEntropyLoss(),
                  regularization_loss=lambda x: 0):
         super().__init__()
@@ -37,9 +74,15 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.entropy_regularization_sign = entropy_regularization_sign(
             self.entropy_regularization
         )
-        self.posterior_kl_reduction = normalize_posterior_kl_reduction(
-            posterior_kl_reduction
-        )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
+        self.backbone_weight_init = str(backbone_weight_init).strip().lower()
+        if self.backbone_weight_init not in _VALID_BACKBONE_WEIGHT_INITS:
+            allowed = ", ".join(sorted(_VALID_BACKBONE_WEIGHT_INITS))
+            raise ValueError(
+                f"backbone_weight_init must be one of: {allowed}. Got: {backbone_weight_init!r}"
+            )
+        if self.backbone_weight_init == "paper_kaiming_normal":
+            apply_paper_style_conv_init(self.backbone)
         self.regularization_loss = regularization_loss
         self._initialize_gumbel_layers()
         self.set_aig_bypass(self._should_bypass_gumbel())
@@ -49,31 +92,32 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         ce_loss = self.criterion(logits, y)
         mean_p_open = None
         negative_entropy = None
-        entropy_enabled = self.entropy_regularization != "disabled"
-        if float(self.lambda_coef) == 0.0 and not entropy_enabled:
+        entropy_active = self._entropy_regularization_active()
+        if float(self.lambda_coef) == 0.0 and not entropy_active:
             raw_reg_loss = logits.new_zeros(())
             reg_loss = raw_reg_loss
             loss = ce_loss
         else:
             posterior_terms = get_AIG_posterior_regularization_terms(self.backbone)
+            if posterior_terms is None and self.entropy_regularization != "disabled":
+                # Channel-granularity (Gumbel) counterpart of the AIG posterior path.
+                # Gated on entropy_regularization so that every existing Gumbel
+                # recipe (entropy_regularization defaults to "disabled") keeps
+                # using its configured `regularization_loss` callable unchanged.
+                posterior_terms = get_gumbel_posterior_regularization_terms(self.backbone)
             if posterior_terms is not None:
                 mean_p_open, negative_entropy = posterior_terms
-                if self.entropy_regularization == "bernoulli_kl":
-                    reg_loss = bernoulli_kl_from_closed_open_log_odds(
-                        mean_p_open,
-                        negative_entropy,
-                        self.lambda_coef,
+                reg_loss = (
+                    self.lambda_coef * mean_p_open
+                    + (
+                        self.entropy_regularization_sign
+                        * self.entropy_regularization_coef
+                        * negative_entropy
                     )
-                    if self.posterior_kl_reduction == "sum":
-                        reg_loss = reg_loss * len(_get_unique_aig_gates(self.backbone))
-                else:
-                    reg_loss = (
-                        self.lambda_coef * mean_p_open
-                        + self.entropy_regularization_sign * negative_entropy
-                    )
+                )
                 raw_reg_loss = mean_p_open
                 loss = ce_loss + reg_loss
-            elif entropy_enabled:
+            elif entropy_active:
                 raise ValueError(
                     "AIG entropy regularization requires every gate to use "
                     "gate_regularization='l1_probability'."
@@ -93,11 +137,17 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
             logits=logits
         )
 
+    def _entropy_regularization_active(self) -> bool:
+        return (
+            self.entropy_regularization != "disabled"
+            and self.entropy_regularization_coef != 0.0
+        )
+
     def _should_bypass_gumbel(self) -> bool:
         return (
             self.bypass_on_zero_lambda
             and float(self.lambda_coef) == 0.0
-            and self.entropy_regularization == "disabled"
+            and not self._entropy_regularization_active()
         )
 
     def _resolve_gumbel_init_mode(self) -> str:
@@ -145,7 +195,7 @@ class ClassificationFeatureSelectionWrapper(nn.Module):
         self.lambda_coef = float(lambda_coef)
         if bypass_gumbel is None:
             bypass_gumbel = self._should_bypass_gumbel()
-        elif self.entropy_regularization != "disabled":
+        elif self._entropy_regularization_active():
             bypass_gumbel = False
         self.set_gumbel_bypass(bool(bypass_gumbel))
         self.set_aig_bypass(bool(bypass_gumbel))
@@ -263,6 +313,9 @@ class GumbelLayer(nn.Module):
         if beta < 0:
             raise ValueError("beta must be non-negative for GumbelLayer.")
         self.logits = nn.Parameter(torch.empty(input_dim, 2))
+        # Permanent original width, independent of the number of survivors.
+        self.register_buffer("initial_channels_count", torch.tensor(input_dim, dtype=torch.int64))
+        self.normalization_metadata_status = "native"
         self.temperature = temperature
         self.beta = float(beta)
         self.gate_threshold = float(gate_threshold)
@@ -416,6 +469,59 @@ class GumbelLayer(nn.Module):
     def _raw_selection_probs(self) -> torch.Tensor:
         return F.softmax(self.logits, dim=1)[:, 1]
 
+    @property
+    def initial_channels(self) -> int:
+        return int(self.initial_channels_count.item())
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "initial_channels_count"
+        if key not in state_dict:
+            # Legacy carriers were always full width. This migrates only the
+            # known denominator; it does not claim an exact runtime snapshot.
+            state_dict[key] = self.initial_channels_count.detach().clone()
+            self.normalization_metadata_status = "legacy_full_width_inferred"
+        width = state_dict[key]
+        if width.dtype != torch.int64 or width.numel() != 1 or int(width.item()) != self.initial_channels:
+            error_msgs.append(f"{prefix}original channel width disagrees with constructed gate")
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
+    def get_permanent_survivor_mask(self) -> torch.Tensor:
+        return torch.ones(self.logits.shape[0], device=self.logits.device, dtype=torch.bool)
+
+    def get_raw_selection_probs(self) -> torch.Tensor:
+        """Unmasked posterior in the forward dtype, before legacy open bias."""
+        return self._raw_selection_probs().detach()
+
+    def get_effective_selection_probs(self) -> torch.Tensor:
+        """Unmasked posterior including bias/bypass; permanent mask is separate."""
+        if self._bypass:
+            return self.logits.new_ones(self.logits.shape[0])
+        return F.softmax(self._effective_logits(), dim=1)[:, 1].detach()
+
+    def _hard_decision_from_probs(self, probabilities: torch.Tensor) -> torch.Tensor:
+        return probabilities > self.gate_threshold
+
+    def get_hard_gate_decisions(self, *, raw: bool = False,
+                               apply_permanent_mask: bool = True) -> torch.Tensor:
+        """Exact deterministic eval decision: open iff probability > threshold.
+
+        A stochastic sample or a soft predictor is never a pruning decision.
+        RAW decisions ignore runtime bias/bypass, but retain the same precision.
+        """
+        if raw:
+            decision = self._hard_decision_from_probs(self.get_raw_selection_probs())
+        elif self._bypass or self.eval_gate_mode == "ones":
+            decision = torch.ones_like(self.logits[:, 1], dtype=torch.bool)
+        else:
+            if self.eval_gate_mode not in {"deterministic_hard", "ste_hard"}:
+                raise ValueError("Hard gate decisions require deterministic hard eval runtime")
+            decision = self._hard_decision_from_probs(self.get_effective_selection_probs())
+        if apply_permanent_mask:
+            decision = decision & self.get_permanent_survivor_mask()
+        return decision
+
     def _revive_mask(self, probs_on: torch.Tensor) -> torch.Tensor:
         return (probs_on > self._open_bias_p_min) & (probs_on < self._open_bias_p_max)
 
@@ -457,8 +563,10 @@ class GumbelLayer(nn.Module):
         return probs_on.expand(batch_size, -1)
 
     def _hard_threshold_mask(self, batch_size: int) -> torch.Tensor:
-        probs_on = self._selection_probs(batch_size)
-        return (probs_on > self.gate_threshold).float()
+        # Shared probability/threshold contract with checkpoint selection. Keep
+        # the historic forward dtype; do not upcast logits before thresholding.
+        probs_on = self.get_effective_selection_probs()
+        return self._hard_decision_from_probs(probs_on).float().unsqueeze(0).expand(batch_size, -1)
 
     def _sample_gumbel_like(self, template_tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
         uniform_samples = torch.rand_like(template_tensor)
@@ -517,6 +625,23 @@ class GumbelLayer(nn.Module):
             return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
         return torch.mean(probs)
+
+    def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return mean p(open) and mean negative entropy of the per-channel posterior.
+
+        Channel-granularity counterpart of ``AIGBlockGate.posterior_regularization_terms``
+        (see ``feature_selection.get_gumbel_posterior_regularization_terms``), used to
+        drive the same ``entropy_regularization`` / ``entropy_regularization_coef``
+        knobs on ``ClassificationFeatureSelectionWrapper`` for Gumbel channel gates.
+        """
+        if self._bypass:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        log_probs = F.log_softmax(self.logits, dim=-1)  # [num_channels, 2]
+        probs = log_probs.exp()
+        mean_p_open = probs[:, 1].mean()
+        negative_entropy = (probs * log_probs).sum(dim=-1).mean()
+        return mean_p_open, negative_entropy
 
     # ACTUAL: probability readout used by current metrics/logging in the main_gumbel pipeline.
     def get_selection_probs(self) -> torch.Tensor:
@@ -691,6 +816,137 @@ class GumbelBottleneckLayer(Bottleneck):
         return x
 
 
+class MaskedGumbelBottleneckLayer(Bottleneck):
+    """Bottleneck block with MaskedGumbelLayer channel gate(s).
+
+    Channel-granularity analogue of ``AIGBottleneckLayer`` / ``GumbelBottleneckLayer``,
+    used by the iterative channel-pruning search phase
+    (``training.cyclic_channel_pruning``): channels confirmed dead in earlier
+    cycles are passed in via ``disabled_channels`` and stay permanently masked
+    (see ``MaskedGumbelLayer``), while the remaining channels keep a live,
+    trainable gate for further search.
+
+    The ``gumbel_layer`` ("output" gate) sits on conv3's output, right before
+    the residual sum with identity — closing a channel there degenerates
+    exactly to identity for that channel. It is always present.
+
+    Optionally (``gate_internal_width=True``), two more MaskedGumbelLayer
+    gates cover the block's internal width, which the output gate alone
+    cannot reach — conv1/conv2 stay at full width regardless of how much of
+    conv3's output is pruned (see ``pruned_bottleneck.py``'s module
+    docstring):
+
+      * ``mid1_gumbel_layer`` — conv1's output / conv2's input boundary.
+        Closing a channel here removes one of conv1's output filters and the
+        corresponding input channel of conv2. There is no "revert to
+        identity" here (these channels never reach the shortcut sum) — this
+        is a genuine narrowing of the block's internal representation, the
+        same kind of channel pruning DepGraph/most structural-pruning
+        methods do.
+      * ``mid2_gumbel_layer`` — conv2's output / conv3's input boundary,
+        same idea, one boundary later.
+
+    These two gates are independent decisions from ``gumbel_layer`` and from
+    each other: conv2 mixes every input channel into every output channel
+    (a full 3x3 conv, not a per-channel identity map), so a channel index at
+    the conv1-conv2 boundary and a channel index at the conv2-conv3 boundary
+    refer to unrelated features, even though both boundaries happen to share
+    the same width (``out_channels``).
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        i_downsample=None,
+        stride=1,
+        temperature: float = 1.0,
+        beta: float = 1.0,
+        force_ones_mask: bool = False,
+        deterministic_soft_mask: bool = False,
+        deterministic_hard_mask: bool = False,
+        train_gate_mode: str | None = None,
+        eval_gate_mode: str | None = None,
+        gate_threshold: float = 0.5,
+        disabled_channels: list[int] | None = None,
+        gate_internal_width: bool = False,
+        gate_output: bool = True,
+        disabled_mid1_channels: list[int] | None = None,
+        disabled_mid2_channels: list[int] | None = None,
+        regularization_normalization: str = "enabled_channels",
+    ):
+        regularization_normalization = _normalize_channel_regularization(
+            regularization_normalization
+        )
+        super().__init__(in_channels, out_channels, i_downsample=i_downsample, stride=stride)
+        self.gate_output = bool(gate_output)
+        if not self.gate_output and disabled_channels:
+            raise ValueError("Cannot disable output channels with gate_output=False.")
+        self.gumbel_layer = MaskedGumbelLayer(
+            input_dim=out_channels * self.expansion,
+            temperature=temperature,
+            beta=beta,
+            force_ones_mask=force_ones_mask,
+            deterministic_soft_mask=deterministic_soft_mask,
+            deterministic_hard_mask=deterministic_hard_mask,
+            train_gate_mode=train_gate_mode,
+            eval_gate_mode=eval_gate_mode,
+            gate_threshold=gate_threshold,
+            disabled_channels=disabled_channels,
+            regularization_normalization=regularization_normalization,
+        ) if self.gate_output else nn.Identity()
+
+        self.gate_internal_width = bool(gate_internal_width)
+        self.mid1_gumbel_layer = None
+        self.mid2_gumbel_layer = None
+        if self.gate_internal_width:
+            self.mid1_gumbel_layer = MaskedGumbelLayer(
+                input_dim=out_channels,
+                temperature=temperature,
+                beta=beta,
+                force_ones_mask=force_ones_mask,
+                deterministic_soft_mask=deterministic_soft_mask,
+                deterministic_hard_mask=deterministic_hard_mask,
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+                gate_threshold=gate_threshold,
+                disabled_channels=disabled_mid1_channels,
+                regularization_normalization=regularization_normalization,
+            )
+            self.mid2_gumbel_layer = MaskedGumbelLayer(
+                input_dim=out_channels,
+                temperature=temperature,
+                beta=beta,
+                force_ones_mask=force_ones_mask,
+                deterministic_soft_mask=deterministic_soft_mask,
+                deterministic_hard_mask=deterministic_hard_mask,
+                train_gate_mode=train_gate_mode,
+                eval_gate_mode=eval_gate_mode,
+                gate_threshold=gate_threshold,
+                disabled_channels=disabled_mid2_channels,
+                regularization_normalization=regularization_normalization,
+            )
+
+    def forward(self, x):
+        identity = x
+
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+        if self.mid1_gumbel_layer is not None:
+            x = self.mid1_gumbel_layer(x)
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+        if self.mid2_gumbel_layer is not None:
+            x = self.mid2_gumbel_layer(x)
+        x = self.batch_norm3(self.conv3(x))
+        x = self.gumbel_layer(x)
+
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
 # ACTUAL: current Gumbel block used by main_gumbel on CIFAR.
 class CIFARGumbelBasicBlock(CIFARBasicBlock):
     def __init__(
@@ -731,10 +987,28 @@ class CIFARGumbelBasicBlock(CIFARBasicBlock):
 
 
 class MaskedGumbelLayer(GumbelLayer):
-    """GumbelLayer with permanently disabled channels.
+    """GumbelLayer that permanently disables a subset of channels.
 
-    Disabled channels have zero gates, are excluded from the regularization
-    mean, and are reported as zero in get_selection_probs().
+    Disabled channels: gate is always 0 regardless of learned logits.
+    They contribute zero to regularisation and are reported as zero in
+    get_selection_probs(). Disabled logits receive no gradient from gating
+    or regularisation (an optimizer may still apply weight decay).
+
+    ``regularization_normalization="enabled_channels"`` preserves the historic
+    mean over the surviving channels. ``"initial_channels"`` divides their
+    probability sum by the original gate width instead. Iterative pruning keeps
+    full-width gate logits in its search carrier and transfers physical weights
+    back into it, so this denominator stays fixed across cumulative masks. It
+    neither rescales lambda nor changes the reported selection probabilities.
+    The mode is constructor configuration, restored from saved config. The
+    original width is a persistent checkpoint buffer with explicit migration
+    from legacy full-width carriers; checkpoints also store the model's M0.
+
+    Two ways to disable channels:
+      1. Pass disabled_channels at construction time (same list for every
+         block when set via the YAML resnet_block config).
+      2. Call apply_channel_mask() from channel_pruning after construction
+         to set per-layer channel sets loaded from a previous run.
     """
 
     def __init__(
@@ -749,7 +1023,11 @@ class MaskedGumbelLayer(GumbelLayer):
         eval_gate_mode: str | None = None,
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
+        regularization_normalization: str = "enabled_channels",
     ):
+        regularization_normalization = _normalize_channel_regularization(
+            regularization_normalization
+        )
         super().__init__(
             input_dim=input_dim,
             temperature=temperature,
@@ -761,11 +1039,28 @@ class MaskedGumbelLayer(GumbelLayer):
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
         )
+        self._regularization_normalization = regularization_normalization
         channel_mask = torch.ones(input_dim)
         for channel in disabled_channels or []:
             if 0 <= int(channel) < input_dim:
                 channel_mask[int(channel)] = 0.0
         self.register_buffer("channel_mask", channel_mask)
+
+    @property
+    def regularization_normalization(self) -> str:
+        return self._regularization_normalization
+
+    def _regularization_denominator(self):
+        if self.regularization_normalization == "initial_channels":
+            return self.initial_channels
+        return self.channel_mask.sum()
+
+    def get_permanent_survivor_mask(self) -> torch.Tensor:
+        if self.channel_mask.shape != self.logits[:, 1].shape or not bool(
+            ((self.channel_mask == 0) | (self.channel_mask == 1)).all().item()
+        ):
+            raise ValueError("Permanent channel mask must be binary and match original ids")
+        return self.channel_mask.detach().bool()
 
     def compute_gates(self, x: torch.Tensor) -> torch.Tensor:
         gates = super().compute_gates(x)
@@ -773,22 +1068,52 @@ class MaskedGumbelLayer(GumbelLayer):
         return gates * mask
 
     def regularization_loss(self) -> torch.Tensor:
-        if self._bypass:
+        # The historical enabled-channel path regularizes even while bypassed;
+        # retain that behavior for old recipes. The opt-in path follows the
+        # base GumbelLayer/posterior convention: bypassed gates have no penalty.
+        if self._bypass and self.regularization_normalization == "initial_channels":
             return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
-        channel_mask = self.channel_mask.to(dtype=probs.dtype)
-        total_enabled = channel_mask.sum()
-        if float(total_enabled.item()) == 0.0:
+        denominator = self._regularization_denominator()
+        if denominator == 0:
             return self.logits.new_zeros(())
-        return (probs * channel_mask).sum() / total_enabled
+        return (probs * self.channel_mask).sum() / denominator
+
+    def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return open-probability and negative-entropy sums, equally normalized.
+
+        With initial_channels, the historically named ``mean_p_open`` is the
+        surviving probability mass per original channel, not the mean among
+        survivors. Entropy uses the same fixed denominator so its per-survivor
+        coefficient does not jump after pruning either. Metrics continue to use
+        get_selection_probs(), independent of this regularization convention.
+        """
+        if self._bypass:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        denominator = self._regularization_denominator()
+        if denominator == 0:
+            zero = self.logits.new_zeros(())
+            return zero, zero
+        log_probs = F.log_softmax(self.logits, dim=-1)
+        probs = log_probs.exp()
+        mean_p_open = (probs[:, 1] * self.channel_mask).sum() / denominator
+        per_channel_negative_entropy = (probs * log_probs).sum(dim=-1)
+        negative_entropy = (per_channel_negative_entropy * self.channel_mask).sum() / denominator
+        return mean_p_open, negative_entropy
 
     def get_selection_probs(self) -> torch.Tensor:
         probs = super().get_selection_probs()
-        return probs * self.channel_mask.to(dtype=probs.dtype)
+        return probs * self.channel_mask
 
 
 class CIFARMaskedGumbelBasicBlock(CIFARBasicBlock):
-    """CIFAR BasicBlock with a MaskedGumbelLayer for per-channel pruning."""
+    """CIFAR BasicBlock with a MaskedGumbelLayer for per-channel gating.
+
+    Functionally identical to CIFARGumbelBasicBlock but uses
+    MaskedGumbelLayer, which supports permanently disabling channels
+    identified by a prior Gumbel training run.
+    """
 
     def __init__(
         self,
@@ -830,14 +1155,63 @@ class CIFARMaskedGumbelBasicBlock(CIFARBasicBlock):
 
 
 class SkippedCIFARBasicBlock(CIFARBasicBlock):
-    """CIFARBasicBlock whose residual branch is permanently disabled."""
+    """CIFARBasicBlock with its residual branch permanently disabled.
+
+    Forward pass returns only the shortcut output (identity or spatially
+    downsampled), making this block a no-op residual.  All conv/BN weights
+    are retained for checkpoint compatibility but never executed.
+
+    Use this for ablation studies where specific blocks are excluded from
+    the residual computation while preserving the overall network depth.
+    """
 
     def forward(self, x):
         return F.relu(self.shortcut(x))
 
 
 class SkippedBottleneck(Bottleneck):
-    """Bottleneck whose residual branch is permanently disabled."""
+    """Bottleneck with its residual branch permanently disabled.
+
+    Forward pass returns only the shortcut output (identity or downsampled).
+    All conv/BN weights are retained for checkpoint compatibility but never executed.
+    """
+
+    def forward(self, x):
+        if self.i_downsample is not None:
+            x = self.i_downsample(x)
+        return self.relu(x)
+
+
+class PrunedCIFARBasicBlock(nn.Module):
+    """CIFARBasicBlock with its residual branch physically removed.
+
+    Unlike SkippedCIFARBasicBlock, this class does NOT inherit the conv/BN
+    parameters — they are discarded entirely, reducing model parameter count.
+    Only the shortcut projection is retained when stride != 1 (option B).
+    """
+
+    def __init__(self, shortcut: nn.Module | None = None) -> None:
+        super().__init__()
+        self.shortcut = shortcut if shortcut is not None else nn.Identity()
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return self.relu(self.shortcut(x))
+
+
+class PrunedBottleneck(nn.Module):
+    """Bottleneck block with its residual branch physically removed.
+
+    Unlike SkippedBottleneck, this class does NOT inherit conv/BN parameters —
+    they are discarded entirely, reducing model parameter count and memory.
+    Only the downsample projection is retained when the block changes spatial
+    dimensions or channel count (stride != 1 or in_channels != out_channels * 4).
+    """
+
+    def __init__(self, i_downsample: nn.Module | None = None) -> None:
+        super().__init__()
+        self.i_downsample = i_downsample
+        self.relu = nn.ReLU()
 
     def forward(self, x):
         if self.i_downsample is not None:
@@ -957,6 +1331,116 @@ def get_AIG_regularization_loss(model: nn.Module):
     return sum(reg_terms) / len(reg_terms)
 
 
+class AIGRegularizationLoss:
+    """Callable regularization loss over AIG gate activations.
+
+    Supports L1 (linear penalty on mean gate probability, encourages sparser gates)
+    and L2 (quadratic penalty, matches the legacy ``get_AIG_regularization_loss`` behaviour).
+
+    Args:
+        norm: ``"l1"`` or ``"l2"`` (default).
+
+    Example YAML usage::
+
+        model:
+          regularization_loss:
+            _target_: net_complexity.wrappers.AIGRegularizationLoss
+            norm: l1
+    """
+
+    _SUPPORTED_NORMS = frozenset({"l1", "l2"})
+
+    def __init__(self, norm: str = "l2") -> None:
+        if norm not in self._SUPPORTED_NORMS:
+            raise ValueError(
+                f"AIGRegularizationLoss: norm must be one of "
+                f"{sorted(self._SUPPORTED_NORMS)}, got {norm!r}"
+            )
+        self.norm = norm
+
+    def __call__(self, model: nn.Module):
+        aig_modules = _get_aig_modules(model)
+        activations = [
+            module.activations
+            for module in aig_modules.values()
+            if getattr(module, "activations", None) is not None
+        ]
+        if not activations:
+            return 0.0
+
+        reg_loss = 0.0
+        for act in activations:
+            mean_act = act.mean()
+            reg_loss = reg_loss + (mean_act.abs() if self.norm == "l1" else mean_act ** 2)
+        return reg_loss / len(activations)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(norm={self.norm!r})"
+
+
+class AIGTargetRateLoss:
+    """Per-layer target-rate regularizer for AIG gates (Eq. 10, Veit & Belongie, 2020).
+
+    Faithful reproduction of the original ConvNet-AIG training loss
+    (https://github.com/andreasveit/convnet-aig, ``train_img.py``): for every
+    gated block whose target rate is below 1, penalize the squared deviation
+    between the target rate and the batch-mean gate activation. Blocks listed
+    in ``always_on_blocks`` keep a live, *unpenalized* gate — this is not the
+    same as ``set_bypass(True)``: the gate still samples stochastically and can
+    close if the classification loss favors it, it is simply excluded from the
+    target-rate penalty (matching the paper's downsampling-layer schedule).
+
+    This is the "classic AIG" baseline loss, kept separate from
+    ``AIGRegularizationLoss`` / the ``entropy_regularization`` mechanism, which
+    are this project's own contribution.
+
+    Args:
+        target_rate: Uniform target rate applied to every gated block not
+            listed in ``always_on_blocks``.
+        always_on_blocks: 0-based indices of gated blocks (in the order
+            returned by ``get_AIG_modules``, i.e. network execution order) to
+            exclude from the penalty.
+    """
+
+    def __init__(
+        self,
+        target_rate: float = 0.7,
+        always_on_blocks: tuple[int, ...] | list[int] = (),
+    ) -> None:
+        if not 0.0 <= target_rate <= 1.0:
+            raise ValueError("target_rate must be within [0.0, 1.0].")
+        self.target_rate = float(target_rate)
+        self.always_on_blocks = frozenset(int(i) for i in always_on_blocks)
+
+    def __call__(self, model: nn.Module):
+        aig_modules = _get_aig_modules(model)
+        activations = [
+            module.activations
+            for module in aig_modules.values()
+            if getattr(module, "activations", None) is not None
+        ]
+        if not activations:
+            return 0.0
+
+        deviations = [
+            (self.target_rate - activation.mean()) ** 2
+            for index, activation in enumerate(activations)
+            if index not in self.always_on_blocks
+        ]
+        if not deviations:
+            return activations[0].new_zeros(())
+
+        # Normalized by the total number of gated blocks (including always-on
+        # ones), matching the reference implementation's `acts / len(activation_rates)`.
+        return sum(deviations) / len(activations)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(target_rate={self.target_rate!r}, "
+            f"always_on_blocks={sorted(self.always_on_blocks)!r})"
+        )
+
+
 def get_AIG_posterior_regularization_terms(
     model: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -980,6 +1464,30 @@ def _get_unique_aig_gates(model: nn.Module) -> list[AIGBlockGate]:
         gate = module if isinstance(module, AIGBlockGate) else module.gate
         gates_by_id[id(gate)] = gate
     return list(gates_by_id.values())
+
+
+def get_gumbel_posterior_regularization_terms(
+    model: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Channel-granularity counterpart of ``get_AIG_posterior_regularization_terms``.
+
+    Aggregates ``GumbelLayer.posterior_regularization_terms()`` (normalized
+    p(open) and negative entropy) across every Gumbel selector in the model, weighting
+    each layer equally — the same convention as ``get_gumbel_loss``. Returns
+    ``None`` when the model has no Gumbel selectors so callers can fall back to
+    a plain ``regularization_loss`` callable. A masked gate configured with
+    ``initial_channels`` contributes probability mass per original channel,
+    not mean probability among survivors.
+    """
+    gumbel_modules = _get_gumbel_modules(model)
+    if not gumbel_modules:
+        return None
+
+    terms = [module.posterior_regularization_terms() for module in gumbel_modules.values()]
+    denominator = get_gate_normalization_metadata(model)["M0"]
+    mean_p_open = torch.stack([term[0] for term in terms]).sum() / denominator
+    negative_entropy = torch.stack([term[1] for term in terms]).sum() / denominator
+    return mean_p_open, negative_entropy
 
 
 def _collect_modules_by_type(model: nn.Module, module_types, buff=None, prefix: str = None):
@@ -1055,6 +1563,56 @@ def get_gumbel_modules(model: nn.Module):
     return _get_gumbel_modules(model)
 
 
+def get_gate_normalization_metadata(model: nn.Module) -> dict:
+    """Snapshot immutable original widths and boundary count for checkpoints.
+
+    A physical model has no gate contract and zero gate loss. A search carrier
+    keeps every original boundary, including an empty boundary's zero term.
+    """
+    modules = {name: gate for name, gate in model.named_modules()
+               if isinstance(gate, GumbelLayer)}
+    widths = {name: gate.initial_channels for name, gate in modules.items()}
+    stored = getattr(model, "_original_gate_widths", None)
+    if stored is None:
+        model._original_gate_widths = dict(widths)
+    elif stored != widths:
+        raise ValueError("Original gate boundaries/widths changed after contract initialization")
+    normalizations = {name: getattr(gate, "regularization_normalization", "initial_channels")
+                      for name, gate in modules.items()}
+    return {"version": 1, "M0": len(widths), "n_b0": widths,
+            "normalization": normalizations,
+            "scaling_contract": ("survivor_equivalent_v1" if all(
+                value == "initial_channels" for value in normalizations.values())
+                else "legacy_or_mixed_normalization")}
+
+
+def validate_gate_normalization_metadata(model: nn.Module, metadata: dict) -> None:
+    expected = get_gate_normalization_metadata(model)
+    if metadata != expected:
+        raise ValueError("Checkpoint original gate widths/M0/normalization contract mismatch")
+
+
+def get_gate_regularization_diagnostics(model: nn.Module, alpha_base: float) -> dict:
+    """Log the survivor-equivalent form without applying a second alpha decay."""
+    metadata = get_gate_normalization_metadata(model)
+    boundaries = {}
+    for name, gate in model.named_modules():
+        if not isinstance(gate, GumbelLayer):
+            continue
+        survivor = gate.get_permanent_survivor_mask()
+        n0, nt = gate.initial_channels, int(survivor.sum().item())
+        ratio = nt / n0 if n0 else 0.0
+        boundaries[name] = {
+            "n_b0": n0, "n_bt": nt, "r_b": ratio,
+            "normalization": metadata["normalization"][name],
+            "mean_survivor_p_raw": float(gate.get_raw_selection_probs()[survivor].mean().item()) if nt else None,
+            "lambda_effective": float(alpha_base) * (ratio if metadata["normalization"][name] == "initial_channels" else 1),
+            "gate_penalty": float(alpha_base) * float(gate.regularization_loss().detach().item()) / metadata["M0"],
+        }
+    return {**metadata, "alpha_base": float(alpha_base), "boundaries": boundaries,
+            "actual_L_gate": sum(item["gate_penalty"] for item in boundaries.values())}
+
+
 # ACTUAL: regularization entry point used by the current main_gumbel training loss.
 def get_gumbel_loss(model: nn.Module):
     gumbel_modules = _get_gumbel_modules(model)
@@ -1063,7 +1621,7 @@ def get_gumbel_loss(model: nn.Module):
     loss = 0.0
     for _, module in gumbel_modules.items():
         loss += module.regularization_loss()
-    loss /= len(gumbel_modules)
+    loss /= get_gate_normalization_metadata(model)["M0"]
     return loss
 
 
@@ -1131,6 +1689,7 @@ def ResNet50(
     stem_stride: int = 2,
     stem_padding: int = 3,
     use_maxpool: bool = True,
+    base_width: int = 64,
 ):
     return ResNet(
         resnet_block,
@@ -1141,6 +1700,7 @@ def ResNet50(
         stem_stride=stem_stride,
         stem_padding=stem_padding,
         use_maxpool=use_maxpool,
+        base_width=base_width,
     )
 
 

@@ -6,7 +6,7 @@ channel_pruning:
   mode: threshold
 
   # Path to the previous run directory (relative to repo root or absolute).
-  source_run_dir: ???       # REQUIRED - override on the CLI
+  source_run_dir: ???       # REQUIRED — override on the CLI
 
   # Channels with mean selection_prob below this are removed from residual.
   threshold: 0.1

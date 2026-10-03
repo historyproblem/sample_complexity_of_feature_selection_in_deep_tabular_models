@@ -12,8 +12,78 @@ from .base import BaseMetric
 ModuleGetter = Callable[[Any], Mapping[str, Any]]
 
 
+def survivor_channel_metrics(model, module_getter=None) -> dict:
+    """Channel-weighted RAW/EFFECTIVE metrics, independent of legacy zero mass.
+
+    Empty survivor sets produce JSON null plus an explicit status. The hard
+    readout describes the deterministic eval predictor; a soft/stochastic eval
+    mode has no deterministic hard decision and is reported as unavailable.
+    """
+    if module_getter is None:
+        from net_complexity.models.feature_selection import get_gumbel_modules
+        module_getter = get_gumbel_modules
+    result = {}
+    original = surviving = 0
+    raw_off = effective_off = effective_on = hard_closed = 0.0
+    hard_available = True
+    raw_means, effective_means = [], []
+    for name, gate in module_getter(model).items():
+        if not hasattr(gate, "get_raw_selection_probs"):
+            continue
+        raw = gate.get_raw_selection_probs()
+        effective = gate.get_effective_selection_probs()
+        mask = gate.get_permanent_survivor_mask()
+        n0, nt = gate.initial_channels, int(mask.sum().item())
+        raw_mass = float((1 - raw[mask]).sum().item())
+        effective_mass = float((1 - effective[mask]).sum().item())
+        on_mass = float(effective[mask].sum().item())
+        try:
+            closed = float((~gate.get_hard_gate_decisions(apply_permanent_mask=False)[mask]).sum().item())
+        except ValueError:
+            closed = None
+            hard_available = False
+        values = {
+            "original_channels": n0, "surviving_channels": nt,
+            "physical_pruned_fraction": 1 - nt / n0 if n0 else None,
+            "survivor_zero_prob_raw": raw_mass / nt if nt else None,
+            "survivor_zero_prob_effective": effective_mass / nt if nt else None,
+            "survivor_hard_closed_fraction": closed / nt if nt and closed is not None else None,
+            "original_coordinate_zero_mass": 1 - on_mass / n0 if n0 else None,
+            "survivor_status": "ok" if nt else "no_surviving_channels",
+        }
+        result.update({f"{name}_{key}": value for key, value in values.items()})
+        original += n0
+        surviving += nt
+        raw_off += raw_mass
+        effective_off += effective_mass
+        effective_on += on_mass
+        hard_closed += closed or 0
+        if nt:
+            raw_means.append(raw_mass / nt)
+            effective_means.append(effective_mass / nt)
+    result.update({
+        "original_channels": original, "surviving_channels": surviving,
+        "permanently_disabled_channels": original - surviving,
+        "physical_pruned_fraction": 1 - surviving / original if original else None,
+        "survivor_zero_prob_raw": raw_off / surviving if surviving else None,
+        "survivor_zero_prob_effective": effective_off / surviving if surviving else None,
+        "survivor_hard_closed_fraction": hard_closed / surviving if surviving and hard_available else None,
+        "survivor_hard_closed_channels": hard_closed if hard_available else None,
+        "original_coordinate_zero_mass": 1 - effective_on / original if original else None,
+        "survivor_status": "ok" if surviving else "no_surviving_channels",
+        "hard_decision_status": "deterministic_eval" if hard_available else "unavailable_eval_mode",
+        "layer_macro_survivor_zero_prob_raw": float(np.mean(raw_means)) if raw_means else None,
+        "layer_macro_survivor_zero_prob_effective": float(np.mean(effective_means)) if effective_means else None,
+    })
+    return result
+
+
 class ChannelZeroProbMetric(BaseMetric):
-    """Shared metric for selectors that expose per-channel selection probabilities."""
+    """Legacy original-coordinate metrics plus explicitly named survivor metrics.
+
+    ``average_zero_prob`` retains the historical masked EFFECTIVE zero mass.
+    It must not be interpreted as newly learned closure among survivors.
+    """
 
     def __init__(
         self,
@@ -24,6 +94,8 @@ class ChannelZeroProbMetric(BaseMetric):
         self._module_getter = module_getter
         self.log_channel_zero_probs = log_channel_zero_probs
         self._channel_probs: defaultdict[str, list[np.ndarray]] = defaultdict(list)
+        self._hard_probs: defaultdict[str, list[np.ndarray]] = defaultdict(list)
+        self._survivor_observations: list[dict] = []
 
     def update(self, input, output, targets, model=None):
         if model is None:
@@ -33,6 +105,12 @@ class ChannelZeroProbMetric(BaseMetric):
         for name, module in modules_dict.items():
             value = module.get_selection_probs().detach().cpu().numpy()
             self._channel_probs[name].append(np.asarray(value, dtype=np.float64))
+            # Legacy STG has no threshold field. Gumbel uses its own configured
+            # threshold, preserving the forward tie rule.
+            threshold = getattr(module, "gate_threshold", 0.5)
+            self._hard_probs[name].append(np.asarray(value > threshold, dtype=np.float64))
+        if any(hasattr(module, "get_raw_selection_probs") for module in modules_dict.values()):
+            self._survivor_observations.append(survivor_channel_metrics(model, self._module_getter))
 
     def compute(self):
         if not self._channel_probs:
@@ -52,7 +130,7 @@ class ChannelZeroProbMetric(BaseMetric):
             stacked = np.stack(values, axis=0)
             mean_selection_probs = stacked.mean(axis=0)
             mean_zero_probs = 1.0 - mean_selection_probs
-            hard_active = (stacked > 0.5).astype(np.float64)
+            hard_active = np.stack(self._hard_probs[name], axis=0)
             num_channels = int(mean_selection_probs.size)
 
             avg_estim_prob = float(mean_selection_probs.mean())
@@ -109,7 +187,18 @@ class ChannelZeroProbMetric(BaseMetric):
         results["real_zero_channels"] = total_real_zero_channels
         results["estim_active_channels"] = total_estim_active_channels
         results["estim_zero_channels"] = total_estim_zero_channels
+        if self._survivor_observations:
+            for key in self._survivor_observations[0]:
+                values = [item[key] for item in self._survivor_observations]
+                if any(value is None for value in values):
+                    results[key] = None
+                elif isinstance(values[0], str):
+                    results[key] = values[0] if len(set(values)) == 1 else "mixed"
+                else:
+                    results[key] = float(np.mean(values))
         return results
 
     def reset(self):
         self._channel_probs.clear()
+        self._hard_probs.clear()
+        self._survivor_observations.clear()

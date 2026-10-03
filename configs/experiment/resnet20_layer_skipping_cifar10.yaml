@@ -25,9 +25,9 @@ model:
 layer_skipping:
   enabled: true
   # List blocks to skip. Examples:
-  #   []                       - no skipping, full ResNet20
-  #   [layer3.2]               - skip last block of stage 3
-  #   [layer3.0, layer3.1, layer3.2] - skip all of stage 3
+  #   []                        — no skipping, full ResNet20
+  #   [layer3.2]                — skip last block of stage 3
+  #   [layer3.0, layer3.1, layer3.2]  — skip all of stage 3
   disabled_layers: []
 
 mlflow:

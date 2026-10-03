@@ -12,3 +12,4 @@ ipykernel
 plotly
 nbformat
 optuna
+torch-pruning

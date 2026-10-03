@@ -12,28 +12,36 @@ import torch.nn as nn
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from net_complexity.data.dataloaders import Dataloaders
 from net_complexity.metrics.base import BaseMetric, Multimetric
+from net_complexity.models.aig import AIGBlockGate
 from net_complexity.models.feature_selection import get_AIG_modules, get_gumbel_modules, get_stg_modules
-from net_complexity.training.adaptive_lambda import ACCURACY_METRIC_NAMES, AdaptiveLambdaController
+from net_complexity.training.adaptive_lambda import (
+    ACCURACY_METRIC_NAMES, AdaptiveLambdaController, AccuracyOnlyLambdaController,
+)
+from net_complexity.training.pruning_resume import capture_eval_runtime, restore_eval_runtime
 from net_complexity.training.gradient_norms import GradientNormLogger
 from net_complexity.training.meta import Metrics
 from net_complexity.training.randomness import set_random_seed
-from net_complexity.training.run_history import RunHistory
+from net_complexity.training.interruption import TrainingInterrupted
+from net_complexity.training.run_history import RunHistory, _filter_channel_metrics
 from net_complexity.training.tracking import MLflowLogger
 from net_complexity.tuning.restart_guard import CollapseDetected, CollapseGuard
 
 
 EpochEndCallback = Callable[
-    [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, RunHistory | None],
+    [int, Mapping[str, float], Mapping[str, float], nn.Module, torch.optim.Optimizer, Optional[RunHistory]],
     None,
 ]
 ProgressContext = Mapping[str, Any]
+ModelInitializer = Callable[[nn.Module], None]
+OptimizerInitializer = Callable[
+    [nn.Module, torch.optim.Optimizer], Optional[Mapping[str, Any]]
+]
 LAMBDA_CONFIG_PATH = "model.lambda_coef"
 REPO_ROOT = Path(__file__).resolve().parents[3]
-AUTO_LOG_STEP_INITIAL_LAMBDA = 1e-6
 AUTO_LOG_STEP_TARGET_LAMBDA = 1e1
 AUTO_LOG_STEP_EPOCH_FRACTION = 1.0 / 3.0
 
@@ -56,7 +64,7 @@ class OptimizerBuildInfo:
 
 @dataclass(frozen=True)
 class GateParameterSpec:
-    parameter: nn.Parameter
+    parameters: tuple[nn.Parameter, ...]
     num_gates: int
 
 
@@ -117,6 +125,12 @@ class SchedulerState:
         self.scheduler.step(metric_value)
 
 
+SchedulerInitializer = Callable[
+    [nn.Module, torch.optim.Optimizer, Optional[SchedulerState]],
+    Optional[Mapping[str, Any]],
+]
+
+
 def _build_scheduler(config: DictConfig, optimizer: torch.optim.Optimizer) -> SchedulerState | None:
     scheduler_cfg = getattr(config, "scheduler", None)
     if scheduler_cfg is None:
@@ -142,6 +156,16 @@ def _build_scheduler(config: DictConfig, optimizer: torch.optim.Optimizer) -> Sc
 
 
 def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
+    """Collect gate parameters eligible for a separate optimizer param group.
+
+    Gumbel/STG: the per-channel logits/mu tensor, one gate per channel
+    (num_gates = channel count) — matches the existing main_gumbel pipeline.
+
+    AIG: only the block gate's *final* router conv (weight + bias) — mirroring
+    the reference ConvNet-AIG optimizer, which splits out only 'fc2' (not the
+    hidden fc1/fc1bn layer) into its own param group. One AIG gate makes a
+    single block-level decision, so num_gates = 1 per block (not per-channel).
+    """
     gate_specs: list[GateParameterSpec] = []
     seen_parameter_ids: set[int] = set()
 
@@ -151,7 +175,7 @@ def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
         if parameter.requires_grad and parameter_id not in seen_parameter_ids:
             gate_specs.append(
                 GateParameterSpec(
-                    parameter=parameter,
+                    parameters=(parameter,),
                     num_gates=int(parameter.shape[0]),
                 )
             )
@@ -163,11 +187,25 @@ def _iter_gate_parameter_specs(model: nn.Module) -> list[GateParameterSpec]:
         if parameter.requires_grad and parameter_id not in seen_parameter_ids:
             gate_specs.append(
                 GateParameterSpec(
-                    parameter=parameter,
+                    parameters=(parameter,),
                     num_gates=int(parameter.numel()),
                 )
             )
             seen_parameter_ids.add(parameter_id)
+
+    for module in get_AIG_modules(model).values():
+        gate = module if isinstance(module, AIGBlockGate) else module.gate
+        final_conv = gate.router[-1]
+        parameters = tuple(
+            parameter
+            for parameter in (final_conv.weight, final_conv.bias)
+            if parameter is not None
+            and parameter.requires_grad
+            and id(parameter) not in seen_parameter_ids
+        )
+        if parameters:
+            gate_specs.append(GateParameterSpec(parameters=parameters, num_gates=1))
+            seen_parameter_ids.update(id(parameter) for parameter in parameters)
 
     return gate_specs
 
@@ -204,13 +242,13 @@ def _build_optimizer(
             OptimizerBuildInfo(gate_weight_decay_scale=gate_weight_decay_scale),
         )
 
-    gate_parameter_ids = {id(spec.parameter) for spec in gate_specs}
+    gate_parameter_ids = {id(parameter) for spec in gate_specs for parameter in spec.parameters}
     base_parameters = [
         parameter
         for parameter in model.parameters()
         if parameter.requires_grad and id(parameter) not in gate_parameter_ids
     ]
-    gate_parameters = [spec.parameter for spec in gate_specs]
+    gate_parameters = [parameter for spec in gate_specs for parameter in spec.parameters]
 
     base_weight_decay = float(getattr(optimizer_cfg, "weight_decay", 0.0))
     gate_weight_decay = base_weight_decay * gate_weight_decay_scale / float(num_gates)
@@ -397,13 +435,7 @@ def _build_baseline_training_config(config: DictConfig, baseline_root_dir: Path)
     baseline_run_name = (
         f"{_resolve_expected_run_name(config) or 'run'}_baseline_no_pruning"
     )
-    OmegaConf.update(
-        baseline_config,
-        "run_history.run_name",
-        baseline_run_name,
-        merge=False,
-        force_add=True,
-    )
+    OmegaConf.update(baseline_config, "run_history.run_name", baseline_run_name, merge=False, force_add=True)
     if _config_has_path(baseline_config, "mlflow.run_name"):
         OmegaConf.update(baseline_config, "mlflow.run_name", baseline_run_name, merge=False)
     if _config_has_path(baseline_config, "mlflow.enabled"):
@@ -1047,6 +1079,11 @@ def _load_model_checkpoint_for_evaluation(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
 
+    if "epoch_event" in checkpoint:
+        from .pruning_resume import validate_epoch_eval_checkpoint
+        validate_epoch_eval_checkpoint(checkpoint, model)
+        return checkpoint
+
     extra_state = checkpoint.get("extra_state", {})
     lambda_coef = extra_state.get("model_lambda_coef")
     bypass_gumbel = extra_state.get("gumbel_bypass_enabled")
@@ -1339,6 +1376,7 @@ def _resolve_adaptive_lambda_log_step_init(
     training_arguments: DictConfig,
     adaptive_cfg: DictConfig,
     *,
+    initial_lambda_coef: float,
     warmup_epochs: int,
     update_every_epochs: int,
 ) -> float:
@@ -1351,6 +1389,15 @@ def _resolve_adaptive_lambda_log_step_init(
         raise ValueError("training_arguments.num_epochs must be > 0 for adaptive_lambda.log_step_init=auto.")
     if update_every_epochs <= 0:
         raise ValueError("adaptive_lambda.update_every_epochs must be >= 1.")
+    if not math.isfinite(initial_lambda_coef) or initial_lambda_coef <= 0.0:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef > 0."
+        )
+    if initial_lambda_coef >= AUTO_LOG_STEP_TARGET_LAMBDA:
+        raise ValueError(
+            "adaptive_lambda.log_step_init=auto requires model.lambda_coef "
+            f"< {AUTO_LOG_STEP_TARGET_LAMBDA:g}."
+        )
 
     target_epoch = float(num_epochs) * AUTO_LOG_STEP_EPOCH_FRACTION
     update_window = target_epoch - float(warmup_epochs)
@@ -1361,7 +1408,7 @@ def _resolve_adaptive_lambda_log_step_init(
             "within the first third of training."
         )
 
-    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / AUTO_LOG_STEP_INITIAL_LAMBDA) / float(update_slots)
+    return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / initial_lambda_coef) / float(update_slots)
 
 
 def _build_adaptive_lambda(
@@ -1381,6 +1428,32 @@ def _build_adaptive_lambda(
     initial_lambda_coef = _resolve_model_lambda_coef(model)
     if initial_lambda_coef is None:
         raise ValueError("adaptive_lambda requires a model with a numeric lambda_coef.")
+    control_mode = str(getattr(cfg, "control_mode", "legacy"))
+    if control_mode == "accuracy_only":
+        data = OmegaConf.to_container(cfg, resolve=True)
+        allowed = {"enabled", "control_mode", "alpha_init", "alpha_min", "alpha_max",
+                   "soft_drop", "hard_drop", "gap_window", "update_every_search_epochs",
+                   "initial_search_warmup", "reentry_samples", "log_step"}
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValueError(f"accuracy_only rejects unknown/legacy controller options: {sorted(unknown)}")
+        if baseline_accuracy_by_epoch is None:
+            raise ValueError("accuracy_only requires a supplied immutable validation reference")
+        if _is_auto_log_step(data.get("log_step", math.log(2.0))):
+            auto_cfg = OmegaConf.create({"log_step_init": "auto"})
+            data["log_step"] = _resolve_adaptive_lambda_log_step_init(
+                training_arguments,
+                auto_cfg,
+                initial_lambda_coef=float(initial_lambda_coef),
+                warmup_epochs=int(data["initial_search_warmup"]),
+                update_every_epochs=int(data["update_every_search_epochs"]),
+            )
+        kwargs = {key: value for key, value in data.items()
+                  if key not in {"enabled", "control_mode", "alpha_init"}}
+        return AccuracyOnlyLambdaController(initial_lambda_coef=initial_lambda_coef,
+            reference_accuracy_by_epoch=baseline_accuracy_by_epoch, **kwargs)
+    if control_mode != "legacy":
+        raise ValueError(f"Unknown adaptive lambda control_mode: {control_mode}")
     recovery_cfg = getattr(cfg, "recovery", None)
     recovery_config = (
         OmegaConf.to_container(recovery_cfg, resolve=True)
@@ -1400,6 +1473,7 @@ def _build_adaptive_lambda(
     log_step_init = _resolve_adaptive_lambda_log_step_init(
         training_arguments,
         cfg,
+        initial_lambda_coef=float(initial_lambda_coef),
         warmup_epochs=warmup_epochs,
         update_every_epochs=update_every_epochs,
     )
@@ -1521,7 +1595,40 @@ def evaluate(model: nn.Module,
     for X, y in dataloader:
         X, y = X.to(device), y.to(device)
         output = model(X, y)
+        if not torch.isfinite(output.logits).all() or not torch.isfinite(output.loss).all():
+            raise FloatingPointError("Non-finite validation output/loss.")
         metric.update(X, output, y, model)
+
+
+def _resolve_gradient_group_key(parameter_name: str) -> str:
+    """Map a parameter name to a layer/block key, e.g. 'backbone.layer2.1.conv1.weight' -> 'layer2_1'."""
+    parts = parameter_name.split(".")
+    if parts and parts[0] == "backbone":
+        parts = parts[1:]
+    if len(parts) >= 2 and parts[0].startswith("layer") and parts[1].isdigit():
+        return f"{parts[0]}_{parts[1]}"
+    return parts[0] if parts else parameter_name
+
+
+def _compute_block_gradient_norms(model: nn.Module) -> dict[str, float]:
+    """L2 norm of the currently populated .grad tensors, grouped by residual block."""
+    squared_norms_by_group: dict[str, float] = {}
+    total_squared_norm = 0.0
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or parameter.grad is None:
+            continue
+        squared_norm = float(parameter.grad.detach().pow(2).sum().item())
+        group_key = _resolve_gradient_group_key(name)
+        squared_norms_by_group[group_key] = squared_norms_by_group.get(group_key, 0.0) + squared_norm
+        total_squared_norm += squared_norm
+
+    grad_norms = {
+        f"grad_norm_{group_key}": math.sqrt(squared_norm)
+        for group_key, squared_norm in squared_norms_by_group.items()
+    }
+    grad_norms["grad_norm_total"] = math.sqrt(total_squared_norm)
+    return grad_norms
 
 
 def train_epoch(model,
@@ -1534,14 +1641,34 @@ def train_epoch(model,
                 run_history: RunHistory | None = None,
                 scheduler_state: SchedulerState | None = None,
                 progress_context: ProgressContext | None = None,
-                gradient_norm_logger: GradientNormLogger | None = None):
-    """Train for one epoch."""
+                gradient_norm_logger: GradientNormLogger | None = None,
+                training_ledger: dict[str, Any] | None = None,
+                epoch_measurements: dict[str, Any] | None = None) -> dict[str, float]:
+    """Train for one epoch. Returns the epoch-average per-block gradient L2 norms."""
     model.train()
 
+    grad_norm_sums: dict[str, float] = {}
+    num_batches = 0
+    gate_penalty_sum = 0.0
+    training_examples = 0
+
     for batch_index, (X, y) in enumerate(dataloaders.train_dataloader):
+        from .interruption import check_stop
+        check_stop(epoch=epoch, batches=batch_index)
         X, y = X.to(device), y.to(device)
         output = model(X, y)
+        if training_ledger is not None:
+            training_ledger["consumed_training_examples"] += int(y.shape[0])
+        training_examples += int(y.shape[0])
+        # The explicit penalty retains tiny alpha contributions that can round
+        # away when subtracting CE from the already summed FP32 total loss.
+        actual_penalty = getattr(output, "reg_loss", None)
+        if actual_penalty is None:
+            actual_penalty = output.loss - output.ce_loss
+        gate_penalty_sum += float(torch.as_tensor(actual_penalty).detach()) * int(y.shape[0])
 
+        if not torch.isfinite(output.loss).all():
+            raise FloatingPointError("Non-finite training loss; refusing optimizer update.")
         metrics.train_metrics.update(X, output, y, model)
 
         collect_gradient_norms = (
@@ -1553,13 +1680,30 @@ def train_epoch(model,
             regularization_term = output.loss - output.ce_loss
             gradient_norm_logger.collect_autograd("regularization", regularization_term)
         output.loss.backward()
+
+        for key, value in _compute_block_gradient_norms(model).items():
+            if not math.isfinite(value):
+                raise FloatingPointError("Non-finite gradient; refusing optimizer update.")
+            grad_norm_sums[key] = grad_norm_sums.get(key, 0.0) + value
+        num_batches += 1
+
         if collect_gradient_norms:
             gradient_norm_logger.collect_total()
         optimizer.step()
+        if training_ledger is not None:
+            training_ledger["optimizer_updates"] += 1
         if scheduler_state is not None and scheduler_state.interval == "batch":
             batch_metrics = collect_batch_metrics(output, y, model) if scheduler_state.needs_metric else {}
             scheduler_state.step(batch_metrics)
         optimizer.zero_grad()
+        check_stop(epoch=epoch, batches=batch_index + 1)
+
+    if epoch_measurements is not None:
+        epoch_measurements["train_L_gate_mean"] = (gate_penalty_sum / training_examples
+                                                   if training_examples else None)
+    if num_batches == 0:
+        return {}
+    return {key: value / num_batches for key, value in grad_norm_sums.items()}
 
 
 def train(model: nn.Module,
@@ -1573,7 +1717,14 @@ def train(model: nn.Module,
           mlflow_logger=None,
           run_history: RunHistory | None = None,
           epoch_end_callback: EpochEndCallback | None = None,
-          progress_context: ProgressContext | None = None) -> dict[str, Any]:
+          progress_context: ProgressContext | None = None,
+          adaptive_lambda_state: Mapping[str, Any] | None = None,
+          adaptive_epoch_offset: int = 0,
+          adaptive_reference_by_epoch: Mapping[int, float] | None = None,
+          training_ledger: dict[str, Any] | None = None,
+          adaptive_rebase: Mapping[str, Any] | None = None,
+          runtime_initialized_callback: Callable | None = None,
+          exact_resume_checkpoint: Path | None = None) -> dict[str, Any]:
 
     model.to(device)
     last_train_metrics: dict[str, float] = {}
@@ -1589,19 +1740,43 @@ def train(model: nn.Module,
         training_arguments,
         model,
         baseline_accuracy_by_epoch=(
-            baseline_accuracy_reference.accuracy_by_epoch
-            if baseline_accuracy_reference is not None
-            else None
+            adaptive_reference_by_epoch if adaptive_reference_by_epoch is not None else (
+                baseline_accuracy_reference.accuracy_by_epoch
+                if baseline_accuracy_reference is not None else None
+            )
         ),
     )
     completed_epochs = 0
     stop_info: dict[str, Any] | None = None
     recalibration_info: dict[str, Any] | None = None
+    if training_ledger is None:
+        training_ledger = {"global_training_epoch": int(adaptive_epoch_offset),
+            "search_epochs_consumed": 0, "optimizer_updates": 0, "consumed_training_examples": 0}
+    if run_history is not None:
+        run_history.training_ledger = training_ledger
+    stage_metadata = OmegaConf.to_container(
+        getattr(training_arguments, "accuracy_guided_stage", OmegaConf.create({})), resolve=True)
+    epoch_events_enabled = bool(stage_metadata) or isinstance(adaptive_lambda, AccuracyOnlyLambdaController)
 
     def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
         _set_model_lambda_coef(target_model, lambda_coef, bypass_gumbel=False)
 
+    if adaptive_epoch_offset < 0:
+        raise ValueError("adaptive_epoch_offset must be nonnegative.")
+    if adaptive_lambda_state is not None:
+        if adaptive_lambda is None:
+            raise ValueError("Cannot restore adaptive lambda state with its controller disabled.")
+        adaptive_lambda.load_state_dict(adaptive_lambda_state)
+        if adaptive_lambda.last_epoch > adaptive_epoch_offset:
+            raise ValueError("Adaptive lambda state is ahead of the requested epoch offset.")
+
     if adaptive_lambda is not None:
+        if adaptive_rebase is not None:
+            if not isinstance(adaptive_lambda, AccuracyOnlyLambdaController):
+                raise ValueError("Explicit rebase requires accuracy_only controller")
+            adaptive_lambda.rebase(**dict(adaptive_rebase),
+                global_training_epoch=training_ledger["global_training_epoch"],
+                search_epochs_consumed=training_ledger["search_epochs_consumed"])
         adaptive_lambda.apply_initial_state(
             model,
             apply_lambda=_apply_adaptive_lambda,
@@ -1623,7 +1798,30 @@ def train(model: nn.Module,
             run_history.set_runtime_metadata(runtime_metadata)
 
     epoch_num = 1
+    if exact_resume_checkpoint is not None:
+        if adaptive_rebase is not None:
+            raise ValueError("Exact resume is not a recovery-to-search handoff")
+        if any(state is not None for state in (early_stopping, lambda_warmup,
+                gate_mode_schedule, batchnorm_recalibration, collapse_guard)):
+            raise ValueError("Exact resume of legacy auxiliary schedules/guards is unsupported")
+        from .pruning_resume import restore_exact_epoch_checkpoint
+        checkpoint = torch.load(exact_resume_checkpoint, map_location=device, weights_only=True)
+        epoch_num = restore_exact_epoch_checkpoint(checkpoint, model=model, optimizer=optimizer,
+            scheduler_state=scheduler_state, controller=adaptive_lambda, training_ledger=training_ledger,
+            dataloader=dataloaders.train_dataloader, expected_stage=stage_metadata)
+        if run_history is not None:
+            run_history.restore_epoch_selection(checkpoint, Path(exact_resume_checkpoint))
+        completed_epochs = epoch_num - 1
+    if runtime_initialized_callback is not None:
+        runtime_initialized_callback(model, adaptive_lambda)
     while epoch_num <= total_epochs:
+        audit_seed = getattr(training_arguments, "audit_data_seed", None)
+        if audit_seed is not None:
+            # Independent DataLoader RNG: gate draws and model construction must
+            # not change shuffling / worker augmentation seeds between jobs.
+            data_epoch = int(getattr(training_arguments, "global_epoch_offset", 0)) + epoch_num
+            dataloaders.train_dataloader.generator.manual_seed(int(audit_seed) + data_epoch)
+            set_random_seed(int(audit_seed) + data_epoch)
         if lambda_warmup is not None:
             lambda_warmup.step(epoch_num, model)
         if gate_mode_schedule is not None:
@@ -1631,6 +1829,7 @@ def train(model: nn.Module,
         epoch_started_at = perf_counter()
 
         train_started_at = perf_counter()
+
         gradient_norm_logger = (
             GradientNormLogger(
                 model,
@@ -1641,7 +1840,8 @@ def train(model: nn.Module,
             and bool(getattr(gradient_norm_cfg, "enabled", False))
             else None
         )
-        train_epoch(
+        epoch_measurements = {}
+        epoch_grad_norms = train_epoch(
             model,
             optimizer,
             dataloaders,
@@ -1653,7 +1853,12 @@ def train(model: nn.Module,
             scheduler_state=scheduler_state,
             progress_context=progress_context,
             gradient_norm_logger=gradient_norm_logger,
+            training_ledger=training_ledger,
+            epoch_measurements=epoch_measurements,
         )
+        training_ledger["global_training_epoch"] += 1
+        if adaptive_lambda is not None:
+            training_ledger["search_epochs_consumed"] += 1
         train_time = perf_counter() - train_started_at
 
         valid_started_at = perf_counter()
@@ -1675,6 +1880,8 @@ def train(model: nn.Module,
             train_metrics.update(gradient_norm_logger.compute())
         valid_metrics = dict(metrics.valid_metrics.compute())
         train_metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+        train_metrics.update(epoch_measurements)
+        train_metrics.update({f"train_{key}": value for key, value in (epoch_grad_norms or {}).items()})
         last_train_metrics = train_metrics
         last_valid_metrics = valid_metrics
         observed_epoch_metrics = {
@@ -1688,6 +1895,16 @@ def train(model: nn.Module,
             "gumbel_train_gate_mode": _resolve_model_gumbel_gate_modes(model)[0],
             "gumbel_eval_gate_mode": _resolve_model_gumbel_gate_modes(model)[1],
         }
+        evaluated_runtime = capture_eval_runtime(model)
+        if epoch_events_enabled:
+            from net_complexity.models.feature_selection import get_gate_regularization_diagnostics
+            from net_complexity.metrics._channel_prob import survivor_channel_metrics
+            gate_diagnostics = get_gate_regularization_diagnostics(
+                model, float(_resolve_model_lambda_coef(model) or 0.0))
+            survivor_metrics = survivor_channel_metrics(model)
+        else:
+            gate_diagnostics = {}
+            survivor_metrics = {}
 
         if run_history is not None:
             run_history.log_channel_history(epoch_num, model)
@@ -1696,7 +1913,8 @@ def train(model: nn.Module,
         if scheduler_state is not None and scheduler_state.interval == "epoch":
             scheduler_state.step(observed_epoch_metrics)
 
-        if run_history is not None and run_history.should_update_best(epoch_num, valid_metrics):
+        updated_best = run_history is not None and run_history.should_update_best(epoch_num, valid_metrics)
+        if updated_best and not epoch_events_enabled:
             run_history.save_checkpoint(
                 "best.pt",
                 model=model,
@@ -1710,29 +1928,87 @@ def train(model: nn.Module,
         controller_metrics: dict[str, Any] = {}
         if adaptive_lambda is not None:
             adaptive_step_result = adaptive_lambda.on_epoch_end(
-                epoch=epoch_num,
+                epoch=(training_ledger["global_training_epoch"]
+                       if isinstance(adaptive_lambda, AccuracyOnlyLambdaController)
+                       else adaptive_epoch_offset + epoch_num),
                 model=model,
                 valid_metrics=valid_metrics,
                 apply_lambda=_apply_adaptive_lambda,
             )
             controller_metrics = dict(adaptive_step_result.metrics)
+            if updated_best and not epoch_events_enabled:
+                run_history.update_checkpoint_extra_state(
+                    "best.pt", {"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                                "adaptive_global_epoch": adaptive_epoch_offset + epoch_num},
+                )
             if run_history is not None:
                 runtime_metadata = dict(run_history.runtime_metadata)
                 runtime_metadata["adaptive_lambda"] = adaptive_lambda.summary_state()
                 run_history.set_runtime_metadata(runtime_metadata)
 
+        epoch_event = None
+        if epoch_events_enabled:
+            controller_state = adaptive_lambda.state_dict() if adaptive_lambda is not None else None
+            held_state = stage_metadata.get("held_controller_state") if adaptive_lambda is None else None
+            held_alpha = held_state["runtime"]["lambda_coef"] if held_state is not None else None
+            if adaptive_lambda is None:
+                controller_metrics.update(adaptive_lambda_action="hold",
+                    adaptive_lambda_reason="physical_recovery_no_gates")
+            clocks = {"global_training_epoch": training_ledger["global_training_epoch"],
+                "search_epochs_consumed": training_ledger["search_epochs_consumed"],
+                "local_search_epoch": (controller_metrics.get("local_search_epoch", 0))}
+            epoch_event = {"version": 1, "epoch": epoch_num,
+                "eval_runtime": evaluated_runtime, "continuation_runtime": capture_eval_runtime(model),
+                "alpha_used": (held_alpha if held_state is not None
+                               else best_checkpoint_extra_state["model_lambda_coef"]),
+                "alpha_next": (held_alpha if held_state is not None else _resolve_model_lambda_coef(model)),
+                "alpha_semantics": "held_base_no_gate_penalty" if held_state is not None else "search_base",
+                "controller_after_feedback": held_state if held_state is not None else controller_state,
+                "controller_updates_enabled": adaptive_lambda is not None,
+                "controller_feedback": deepcopy(controller_metrics),
+                "survivor_channel_metrics": survivor_metrics,
+                "train_L_gate_mean": epoch_measurements.get("train_L_gate_mean"),
+                "end_epoch_L_gate": gate_diagnostics["actual_L_gate"],
+                "clocks": clocks, "consumed_ledger": deepcopy(training_ledger),
+                "topology": gate_diagnostics,
+                "provenance": {"stage": deepcopy(stage_metadata)}}
+            if updated_best:
+                # v3 publishes one complete epoch-event atomically. It never
+                # exposes a best snapshot awaiting post-controller metadata.
+                run_history.save_checkpoint("best.pt", model=model, optimizer=optimizer,
+                    epoch=epoch_num, metrics=observed_epoch_metrics, scheduler_state=scheduler_state,
+                    extra_state={**best_checkpoint_extra_state, "epoch_event": epoch_event,
+                        **({"adaptive_lambda_state": controller_state,
+                            "adaptive_global_epoch": training_ledger["global_training_epoch"]}
+                           if controller_state is not None else {})})
+
         post_epoch_extra_metrics = {
+            "lambda_used": best_checkpoint_extra_state["model_lambda_coef"],
+            "lambda_next": _resolve_model_lambda_coef(model),
             "train_time_sec": float(train_time),
             "valid_time_sec": float(valid_time),
             "epoch_time_sec": float(perf_counter() - epoch_started_at),
             "model_lambda_coef": _resolve_model_lambda_coef(model),
             "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+            "global_training_epoch": training_ledger["global_training_epoch"],
+            "search_epochs_consumed": training_ledger["search_epochs_consumed"],
+            "optimizer_updates": training_ledger["optimizer_updates"],
+            "consumed_training_examples": training_ledger["consumed_training_examples"],
+            **({"gate_regularization_diagnostics": gate_diagnostics,
+                "actual_L_gate": gate_diagnostics["actual_L_gate"]} if gate_diagnostics else {}),
+            **survivor_metrics,
             **controller_metrics,
         }
 
         if mlflow_logger is not None:
-            mlflow_logger.log_metrics(train_metrics, step=epoch_num)
-            mlflow_logger.log_metrics(valid_metrics, step=epoch_num)
+            # Per-channel selector metrics (log_channel_zero_probs=true) are kept
+            # in train_metrics/valid_metrics themselves (needed by
+            # cyclic_channel_pruning and written to history.csv/summary.json as
+            # before) but never pushed to MLflow — with hundreds of channels
+            # across a ResNet50/101, that's hundreds of near-static scalar
+            # graphs cluttering the MLflow UI for no benefit.
+            mlflow_logger.log_metrics(_filter_channel_metrics(train_metrics), step=epoch_num)
+            mlflow_logger.log_metrics(_filter_channel_metrics(valid_metrics), step=epoch_num)
             controller_numeric_metrics = {
                 key: value
                 for key, value in controller_metrics.items()
@@ -1752,8 +2028,23 @@ def train(model: nn.Module,
                     **controller_metrics,
                 },
                 scheduler_state=scheduler_state,
-                extra_state=post_epoch_extra_metrics,
+                extra_state={
+                    **post_epoch_extra_metrics,
+                    **({"epoch_event": epoch_event} if epoch_event is not None else {}),
+                    **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                        "adaptive_global_epoch": adaptive_epoch_offset + epoch_num}
+                       if adaptive_lambda is not None else {}),
+                },
             )
+            if epoch_event is not None:
+                # Every evaluated epoch is available for best_feasible_compact.
+                # Byte-copy the atomic last snapshot: no repeated RNG sampling.
+                import shutil
+                target = run_history.checkpoints_dir / f"epoch_{epoch_num:04d}.pt"
+                temporary = target.with_suffix(".pt.tmp")
+                shutil.copyfile(run_history.checkpoints_dir / "last.pt", temporary)
+                temporary.replace(target)
+                run_history.last_epoch_event = deepcopy(epoch_event)
             run_history.log_epoch(
                 epoch_num,
                 train_metrics,
@@ -1828,6 +2119,16 @@ def train(model: nn.Module,
         if stop_message is not None:
             print(stop_message)
 
+        if mlflow_logger is not None:
+            mlflow_logger.log_metrics(
+                {
+                    "train_time_sec": float(train_time),
+                    "valid_time_sec": float(valid_time),
+                    "epoch_time_sec": float(epoch_time),
+                },
+                step=epoch_num,
+            )
+
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
         completed_epochs = epoch_num
@@ -1876,7 +2177,9 @@ def train(model: nn.Module,
             )
             if mlflow_logger is not None:
                 mlflow_logger.log_metrics(
-                    _prefix_metric_keys(recalibrated_valid_metrics, "recalibrated"),
+                    _filter_channel_metrics(
+                        _prefix_metric_keys(recalibrated_valid_metrics, "recalibrated")
+                    ),
                     step=final_epoch,
                 )
         if run_history is not None:
@@ -1906,8 +2209,36 @@ def train(model: nn.Module,
                         "model_lambda_coef": _resolve_model_lambda_coef(model),
                         "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
                         **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
+                        **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                            "adaptive_global_epoch": adaptive_epoch_offset + final_epoch}
+                           if adaptive_lambda is not None else {}),
                     },
                 )
+
+    if not bool(getattr(training_arguments, "evaluate_test", True)):
+        if run_history is not None:
+            run_history.save_summary(
+                final_train_metrics=last_train_metrics,
+                final_valid_metrics=last_valid_metrics,
+                test_metrics={},
+                stop_info=stop_info,
+            )
+        return {
+            "last_train_metrics": last_train_metrics,
+            "last_valid_metrics": last_valid_metrics,
+            "test_metrics": {},
+            "test_evaluation_disabled": True,
+            **({"adaptive_lambda": adaptive_lambda.summary_state()}
+               if adaptive_lambda is not None else {}),
+            **({"adaptive_lambda_state": adaptive_lambda.state_dict()}
+               if adaptive_lambda is not None else {}),
+            "training_ledger": deepcopy(training_ledger),
+            "num_epochs_executed": completed_epochs,
+            "full_train_time_sec": sum(
+                float(row.get("epoch_time_sec", 0.0) or 0.0)
+                for row in (run_history.history_records if run_history else [])
+            ),
+        }
 
     test_checkpoint_epoch = final_epoch
     if run_history is not None:
@@ -1945,7 +2276,7 @@ def train(model: nn.Module,
     test_metrics = metrics.test_metrics.compute()
     if mlflow_logger is not None:
         mlflow_logger.log_metrics(
-            test_metrics,
+            _filter_channel_metrics(test_metrics),
             step=test_checkpoint_epoch,
         )
         mlflow_logger.log_model(model, model_name="final_model")
@@ -1969,6 +2300,8 @@ def train(model: nn.Module,
     }
     if adaptive_lambda is not None:
         result["adaptive_lambda"] = adaptive_lambda.summary_state()
+        result["adaptive_lambda_state"] = adaptive_lambda.state_dict()
+    result["training_ledger"] = deepcopy(training_ledger)
     if recalibration_info is not None:
         result["batchnorm_recalibration"] = recalibration_info
     if stop_info is not None:
@@ -2045,6 +2378,13 @@ def log_training_metadata(
     mlflow_logger.log_params({
         key: value for key, value in params.items() if value is not None
     })
+    mlflow_logger.log_metrics(
+        {
+            "model.total_parameters": float(total_params),
+            "model.trainable_parameters": float(trainable_params),
+        },
+        step=0,
+    )
 
 
 def log_run_artifacts(config: DictConfig, run_history: RunHistory, mlflow_logger: MLflowLogger | None) -> None:
@@ -2071,37 +2411,111 @@ def run_training(
     config: DictConfig,
     epoch_end_callback: EpochEndCallback | None = None,
     progress_context: ProgressContext | None = None,
+    model_initializer: ModelInitializer | None = None,
+    optimizer_initializer: OptimizerInitializer | None = None,
+    scheduler_initializer: SchedulerInitializer | None = None,
+    adaptive_lambda_state: Mapping[str, Any] | None = None,
+    adaptive_epoch_offset: int = 0,
+    adaptive_reference_by_epoch: Mapping[int, float] | None = None,
+    training_ledger: dict[str, Any] | None = None,
+    adaptive_rebase: Mapping[str, Any] | None = None,
+    runtime_initialized_callback: Callable | None = None,
+    exact_resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
-    baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
-        config,
-        progress_context=progress_context,
-    )
+    if ((optimizer_initializer is not None or scheduler_initializer is not None)
+            and exact_resume_checkpoint is not None):
+        raise ValueError(
+            "optimizer/scheduler initializers cannot be combined with exact_resume_checkpoint."
+        )
+    if (_adaptive_lambda_enabled(config.training_arguments)
+            and OmegaConf.select(config, "training_arguments.adaptive_lambda.control_mode") == "accuracy_only"
+            and adaptive_reference_by_epoch is None):
+        raise ValueError("accuracy_only requires an explicit immutable reference; automatic dense training is forbidden")
+    if adaptive_reference_by_epoch is not None:
+        if not _adaptive_lambda_enabled(config.training_arguments):
+            raise ValueError("External adaptive reference requires the adaptive controller enabled.")
+        if _resolve_baseline_history_root(config.training_arguments) is not None:
+            raise ValueError("External adaptive reference conflicts with baseline_history_dir.")
+        if not adaptive_reference_by_epoch or any(
+            int(epoch) < 1 or not math.isfinite(float(value)) or not 0 <= float(value) <= 1
+            for epoch, value in adaptive_reference_by_epoch.items()
+        ):
+            raise ValueError("External adaptive reference must contain finite epoch accuracies in [0, 1].")
+        # An explicitly supplied validation curve must never trigger hidden
+        # baseline training outside the caller's total epoch budget.
+        baseline_accuracy_reference = None
+    else:
+        baseline_accuracy_reference = _ensure_adaptive_baseline_reference(
+            config, progress_context=progress_context,
+        )
     resolved_seed = set_random_seed(getattr(config, "seed", None))
     device = resolve_device(config)
+
+    depgraph_pruning_cfg = getattr(config, "depgraph_pruning", None)
+    depgraph_pruning_enabled = (
+        depgraph_pruning_cfg is not None
+        and bool(getattr(depgraph_pruning_cfg, "enabled", False))
+    )
+
+    aig_static_pruning_cfg = getattr(config, "aig_static_pruning", None)
+    aig_static_pruning_enabled = (
+        aig_static_pruning_cfg is not None
+        and bool(getattr(aig_static_pruning_cfg, "enabled", False))
+    )
 
     channel_pruning_cfg = getattr(config, "channel_pruning", None)
     pruning_enabled = (
         channel_pruning_cfg is not None
         and bool(getattr(channel_pruning_cfg, "enabled", True))
     )
-    if pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
+
+    apply_soft_channel_mask = False
+    if depgraph_pruning_enabled:
+        # DepGraph baseline: build a torch-pruning-pruned model from a plain
+        # trained checkpoint instead of instantiating the full model from config.
+        from net_complexity.models.depgraph_pruning import (
+            build_depgraph_pruned_model_from_config,
+        )
+        model = build_depgraph_pruned_model_from_config(config, depgraph_pruning_cfg, device=device)
+    elif aig_static_pruning_enabled:
+        # Classic-AIG static baseline: convert a trained aig_classic checkpoint
+        # into a genuinely static, structurally pruned model (see
+        # models/aig_static_pruning.py) instead of instantiating the full
+        # (dynamically gated) model from config.
+        from net_complexity.models.aig_static_pruning import (
+            build_static_aig_model_from_config,
+        )
+        model = build_static_aig_model_from_config(config, aig_static_pruning_cfg, device=device)
+    elif pruning_enabled and bool(getattr(channel_pruning_cfg, "structural", False)):
+        # Structural pruning: build a physically narrowed model from scratch
+        # instead of instantiating the full model from config.
         from net_complexity.models.channel_pruning import (
             build_structurally_pruned_model_from_config,
         )
-
         model = build_structurally_pruned_model_from_config(config, channel_pruning_cfg)
     else:
+        # Standard path: instantiate from config. A cyclic weight initializer,
+        # when supplied, must run before the cumulative soft mask is re-applied:
+        # the previous checkpoint contains the previous cycle's channel_mask
+        # buffers and must not be allowed to undo newly committed drops.
         model = instantiate(config.model)
-        if pruning_enabled:
-            from net_complexity.models.channel_pruning import apply_channel_mask_from_config
+        apply_soft_channel_mask = pruning_enabled
 
-            apply_channel_mask_from_config(model, channel_pruning_cfg)
+    if model_initializer is not None:
+        model_initializer(model)
+
+    if apply_soft_channel_mask:
+        from net_complexity.models.channel_pruning import apply_channel_mask_from_config
+        apply_channel_mask_from_config(model, channel_pruning_cfg)
 
     layer_skipping_cfg = getattr(config, "layer_skipping", None)
     if layer_skipping_cfg is not None and bool(getattr(layer_skipping_cfg, "enabled", True)):
         from net_complexity.models.layer_skipping import apply_layer_skipping_from_config
-
         apply_layer_skipping_from_config(model, layer_skipping_cfg)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[model] Parameters: {total_params:,} total | {trainable_params:,} trainable")
 
     model = model.to(device)
     lambda_warmup = _build_lambda_warmup(config.training_arguments)
@@ -2112,12 +2526,25 @@ def run_training(
     gate_mode_schedule = _build_gate_mode_schedule(config.training_arguments)
     if gate_mode_schedule is not None:
         gate_mode_schedule.apply_initial_state(model)
-    dataloaders = instantiate(config.dataloaders)
+    if not bool(getattr(config.training_arguments, "evaluate_test", True)):
+        # Fail closed for unsupported factories, rather than silently build test.
+        dataloaders = instantiate(config.dataloaders, include_test=False)
+    else:
+        dataloaders = instantiate(config.dataloaders)
     optimizer, optimizer_build_info = _build_optimizer(config, model)
+    optimizer_initialization = None
+    if optimizer_initializer is not None:
+        initialized = optimizer_initializer(model, optimizer)
+        optimizer_initialization = dict(initialized or {})
     scheduler_state = _build_scheduler(config, optimizer)
+    scheduler_initialization = None
+    if scheduler_initializer is not None:
+        initialized = scheduler_initializer(model, optimizer, scheduler_state)
+        scheduler_initialization = dict(initialized or {})
     metrics = prepare_metrics(instantiate(config.metrics))
     mlflow_logger = MLflowLogger(config) if _is_mlflow_enabled(config) else None
     run_history = RunHistory(config)
+    run_history.train_dataloader_generator = getattr(dataloaders.train_dataloader, "generator", None)
     runtime_snapshot = _assert_runtime_lambda_consistency(
         config,
         model,
@@ -2134,6 +2561,17 @@ def run_training(
         ),
         "parallel_training": False,
     }
+    runtime_snapshot["model_parameters"] = {
+        "total": int(total_params),
+        "trainable": int(trainable_params),
+    }
+    runtime_snapshot["model_initializer_applied"] = model_initializer is not None
+    runtime_snapshot["optimizer_initializer_applied"] = optimizer_initializer is not None
+    if optimizer_initialization is not None:
+        runtime_snapshot["optimizer_initialization"] = optimizer_initialization
+    runtime_snapshot["scheduler_initializer_applied"] = scheduler_initializer is not None
+    if scheduler_initialization is not None:
+        runtime_snapshot["scheduler_initialization"] = scheduler_initialization
     if baseline_accuracy_reference is not None:
         runtime_snapshot["adaptive_lambda_baseline"] = {
             "root_dir": str(baseline_accuracy_reference.root_dir),
@@ -2175,7 +2613,24 @@ def run_training(
             run_history=run_history,
             epoch_end_callback=epoch_end_callback,
             progress_context=progress_context,
+            adaptive_lambda_state=adaptive_lambda_state,
+            adaptive_epoch_offset=adaptive_epoch_offset,
+            adaptive_reference_by_epoch=adaptive_reference_by_epoch,
+            training_ledger=training_ledger,
+            adaptive_rebase=adaptive_rebase,
+            runtime_initialized_callback=runtime_initialized_callback,
+            exact_resume_checkpoint=exact_resume_checkpoint,
         )
+    except TrainingInterrupted as exc:
+        run_history.save_checkpoint(
+            "interrupted.pt", model=model, optimizer=optimizer,
+            epoch=exc.epoch, metrics={}, scheduler_state=scheduler_state,
+            extra_state={"status": "interrupted", "completed_epochs": exc.epoch - 1,
+                         "batches_in_partial_epoch": exc.batches,
+                         "consumed_ledger": deepcopy(getattr(run_history, "training_ledger", {})),
+                         "resume_status": "partial_epoch_exact_resume_unsupported"},
+        )
+        raise
     finally:
         log_run_artifacts(config, run_history, mlflow_logger)
         if mlflow_logger is not None:
@@ -2188,6 +2643,10 @@ def run_training(
         "best_metric_value": run_history.best_metric_value,
         "best_epoch": run_history.best_epoch,
         "seed": resolved_seed,
+        "model_parameters": {
+            "total": int(total_params),
+            "trainable": int(trainable_params),
+        },
     })
     if baseline_accuracy_reference is not None:
         result["adaptive_lambda_baseline"] = {

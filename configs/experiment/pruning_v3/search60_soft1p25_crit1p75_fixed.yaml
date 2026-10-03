@@ -1,0 +1,18 @@
+# @package _global_
+# Search-only nightly profile. Launch with scripts/launch_one_shot_pruning.py --search-only.
+defaults:
+  - /experiment/pruning_v3/one_shot_60_90_inherited_vs_scratch
+  - _self_
+
+one_shot:
+  search_scheduler_eta_min: 0.00066443
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.0125
+    hard_drop: 0.0175
+    update_every_search_epochs: 1
+    log_step: 0.6931471805599453
+mlflow:
+  run_name: search60_soft1p25_crit1p75_fixed
+run_history:
+  run_name: search60_soft1p25_crit1p75_fixed

@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /experiment/audit/_base
+  - _self_
+model:
+  lambda_coef: 0.0
+cyclic_channel_pruning:
+  max_param_fraction: 0.0
+mlflow:
+  run_name: J1_dense_control

@@ -1,0 +1,50 @@
+# @package _global_
+#
+# DepGraph baseline on ResNet50/CIFAR10 — random importance (the "DepGraph+
+# Random" ablation from the DepGraph paper itself: a lower-bound sanity check
+# for how much of the benefit comes from dependency-aware grouping alone vs.
+# a genuine importance criterion).
+# Required override: depgraph_pruning.source_run_dir=<plain baseline run dir>
+
+defaults:
+  - /data: cifar10_best_practice
+  - /model: resnet50
+  - /method: plain
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0
+
+depgraph_pruning:
+  enabled: true
+  source_checkpoint: null
+  source_run_dir: ???
+  checkpoint_name: best.pt
+  importance: random
+  sparsity_learning: false
+  target_speedup: 2.0
+  global_pruning: true
+  iterative_steps: 200
+  example_input_size: [3, 32, 32]
+  random_seed: 42
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_depgraph_resnet50_cifar10_random_speedup${depgraph_pruning.target_speedup}"
+  tags:
+    model_type: "ResNet50_DepGraph"
+    method: "depgraph"
+    dataset: "cifar10"
+    recipe: "ablation_depgraph_resnet50_cifar10_random"
+    importance: "random"
+    sparsity_learning: "false"
+    target_speedup: "${depgraph_pruning.target_speedup}"

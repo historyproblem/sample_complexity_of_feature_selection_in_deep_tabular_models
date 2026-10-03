@@ -1,0 +1,46 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 120
+
+scheduler:
+  T_max: 120
+
+mlflow:
+  enabled: true
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "ablation_aig_classic_t_grid_resnet50_cifar10"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 5
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.regularization_loss.target_rate: 0.3
+      mlflow.run_name: "ablation_aig_classic_resnet50_cifar10_t0.3"
+      mlflow.tags.target_rate: "0.3"
+    - model.regularization_loss.target_rate: 0.4
+      mlflow.run_name: "ablation_aig_classic_resnet50_cifar10_t0.4"
+      mlflow.tags.target_rate: "0.4"
+    - model.regularization_loss.target_rate: 0.5
+      mlflow.run_name: "ablation_aig_classic_resnet50_cifar10_t0.5"
+      mlflow.tags.target_rate: "0.5"
+    - model.regularization_loss.target_rate: 0.6
+      mlflow.run_name: "ablation_aig_classic_resnet50_cifar10_t0.6"
+      mlflow.tags.target_rate: "0.6"
+    - model.regularization_loss.target_rate: 0.7
+      mlflow.run_name: "ablation_aig_classic_resnet50_cifar10_t0.7"
+      mlflow.tags.target_rate: "0.7"

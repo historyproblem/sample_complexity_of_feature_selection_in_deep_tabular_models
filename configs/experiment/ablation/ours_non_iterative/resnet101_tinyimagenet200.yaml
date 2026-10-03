@@ -1,0 +1,53 @@
+# @package _global_
+#
+# "Our approach" — single-shot (non-iterative) block/layer-granularity AIG
+# gating with entropy regularization, on ResNet101/TinyImageNet200. See
+# ablation/ours_non_iterative/resnet50_cifar10.yaml for the full explanation.
+
+defaults:
+  - /data: tinyimagenet200_best_practice
+  - /model: resnet101_tinyimagenet200
+  - /method: aig
+  - /train: resnet50_best_practice
+  - /optimizer: adamw
+  - /scheduler: cosine_200
+  - /metrics: full
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: "cuda:0"
+
+model:
+  lambda_coef: 0.0001
+  bypass_on_zero_lambda: false
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.3
+  backbone:
+    resnet_block:
+      temperature: 1.0
+      gate_regularization: l1_probability
+
+training_arguments:
+  num_epochs: 240
+  lambda_warmup:
+    enabled: false
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 240
+
+mlflow:
+  enabled: true
+  experiment_name: feature_selection_experiment
+  run_name: "ablation_ours_non_iterative_resnet101_tinyimagenet200_lambda${model.lambda_coef}_beta${model.entropy_regularization_coef}"
+  tags:
+    model_type: "ResNet101_AIG"
+    method: "ours_non_iterative"
+    dataset: "tinyimagenet200"
+    recipe: "ablation_ours_non_iterative_resnet101_tinyimagenet200"
+    gate_regularization: "l1_probability"
+    entropy_regularization: "plus_negative_entropy"

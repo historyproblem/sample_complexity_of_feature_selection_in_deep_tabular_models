@@ -1,0 +1,87 @@
+# @package _global_
+
+training_arguments:
+  num_epochs: 120
+  gradient_norm_logging:
+    enabled: true
+    log_per_layer: true
+    every_n_batches: 5
+  adaptive_lambda:
+    enabled: true
+  batchnorm_recalibration:
+    enabled: false
+
+scheduler:
+  T_max: 120
+
+mlflow:
+  enabled: true
+
+reporting:
+  run_label_fields:
+    beta: model.entropy_regularization_coef
+
+tuning:
+  enabled: true
+  mode: "grid"
+  study_name: "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep_ordered"
+  direction: "maximize"
+  objective_metric: "valid_accuracy"
+  n_trials: 4
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: true
+  output_dir: "outputs/studies"
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.lambda_coef: 0.0001
+      model.gate_regularization: l1_probability
+      model.entropy_regularization: plus_negative_entropy
+      model.entropy_regularization_coef: 0.0
+      mlflow.run_name: efficientnetv2_s_aig_plus_neg_entropy_beta0_lambda1em4_120ep
+      mlflow.tags.recipe: "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.entropy_regularization: "plus_negative_entropy"
+      mlflow.tags.entropy_regularization_coef: "0"
+      mlflow.tags.num_epochs: "120"
+    - model.lambda_coef: 0.0001
+      model.gate_regularization: l1_probability
+      model.entropy_regularization: plus_negative_entropy
+      model.entropy_regularization_coef: 0.1
+      mlflow.run_name: efficientnetv2_s_aig_plus_neg_entropy_beta0p1_lambda1em4_120ep
+      mlflow.tags.recipe: "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.entropy_regularization: "plus_negative_entropy"
+      mlflow.tags.entropy_regularization_coef: "0.1"
+      mlflow.tags.num_epochs: "120"
+    - model.lambda_coef: 0.0001
+      model.gate_regularization: l1_probability
+      model.entropy_regularization: plus_negative_entropy
+      model.entropy_regularization_coef: 0.3
+      mlflow.run_name: efficientnetv2_s_aig_plus_neg_entropy_beta0p3_lambda1em4_120ep
+      mlflow.tags.recipe: "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.entropy_regularization: "plus_negative_entropy"
+      mlflow.tags.entropy_regularization_coef: "0.3"
+      mlflow.tags.num_epochs: "120"
+    - model.lambda_coef: 0.0001
+      model.gate_regularization: l1_probability
+      model.entropy_regularization: plus_negative_entropy
+      model.entropy_regularization_coef: 1.0
+      mlflow.run_name: efficientnetv2_s_aig_plus_neg_entropy_beta1_lambda1em4_120ep
+      mlflow.tags.recipe: "efficientnetv2_s_aig_plus_neg_entropy_coef_lambda1em4_120ep"
+      mlflow.tags.initial_lambda: "0.0001"
+      mlflow.tags.gate_regularization: "l1_probability"
+      mlflow.tags.entropy_regularization: "plus_negative_entropy"
+      mlflow.tags.entropy_regularization_coef: "1"
+      mlflow.tags.num_epochs: "120"

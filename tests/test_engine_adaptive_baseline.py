@@ -86,6 +86,37 @@ def test_adaptive_lambda_auto_log_step_matches_missing_config_value():
     assert explicit_controller.step == pytest.approx(0.25)
 
 
+def test_accuracy_only_auto_log_step_reuses_first_third_resolver():
+    training_arguments = OmegaConf.create({
+        "num_epochs": 60,
+        "lambda_warmup": {"enabled": False},
+        "adaptive_lambda": {
+            "enabled": True,
+            "control_mode": "accuracy_only",
+            "alpha_init": 1.0e-3,
+            "alpha_min": 1.0e-8,
+            "alpha_max": 80.0,
+            "soft_drop": 0.005,
+            "hard_drop": 0.01,
+            "gap_window": 3,
+            "update_every_search_epochs": 1,
+            "initial_search_warmup": 10,
+            "reentry_samples": 3,
+            "log_step": "auto",
+        },
+    })
+    controller = engine._build_adaptive_lambda(
+        training_arguments,
+        _LambdaModel(1.0e-3),
+        baseline_accuracy_by_epoch={epoch: 0.9 for epoch in range(1, 61)},
+    )
+
+    # First third of 60 epochs is epoch 20. With a 10-epoch controller warmup
+    # and per-epoch decisions there are ten increases from 1e-3 to 10.
+    expected = math.log(10.0 / 1.0e-3) / 10.0
+    assert controller.summary_state()["adaptive_lambda_step"] == pytest.approx(expected)
+
+
 def test_ensure_adaptive_baseline_reference_runs_baseline_when_folder_is_empty(tmp_path, monkeypatch):
     baseline_root = tmp_path / "baseline_root"
     config = _make_config(str(baseline_root))

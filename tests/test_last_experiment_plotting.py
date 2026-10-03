@@ -186,6 +186,7 @@ def test_automatic_labels_use_only_config_fields_that_vary(history_df):
             "run_name": ["run_1", "run_2"],
             "model.lambda_coef": [1e-4, 1.0],
             "model.entropy_regularization": ["disabled", "plus_negative_entropy"],
+            "model.entropy_regularization_coef": [0.0, 0.3],
             "model.backbone.resnet_block.gate_regularization": [
                 "l1_probability",
                 "l1_probability",
@@ -196,7 +197,7 @@ def test_automatic_labels_use_only_config_fields_that_vary(history_df):
     labeled_summary, labeled_history = _apply_automatic_run_labels(summary, history_df)
 
     assert labeled_summary["run_label"].tolist() == [
-        "lambda_init_1e-4_entropy_disabled",
-        "lambda_init_1_entropy_plus_negative_entropy",
+        "lambda_init_1e-4_entropy_disabled_entropy_coef_0",
+        "lambda_init_1_entropy_plus_negative_entropy_entropy_coef_0.3",
     ]
     assert set(labeled_history["run_label"]) == set(labeled_summary["run_label"])
