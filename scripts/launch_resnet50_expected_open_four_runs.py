@@ -3,7 +3,10 @@
 The checked-in suite is the Cartesian product of two accepted validation-drop
 points and entropy beta in {0.0, 0.3}. Every model performs one 60-epoch
 adaptive-lambda search followed by one 90-epoch physical recovery. There are no
-scratch branches, repeats, curve points, or other hidden training jobs.
+scratch branches, repeats, curve points, or other hidden training jobs. Epoch
+checkpoints exist only while selecting one model; after its search and recovery
+are verified, nested checkpoints are removed and root selected/deployment
+artifacts are retained.
 """
 from __future__ import annotations
 
@@ -244,6 +247,27 @@ def _verify_recovery(path, row):
     }
 
 
+def _prune_pair_checkpoints(search_dir, recovery_dir):
+    """Remove only verified pair-local snapshots, preserving root artifacts."""
+    removed_files = 0
+    removed_bytes = 0
+    for root in (Path(search_dir), Path(recovery_dir)):
+        for path in root.rglob("checkpoints/*.pt"):
+            _require(
+                path.is_file() and path.parent.name == "checkpoints",
+                f"Refusing unexpected cleanup target: {path}",
+            )
+            removed_bytes += path.stat().st_size
+            path.unlink()
+            removed_files += 1
+    print(
+        f"[suite] removed {removed_files} verified nested checkpoints "
+        f"({removed_bytes / 2 ** 30:.1f} GiB); root selected/deployment artifacts retained",
+        flush=True,
+    )
+    return {"files": removed_files, "bytes": removed_bytes}
+
+
 def _write_summary(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -258,6 +282,11 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--suite-config", type=Path, default=SUITE_CONFIG)
     parser.add_argument("--skip-test", action="store_true")
+    parser.add_argument(
+        "--keep-nested-checkpoints",
+        action="store_true",
+        help="Debug only: retain temporary per-epoch checkpoints after a verified pair",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--resume",
@@ -275,6 +304,11 @@ def main(argv=None):
         "dense_source": str(dense_source),
         "output": str(output),
         "official_test_after_each_frozen_recovery": not args.skip_test,
+        "checkpoint_policy": (
+            "retain temporary per-epoch checkpoints"
+            if args.keep_nested_checkpoints
+            else "prune nested checkpoints after each verified pair; retain root selected/deployment"
+        ),
     })
     print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
     if args.dry_run:
@@ -300,6 +334,10 @@ def main(argv=None):
                 "recovery": _verify_recovery(recovery_output, row),
                 "reused_completed_pair": True,
             }
+            if not args.keep_nested_checkpoints:
+                result["checkpoint_cleanup"] = _prune_pair_checkpoints(
+                    search_output, recovery_output
+                )
             results.append(result)
             _write_summary(output / "study_summary.json", {
                 **plan, "status": "running", "completed_runs": len(results), "results": results,
@@ -329,6 +367,10 @@ def main(argv=None):
             "recovery": _verify_recovery(recovery_output, row),
             "reused_completed_pair": False,
         }
+        if not args.keep_nested_checkpoints:
+            result["checkpoint_cleanup"] = _prune_pair_checkpoints(
+                search_output, recovery_output
+            )
         results.append(result)
         _write_summary(output / "study_summary.json", {
             **plan, "status": "running", "completed_runs": len(results), "results": results,

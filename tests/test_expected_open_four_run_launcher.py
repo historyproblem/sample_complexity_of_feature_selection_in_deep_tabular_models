@@ -58,3 +58,26 @@ def test_each_model_builds_one_search_and_one_recovery_command(tmp_path):
         assert sum(value == "--override" for value in recovery_command) == 4
 
     assert len(commands) == 8
+
+
+def test_checkpoint_cleanup_is_narrow_and_keeps_root_artifacts(tmp_path):
+    search = tmp_path / "search"
+    recovery = tmp_path / "recovery"
+    root_artifacts = []
+    for root in (search, recovery):
+        root.mkdir()
+        for name in ("selected_checkpoint.pt", "deployment.pt"):
+            path = root / name
+            path.write_bytes(b"keep")
+            root_artifacts.append(path)
+        nested = root / "stage/checkpoints"
+        nested.mkdir(parents=True)
+        (nested / "epoch_0001.pt").write_bytes(b"remove")
+        (nested / "best.pt").write_bytes(b"remove")
+        (nested / "last.pt").write_bytes(b"remove")
+
+    result = launcher._prune_pair_checkpoints(search, recovery)
+
+    assert result == {"files": 6, "bytes": 36}
+    assert not list(tmp_path.rglob("checkpoints/*.pt"))
+    assert all(path.read_bytes() == b"keep" for path in root_artifacts)
