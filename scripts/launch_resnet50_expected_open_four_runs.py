@@ -28,7 +28,9 @@ SUITE_CONFIG = (
     / "configs/experiment/pruning_v3/resnet50_cifar10_expected_open_four_runs.yaml"
 )
 DEFAULT_DENSE_SOURCE = Path("outputs/runs/epoch_split_dense_reference_seed42_fresh")
-DEFAULT_OUTPUT = Path("outputs/runs/resnet50_cifar10_expected_open_four_runs_60_90")
+DEFAULT_OUTPUT = Path(
+    "outputs/runs/resnet50_cifar10_expected_open_four_runs_online_selection_v1"
+)
 EXPECTED_POINTS = {
     (0.0005, 0.001),
     (0.01, 0.02),
