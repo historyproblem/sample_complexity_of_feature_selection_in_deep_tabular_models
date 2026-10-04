@@ -1778,8 +1778,11 @@ def train(model: nn.Module,
     stage_metadata = OmegaConf.to_container(
         getattr(training_arguments, "accuracy_guided_stage", OmegaConf.create({})), resolve=True)
     epoch_events_enabled = bool(stage_metadata) or isinstance(adaptive_lambda, AccuracyOnlyLambdaController)
-    checkpoint_retention = stage_metadata.get("checkpoint_retention", "all_epochs")
-    if checkpoint_retention not in {"all_epochs", "online_selection"}:
+    checkpoint_retention = stage_metadata.get(
+        "checkpoint_retention",
+        getattr(training_arguments, "checkpoint_retention", "all_epochs"),
+    )
+    if checkpoint_retention not in {"all_epochs", "online_selection", "external_selection"}:
         raise ValueError(f"Unsupported checkpoint retention policy: {checkpoint_retention!r}")
 
     def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
@@ -1938,7 +1941,8 @@ def train(model: nn.Module,
             scheduler_state.step(observed_epoch_metrics)
 
         updated_best = run_history is not None and run_history.should_update_best(epoch_num, valid_metrics)
-        if updated_best and not epoch_events_enabled:
+        if (updated_best and not epoch_events_enabled
+                and checkpoint_retention != "external_selection"):
             run_history.save_checkpoint(
                 "best.pt",
                 model=model,
@@ -1960,7 +1964,8 @@ def train(model: nn.Module,
                 apply_lambda=_apply_adaptive_lambda,
             )
             controller_metrics = dict(adaptive_step_result.metrics)
-            if updated_best and not epoch_events_enabled:
+            if (updated_best and not epoch_events_enabled
+                    and checkpoint_retention != "external_selection"):
                 run_history.update_checkpoint_extra_state(
                     "best.pt", {"adaptive_lambda_state": adaptive_lambda.state_dict(),
                                 "adaptive_global_epoch": adaptive_epoch_offset + epoch_num},
@@ -1996,7 +2001,7 @@ def train(model: nn.Module,
                 "clocks": clocks, "consumed_ledger": deepcopy(training_ledger),
                 "topology": gate_diagnostics,
                 "provenance": {"stage": deepcopy(stage_metadata)}}
-            if updated_best:
+            if updated_best and checkpoint_retention != "external_selection":
                 # v3 publishes one complete epoch-event atomically. It never
                 # exposes a best snapshot awaiting post-controller metadata.
                 run_history.save_checkpoint("best.pt", model=model, optimizer=optimizer,
@@ -2042,33 +2047,34 @@ def train(model: nn.Module,
                 mlflow_logger.log_metrics(controller_numeric_metrics, step=epoch_num)
 
         if run_history is not None:
-            run_history.save_checkpoint(
-                "last.pt",
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch_num,
-                metrics={
-                    **observed_epoch_metrics,
-                    **controller_metrics,
-                },
-                scheduler_state=scheduler_state,
-                extra_state={
-                    **post_epoch_extra_metrics,
-                    **({"epoch_event": epoch_event} if epoch_event is not None else {}),
-                    **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
-                        "adaptive_global_epoch": adaptive_epoch_offset + epoch_num}
-                       if adaptive_lambda is not None else {}),
-                },
-            )
-            if epoch_event is not None and checkpoint_retention == "all_epochs":
-                # Every evaluated epoch is available for best_feasible_compact.
-                # Byte-copy the atomic last snapshot: no repeated RNG sampling.
-                import shutil
-                target = run_history.checkpoints_dir / f"epoch_{epoch_num:04d}.pt"
-                temporary = target.with_suffix(".pt.tmp")
-                shutil.copyfile(run_history.checkpoints_dir / "last.pt", temporary)
-                temporary.replace(target)
-                run_history.last_epoch_event = deepcopy(epoch_event)
+            if checkpoint_retention != "external_selection":
+                run_history.save_checkpoint(
+                    "last.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch_num,
+                    metrics={
+                        **observed_epoch_metrics,
+                        **controller_metrics,
+                    },
+                    scheduler_state=scheduler_state,
+                    extra_state={
+                        **post_epoch_extra_metrics,
+                        **({"epoch_event": epoch_event} if epoch_event is not None else {}),
+                        **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                            "adaptive_global_epoch": adaptive_epoch_offset + epoch_num}
+                           if adaptive_lambda is not None else {}),
+                    },
+                )
+                if epoch_event is not None and checkpoint_retention == "all_epochs":
+                    # Every evaluated epoch is available for best_feasible_compact.
+                    # Byte-copy the atomic last snapshot: no repeated RNG sampling.
+                    import shutil
+                    target = run_history.checkpoints_dir / f"epoch_{epoch_num:04d}.pt"
+                    temporary = target.with_suffix(".pt.tmp")
+                    shutil.copyfile(run_history.checkpoints_dir / "last.pt", temporary)
+                    temporary.replace(target)
+                    run_history.last_epoch_event = deepcopy(epoch_event)
             run_history.log_epoch(
                 epoch_num,
                 train_metrics,
@@ -2219,25 +2225,26 @@ def train(model: nn.Module,
                         ),
                     }
                 )
-                run_history.save_checkpoint(
-                    "last.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=final_epoch,
-                    metrics={
-                        **last_train_metrics,
-                        **last_valid_metrics,
-                    },
-                    scheduler_state=scheduler_state,
-                    extra_state={
-                        "model_lambda_coef": _resolve_model_lambda_coef(model),
-                        "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
-                        **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
-                        **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
-                            "adaptive_global_epoch": adaptive_epoch_offset + final_epoch}
-                           if adaptive_lambda is not None else {}),
-                    },
-                )
+                if checkpoint_retention != "external_selection":
+                    run_history.save_checkpoint(
+                        "last.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        epoch=final_epoch,
+                        metrics={
+                            **last_train_metrics,
+                            **last_valid_metrics,
+                        },
+                        scheduler_state=scheduler_state,
+                        extra_state={
+                            "model_lambda_coef": _resolve_model_lambda_coef(model),
+                            "gumbel_bypass_enabled": _resolve_model_gumbel_bypass(model),
+                            **(adaptive_lambda.summary_state() if adaptive_lambda is not None else {}),
+                            **({"adaptive_lambda_state": adaptive_lambda.state_dict(),
+                                "adaptive_global_epoch": adaptive_epoch_offset + final_epoch}
+                               if adaptive_lambda is not None else {}),
+                        },
+                    )
 
     if not bool(getattr(training_arguments, "evaluate_test", True)):
         if run_history is not None:

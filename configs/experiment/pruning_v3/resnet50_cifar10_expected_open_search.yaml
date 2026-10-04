@@ -13,6 +13,10 @@ accuracy_guided:
 
 one_shot:
   checkpoint_retention: online_selection
+  # Dense-reference weights are used only to measure the validation curve.
+  # Pruning starts from shared_random_seed42.pt, so discard trained dense
+  # snapshots after frozen validation and retain initializer + metadata only.
+  reference_checkpoint_retention: metadata_only
 
 mlflow:
   run_name: resnet50_cifar10_expected_open_search

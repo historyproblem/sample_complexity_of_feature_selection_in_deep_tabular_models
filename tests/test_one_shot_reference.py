@@ -217,6 +217,29 @@ def test_reference_output_is_never_overwritten_or_implicitly_resumed(tmp_path, m
     assert list(output.iterdir()) == [marker]
 
 
+def test_metadata_only_reference_retains_initializer_and_no_trained_weights(tmp_path):
+    from net_complexity.training import one_shot_reference as runtime
+
+    cfg = clean_config(tmp_path)
+    OmegaConf.update(
+        cfg,
+        "one_shot.reference_checkpoint_retention",
+        "metadata_only",
+        force_add=True,
+    )
+    validate_config(cfg)
+    source = tmp_path / "metadata_only_reference"
+
+    runtime.prepare_dense_reference(cfg, source)
+
+    state = json.loads((source / "J1_dense_control/pilot_state.json").read_text())
+    assert state["status"] == "completed"
+    assert state["checkpoint_retention"] == "metadata_only"
+    assert state["discarded_dense_weight_artifacts"] == 1
+    assert list(source.rglob("*.pt")) == [source / "shared_random_seed42.pt"]
+    assert validate_inputs(use_reference(deepcopy(cfg), source))["status"] == "ready"
+
+
 def test_new_reference_rejects_job_path_that_would_escape_output_and_overwrite_parent_initializer(tmp_path, monkeypatch):
     from net_complexity.training import one_shot_reference as runtime
     cfg = clean_config(tmp_path)

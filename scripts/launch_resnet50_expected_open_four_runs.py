@@ -1,6 +1,7 @@
 """Run exactly four expected-open-count ResNet50/CIFAR-10 models.
 
-The checked-in suite is the Cartesian product of two accepted validation-drop
+The checked-in suite can first train its matched seed-42 dense validation
+reference, then runs the Cartesian product of two accepted validation-drop
 points and entropy beta in {0.0, 0.3}. Every model performs one 60-epoch
 adaptive-lambda search followed by one 90-epoch physical recovery. There are no
 scratch branches, repeats, curve points, or other hidden training jobs. Epoch
@@ -49,7 +50,7 @@ def _plain_suite(path=SUITE_CONFIG):
     _require(isinstance(suite, dict), "Suite config must be a mapping")
     _require(
         set(suite) == {
-            "protocol", "search_config", "recovery_config", "drop_mode",
+            "protocol", "baseline", "search_config", "recovery_config", "drop_mode",
             "search_epochs", "recovery_epochs", "runs",
         },
         "Suite config fields changed",
@@ -78,6 +79,22 @@ def validate_suite_configs(path=SUITE_CONFIG):
         "Unexpected suite protocol",
     )
     _require(suite["drop_mode"] == "expected_open_count", "Unexpected selector")
+    baseline = suite["baseline"]
+    _require(
+        isinstance(baseline, dict) and set(baseline) == {
+            "config", "epochs", "seed", "checkpoint_retention",
+        },
+        "Suite baseline must define config, epochs, seed and checkpoint_retention",
+    )
+    _require(
+        baseline == {
+            "config": suite["search_config"],
+            "epochs": 150,
+            "seed": 42,
+            "checkpoint_retention": "metadata_only",
+        },
+        "Suite baseline must be the matched seed-42 dense150 metadata-only reference",
+    )
     _require(
         (suite["search_epochs"], suite["recovery_epochs"]) == (60, 90),
         "Suite must preserve the accepted 60/90 split",
@@ -97,6 +114,31 @@ def validate_suite_configs(path=SUITE_CONFIG):
     }
     expected = {(point, beta) for point in EXPECTED_POINTS for beta in EXPECTED_BETAS}
     _require(observed == expected, "Suite must be exactly two accepted points x beta {0, 0.3}")
+
+    baseline_config = schema.compose_config(baseline["config"])
+    _require(
+        schema.validate_config(baseline_config) == 150
+        and int(baseline_config.seed) == 42
+        and str(baseline_config.one_shot.reference_checkpoint_retention)
+        == "metadata_only",
+        "Baseline config differs from the matched dense150 reference contract",
+    )
+    _require(
+        str(baseline_config.dataloaders.taskname).lower() == "cifar10"
+        and list(baseline_config.dataloaders.train_val_ratio) == [0.9, 0.1]
+        and int(baseline_config.dataloaders.loader_seed) == 42
+        and int(baseline_config.dataloaders.batch_size) == 128
+        and str(baseline_config.model.backbone._target_)
+        == "net_complexity.wrappers.ResNet50"
+        and str(baseline_config.optimizer._target_) == "torch.optim.AdamW"
+        and float(baseline_config.optimizer.lr) == 0.001
+        and float(baseline_config.optimizer.weight_decay) == 0.0005
+        and str(baseline_config.scheduler._target_)
+        == "torch.optim.lr_scheduler.CosineAnnealingLR"
+        and int(baseline_config.scheduler.T_max) == 200
+        and float(baseline_config.scheduler.eta_min) == 0.0,
+        "Baseline data/model/optimizer/scheduler differs from the accepted reference",
+    )
 
     verified = []
     for raw_row in rows:
@@ -160,6 +202,7 @@ def validate_suite_configs(path=SUITE_CONFIG):
         })
     return {
         "protocol": suite["protocol"],
+        "baseline": dict(baseline),
         "model_runs": 4,
         "runs": verified,
         "search_epochs_per_model": 60,
@@ -191,6 +234,15 @@ def _launcher_command(config, dense_source, output, *, row, search_only=False,
     if skip_test:
         command.append("--skip-test")
     return command
+
+
+def _baseline_command(config, dense_source):
+    return [
+        sys.executable,
+        str(ONE_SHOT),
+        "--config-name", str(config),
+        "--prepare-reference", str(dense_source),
+    ]
 
 
 def _run(command):
@@ -341,6 +393,14 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--train-baseline",
+        action="store_true",
+        help=(
+            "Train the matched seed-42 dense150 reference at --dense-source before "
+            "preflight; combine with --preflight-only to prepare only the baseline"
+        ),
+    )
+    parser.add_argument(
         "--preflight-only",
         action="store_true",
         help="Validate the uploaded baseline and free disk without training",
@@ -364,6 +424,7 @@ def main(argv=None):
         "suite_config": str(suite_path),
         "dense_source": str(dense_source),
         "output": str(output),
+        "baseline_training_requested": bool(args.train_baseline),
         "official_test_after_each_frozen_recovery": not args.skip_test,
         "checkpoint_policy": (
             "retain debug snapshots instead of pruning the bounded online set"
@@ -375,6 +436,23 @@ def main(argv=None):
     if args.dry_run:
         print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
         return plan
+
+    if args.train_baseline:
+        _require(
+            not dense_source.exists(),
+            f"Refusing to overwrite existing baseline: {dense_source}",
+        )
+        print(
+            f"[suite baseline] training dense150 seed42 reference: {dense_source}",
+            flush=True,
+        )
+        _run(_baseline_command(plan["baseline"]["config"], dense_source))
+        plan["baseline_training"] = {
+            "status": "completed",
+            "epochs": 150,
+            "seed": 42,
+            "checkpoint_retention": "metadata_only",
+        }
 
     plan["preflight"] = _runtime_preflight(
         plan, dense_source, output, float(args.min_free_gib)

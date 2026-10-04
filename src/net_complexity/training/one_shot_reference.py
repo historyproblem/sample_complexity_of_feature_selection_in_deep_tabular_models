@@ -70,6 +70,22 @@ def prepare_dense_reference(config, output_root):
     plan.run_history.log_channel_history = False
     runtime = deepcopy(plan)
     _set_num_epochs(runtime, total)
+    reference_checkpoint_retention = str(getattr(
+        config.one_shot, "reference_checkpoint_retention", "full"
+    ))
+    if reference_checkpoint_retention not in {"full", "metadata_only"}:
+        raise ValueError(
+            "reference_checkpoint_retention must be full or metadata_only"
+        )
+    if reference_checkpoint_retention == "metadata_only":
+        # Validation selection is owned by epoch_end below. Avoid the engine's
+        # much larger optimizer-bearing best/last snapshots.
+        OmegaConf.update(
+            runtime,
+            "training_arguments.checkpoint_retention",
+            "external_selection",
+            force_add=True,
+        )
 
     with phase_progress("dense_reference", "preparing dataset: download/cache, split and validation loader"), isolated_diagnostic_rng():
         data = instantiate(config.dataloaders, include_test=False, loader_seed=seed)
@@ -116,6 +132,7 @@ def prepare_dense_reference(config, output_root):
         "reference_kind": "measured_synthetic_dense_reference" if smoke else "measured_dense_validation_reference",
         "reference_training_epochs_actually_executed": 0,
         "reference_training_cost": "external to each 150-epoch pruning branch; explicitly consumed here",
+        "checkpoint_retention": reference_checkpoint_retention,
         "initial_cost": initial_cost,
         "runtime": {"optimizer": OmegaConf.to_container(runtime.optimizer, resolve=True),
                     "scheduler": OmegaConf.to_container(runtime.scheduler, resolve=True),
@@ -205,8 +222,18 @@ def prepare_dense_reference(config, output_root):
                 final_cost=deployment_cost(source, image_shape=tuple(sample[0].shape[1:])),
                 history_sha256=file_hash(paths["history_path"]),
                 training_configuration_sha256=file_hash(job / "training_config.yaml"))
-            atomic_checkpoint(job / "deployment.pt", {**state,
-                "model_state_dict": source.cpu().state_dict(), "artifact_type": "dense_reference_only"})
+            if reference_checkpoint_retention == "full":
+                atomic_checkpoint(job / "deployment.pt", {**state,
+                    "model_state_dict": source.cpu().state_dict(),
+                    "artifact_type": "dense_reference_only"})
+            else:
+                selected_bytes = best_path.stat().st_size
+                best_path.unlink()
+                state.update(
+                    retained_weight_artifacts=[str(paths["initializer_path"])],
+                    discarded_dense_weight_artifacts=1,
+                    discarded_dense_weight_bytes=selected_bytes,
+                )
             persist()
             progress_message("dense_reference", f"ready: epoch={state['selected_epoch']}; validation={validation['accuracy']:.4%}; source={output_root}")
             return state

@@ -107,7 +107,10 @@ def validate_config(config):
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        optional_fields = {"search_scheduler_eta_min", "checkpoint_retention"}
+        optional_fields = {
+            "search_scheduler_eta_min", "checkpoint_retention",
+            "reference_checkpoint_retention",
+        }
         _require(required_fields <= set(one) <= required_fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
                  f"missing={sorted(required_fields - set(one))}")
@@ -132,7 +135,7 @@ def validate_config(config):
             fields.add("search_scheduler_eta_min")
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
-        optional_fields = ({"checkpoint_retention"} | (
+        optional_fields = ({"checkpoint_retention", "reference_checkpoint_retention"} | (
             {"recovery_source_search_epoch"}
             if protocol == EPOCH_SPLIT_RECOVERY_PROTOCOL
             else set()
@@ -210,6 +213,10 @@ def validate_config(config):
     _require(
         one.get("checkpoint_retention", "all_epochs") in CHECKPOINT_RETENTION_POLICIES,
         f"checkpoint_retention must be one of {sorted(CHECKPOINT_RETENTION_POLICIES)}",
+    )
+    _require(
+        one.get("reference_checkpoint_retention", "full") in {"full", "metadata_only"},
+        "reference_checkpoint_retention must be full or metadata_only",
     )
     for field in ("search_epochs", "final_epochs"):
         _require(type(one[field]) is int and one[field] > 0, f"{field} must be a positive integer")

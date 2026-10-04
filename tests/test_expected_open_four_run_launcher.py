@@ -25,6 +25,12 @@ def test_suite_is_exactly_four_60_plus_90_models():
     assert plan["recovery_epochs_per_model"] == 90
     assert plan["epochs_per_model"] == 150
     assert plan["total_training_epochs"] == 600
+    assert plan["baseline"] == {
+        "config": "experiment/pruning_v3/resnet50_cifar10_expected_open_search",
+        "epochs": 150,
+        "seed": 42,
+        "checkpoint_retention": "metadata_only",
+    }
     assert plan["drop_mode"] == "expected_open_count"
     assert plan["checkpoint_retention"] == "online_selection"
     assert plan["gate_threshold_replaced"] == 0.5
@@ -65,6 +71,22 @@ def test_each_model_builds_one_search_and_one_recovery_command(tmp_path):
         assert sum(value == "--override" for value in recovery_command) == 4
 
     assert len(commands) == 8
+
+
+def test_baseline_command_trains_reference_without_starting_pruning(tmp_path):
+    command = launcher._baseline_command(
+        "experiment/pruning_v3/resnet50_cifar10_expected_open_search",
+        tmp_path / "reference",
+    )
+
+    assert command == [
+        launcher.sys.executable,
+        str(launcher.ONE_SHOT),
+        "--config-name",
+        "experiment/pruning_v3/resnet50_cifar10_expected_open_search",
+        "--prepare-reference",
+        str(tmp_path / "reference"),
+    ]
 
 
 def test_checkpoint_cleanup_is_narrow_and_keeps_root_artifacts(tmp_path):

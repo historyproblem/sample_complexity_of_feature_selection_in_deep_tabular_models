@@ -2,6 +2,11 @@
 # These are the accepted 60/90 controller points that produced approximately
 # 12.7M and 4.6M physical parameters in the earlier fixed-threshold study.
 protocol: resnet50_cifar10_expected_open_four_runs_v1
+baseline:
+  config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+  epochs: 150
+  seed: 42
+  checkpoint_retention: metadata_only
 search_config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
 recovery_config: experiment/pruning_v3/resnet50_cifar10_expected_open_recovery
 drop_mode: expected_open_count
