@@ -56,4 +56,3 @@ mlflow:
     model_type: "ResNet50_AIG"
     method: "aig"
     recipe: "best_practice_resnet50_aig_on_cifar10"
-

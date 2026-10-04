@@ -1,0 +1,24 @@
+# @package _global_
+# Shared search recipe for the 150-epoch search/recovery split study.
+# Ordinary optimizer/loss settings are kept unchanged: AdamW 1e-3/5e-4,
+# cosine decay to zero, and plain cross entropy without label smoothing.
+defaults:
+  - /experiment/pruning_v3/parameter_curve_search60
+  - _self_
+
+one_shot:
+  protocol: pruning_v3_one_shot_epoch_split_150
+  search_scheduler_eta_min: 0.0
+
+training_arguments:
+  adaptive_lambda:
+    # Equal to the value produced by `auto` in the successful 60-epoch search.
+    # Keeping it fixed makes 30 epochs valid and avoids changing controller
+    # step size merely because the search/recovery split changed.
+    log_step: 0.9210340371976183
+
+mlflow:
+  run_name: epoch_split_search
+
+run_history:
+  run_name: epoch_split_search

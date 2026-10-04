@@ -1,0 +1,25 @@
+# Synthetic integration only; fixture supplies tiny Bottleneck/data/reference/init.
+defaults:
+  - accuracy_guided_gates_v3
+  - _self_
+device: cpu
+training_arguments:
+  num_epochs: 8
+  adaptive_lambda:
+    initial_search_warmup: 0
+    gap_window: 1
+    update_every_search_epochs: 1
+    reentry_samples: 1
+accuracy_guided:
+  smoke: true
+  total_epochs: 8
+  guard: {train_bn_calibration_batches: 0}
+  reference: {history_path: null, state_path: null, config_path: null}
+  initializer: {path: null}
+  stage_plan:
+    - {id: search_0, kind: search, epochs: 3, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: commit_0, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: recovery_0, kind: recovery, epochs: 1, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: search_1, kind: search, epochs: 3, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: commit_1, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: recovery_1, kind: recovery, epochs: 1, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}

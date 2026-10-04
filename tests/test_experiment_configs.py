@@ -305,17 +305,16 @@ def test_channel_pruning_and_layer_skipping_experiment_configs():
     assert layer_cfg.mlflow.tags.method == "layer_skipping"
 
 
-def test_cyclic_aig_configs_use_current_adaptive_lambda_defaults():
+def test_cyclic_aig_configs_use_v3_adaptive_lambda_defaults():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "cyclic_aig_resnet50_cifar10.yaml")
 
-    assert cfg.defaults[3] == {"/train": "aig_adaptive_lambda"}
-    assert cfg.model.lambda_coef == 1e-6
-    assert cfg.model.backbone.resnet_block.gate_regularization == "l2_gate"
-    assert cfg.training_arguments.adaptive_lambda.lambda_max == 10.0
-    assert cfg.training_arguments.adaptive_lambda.log_step_init == "auto"
-    assert "lambda_warmup" not in cfg.training_arguments
-    assert "adaptive_log_step_enabled" not in cfg.training_arguments.adaptive_lambda
-    assert cfg.mlflow.tags.gate_regularization == "l2_gate"
+    assert cfg.defaults[3] == {"/train": "resnet50_best_practice"}
+    assert cfg.model.lambda_coef == 0.01
+    assert cfg.training_arguments.lambda_warmup.enabled is False
+    assert cfg.training_arguments.adaptive_lambda.lambda_max == 1.0
+    assert cfg.training_arguments.adaptive_lambda.log_step_init == 0.22314355131420976
+    assert cfg.training_arguments.adaptive_lambda.adaptive_log_step_enabled is False
+    assert cfg.training_arguments.adaptive_lambda.recovery.enabled is False
 
 
 def test_train_profiles_enable_batchnorm_recalibration_by_default():
@@ -391,7 +390,7 @@ def test_default_optuna_profile_matches_sgd_based_gumbel_recipe():
     assert cfg.tuning.search_space["dataloaders.batch_size"].choices == [128, 256, 512]
 
 
-def test_best_practice_resnet50_aig_baseline_uses_full_cifar_recipe_with_zero_lambda():
+def test_best_practice_resnet50_aig_uses_v3_cifar_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet50_aig_on_cifar10.yaml")
 
     assert cfg.defaults == [
@@ -399,14 +398,14 @@ def test_best_practice_resnet50_aig_baseline_uses_full_cifar_recipe_with_zero_la
         {"/model": "resnet50"},
         {"/method": "aig"},
         {"/train": "resnet50_best_practice"},
-        {"/optimizer": "sgd_resnet50"},
+        {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "aig"},
         {"/run_history": "valid_accuracy_max"},
         {"/tracking": "default"},
         "_self_",
     ]
-    assert cfg.model.lambda_coef == 0.0
+    assert cfg.model.lambda_coef == 20.0
     assert cfg.model.backbone.resnet_block.temperature == 1.0
     assert cfg.mlflow.tags.recipe == "best_practice_resnet50_aig_on_cifar10"
 
@@ -590,20 +589,20 @@ def test_best_practice_resnet50_gumbel_paper_resnet50_ramp30_lambda001_starts_ra
 
 def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid():
     expected = {
-        "resnet50_adaptive_lambda_init5.yaml": 5.0,
-        "resnet50_adaptive_lambda_init15.yaml": 15.0,
-        "resnet50_adaptive_lambda_init25.yaml": 25.0,
-        "resnet50_adaptive_lambda_init35.yaml": 35.0,
+        "resnet50_adaptive_lambda_init5.yaml": (5.0, "adamw", True),
+        "resnet50_adaptive_lambda_init15.yaml": (15.0, "sgd_resnet50", False),
+        "resnet50_adaptive_lambda_init25.yaml": (25.0, "sgd_resnet50", False),
+        "resnet50_adaptive_lambda_init35.yaml": (35.0, "sgd_resnet50", False),
     }
 
-    for config_name, lambda_init in expected.items():
+    for config_name, (lambda_init, optimizer, mlflow_enabled) in expected.items():
         cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / config_name)
         assert cfg.defaults == [
             {"/data": "cifar10_best_practice"},
             {"/model": "resnet50"},
             {"/method": "gumbel"},
             {"/train": "resnet50_best_practice"},
-            {"/optimizer": "sgd_resnet50"},
+            {"/optimizer": optimizer},
             {"/scheduler": "cosine_200"},
             {"/metrics": "gumbel_resnet50"},
             {"/run_history": "valid_accuracy_max"},
@@ -629,7 +628,7 @@ def test_resnet50_adaptive_lambda_experiments_use_requested_initial_lambda_grid(
         assert cfg.training_arguments.adaptive_lambda.soft_drop == 0.02
         assert cfg.training_arguments.adaptive_lambda.hard_drop == 0.05
         assert cfg.run_history.log_gate_history is True
-        assert cfg.mlflow.enabled is False
+        assert cfg.mlflow.enabled is mlflow_enabled
         assert cfg.mlflow.tags.recipe == config_name.removesuffix(".yaml")
 
 
@@ -919,10 +918,10 @@ def test_gumbel_resnet50_metrics_disable_per_channel_zero_probability_logging():
 
     assert cfg.metrics.train_metrics[2].log_channel_zero_probs is False
     assert cfg.metrics.valid_metrics[2].log_channel_zero_probs is False
-    assert cfg.metrics.test_metrics[2].log_channel_zero_probs is False
+    assert cfg.metrics.test_metrics[3].log_channel_zero_probs is False
 
 
-def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_recipe():
+def test_best_practice_resnet50_plain_baseline_matches_v3_cifar_recipe():
     cfg = OmegaConf.load(CONFIGS_DIR / "experiment" / "best_practice_resnet50_on_cifar10.yaml")
     model_cfg = OmegaConf.load(CONFIGS_DIR / "model" / "resnet50.yaml")
     optimizer_cfg = OmegaConf.load(CONFIGS_DIR / "optimizer" / "sgd_resnet50.yaml")
@@ -935,7 +934,7 @@ def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_rec
         {"/model": "resnet50"},
         {"/method": "plain"},
         {"/train": "resnet50_best_practice"},
-        {"/optimizer": "sgd_resnet50"},
+        {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "classification"},
         {"/run_history": "valid_accuracy_max"},
@@ -943,7 +942,7 @@ def test_best_practice_resnet50_plain_baseline_matches_requested_cifar_style_rec
         "_self_",
     ]
     assert cfg.model.lambda_coef == 0.0
-    assert cfg.mlflow.tags.recipe == "best_practice_resnet50_on_cifar10"
+    assert cfg.mlflow.tags.recipe == "adaptive_lambda_baseline"
 
     assert model_cfg.model.backbone.stem_kernel_size == 3
     assert model_cfg.model.backbone.stem_stride == 1
@@ -1511,7 +1510,7 @@ def test_tinyimagenet_baseline_experiment_configs_use_requested_recipes():
         {"/model": "resnet50_tinyimagenet200"},
         {"/method": "plain"},
         {"/train": "resnet50_best_practice"},
-        {"/optimizer": "sgd_resnet50"},
+        {"/optimizer": "adamw"},
         {"/scheduler": "cosine_200"},
         {"/metrics": "classification"},
         {"/run_history": "valid_accuracy_max"},

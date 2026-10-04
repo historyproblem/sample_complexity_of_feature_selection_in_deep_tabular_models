@@ -56,7 +56,7 @@ layer_skipping:
 
 scheduler:
   T_max: 240
-  
+
 cyclic_layer_dropping:
   enabled: true
 

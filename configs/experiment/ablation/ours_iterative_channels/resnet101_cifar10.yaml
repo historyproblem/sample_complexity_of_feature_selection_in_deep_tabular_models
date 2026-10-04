@@ -51,6 +51,11 @@ cyclic_channel_pruning:
   recovery_epochs: 20
   final_epochs: 150
   disable_mlflow_for_cycles: false
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+    initial_checkpoint: null
+    initial_run_dir: null
 
 mlflow:
   enabled: true

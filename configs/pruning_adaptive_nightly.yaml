@@ -1,0 +1,15 @@
+# .venv/bin/python scripts/launch_adaptive_pruning.py --config-name pruning_adaptive_nightly
+name: pruning_adaptive_nightly
+protocol: adaptive_lambda_v1
+jobs:
+  - A1_internal_p18
+  - A2_internal_p12
+  - A3_internal_p23
+  - A4_output_p05
+# No retraining of the dense reference; each new model trains from random init.
+dense_source: outputs/runs/20260907_134446_507828_pruning_dense_control
+hours: 12.5
+data: data
+evaluate_test: true
+run_history:
+  root_dir: outputs/runs

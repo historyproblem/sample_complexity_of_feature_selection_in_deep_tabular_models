@@ -155,6 +155,13 @@ _COLLECTORS: dict[_CollectorSpec, BaseChannelHistoryCollector] = {
         backbone_target="net_complexity.wrappers.CIFARResNet20",
         block_target="net_complexity.wrappers.CIFARMaskedGumbelBasicBlock",
     ): CifarResNet20GumbelCollector(),
+    # CIFAR ResNet50 uses the same backbone.layerN.block.selector paths.
+    # The collector handles both output and mid1/mid2 gates; a structural
+    # recovery model has no selectors and correctly yields no channel rows.
+    _CollectorSpec(
+        backbone_target="net_complexity.wrappers.ResNet50",
+        block_target="net_complexity.wrappers.MaskedGumbelBottleneckLayer",
+    ): CifarResNet20GumbelCollector(),
 }
 
 

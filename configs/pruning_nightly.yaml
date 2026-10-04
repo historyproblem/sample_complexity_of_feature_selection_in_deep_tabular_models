@@ -1,0 +1,14 @@
+# Fixed-budget pilot queue, NOT the old cyclic_channel_nightly threshold recipe.
+# .venv/bin/python scripts/launch_pruning_pilot.py --config-name pruning_nightly
+name: pruning_nightly
+profile: nightly
+jobs:
+  - J1_dense_control
+  - J2_output_fixed
+  - J3_internal_fixed
+  - J4_internal_random
+# Overall safety cap, including preflight. Expected duration is about 11–12h.
+hours: 12.5
+data: data
+run_history:
+  root_dir: outputs/runs

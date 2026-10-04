@@ -1,0 +1,27 @@
+# @package _global_
+# Initial ~12M calibration: twice the 60/90 quality-gap tolerance because the
+# adaptive search has half as many epochs in which to close channels.
+defaults:
+  - /experiment/pruning_v3/epoch_split_search_base
+  - _self_
+
+one_shot:
+  search_epochs: 30
+  final_epochs: 120
+
+accuracy_guided:
+  stage_plan:
+    - {id: shared_search, kind: search, epochs: 30, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+    - {id: export_only, kind: commit, epochs: 0, commit_allowed: true, selected_checkpoint: null, restart_policy: none}
+    - {id: final_recovery, kind: recovery, epochs: 120, commit_allowed: false, selected_checkpoint: null, restart_policy: adamw_cosine_restart}
+
+training_arguments:
+  adaptive_lambda:
+    soft_drop: 0.001
+    hard_drop: 0.002
+
+mlflow:
+  run_name: epoch_split_30_120_search
+
+run_history:
+  run_name: epoch_split_30_120_search

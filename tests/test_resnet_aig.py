@@ -156,6 +156,62 @@ def test_zero_entropy_coef_keeps_plus_negative_entropy_aig_active():
     torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
 
 
+def test_positive_entropy_coef_remains_active_at_zero_lambda():
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l1_probability")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    backbone = TinyAIGClassifier()
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=backbone,
+        lambda_coef=0.0,
+        bypass_on_zero_lambda=True,
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.3,
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    output = wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+
+    assert not backbone.gate.bypass
+    torch.testing.assert_close(output.reg_loss, 0.3 * output.negative_entropy)
+    torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+    wrapper.set_lambda_coef(0.0, bypass_gumbel=True)
+    assert not backbone.gate.bypass
+
+
+def test_positive_entropy_coef_requires_probability_regularization():
+    class TinyAIGClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = AIGBlockGate(in_channels=4, regularization="l2_activation")
+            self.classifier = nn.Linear(4, 3)
+
+        def forward(self, x):
+            x = x * self.gate(x)
+            return self.classifier(x.mean(dim=(2, 3)))
+
+    wrapper = ClassificationFeatureSelectionWrapper(
+        backbone=TinyAIGClassifier(),
+        lambda_coef=0.25,
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.3,
+        regularization_loss=get_AIG_regularization_loss,
+    )
+    wrapper.eval()
+
+    with pytest.raises(ValueError, match="gate_regularization='l1_probability'"):
+        wrapper(torch.randn(2, 4, 4, 4), torch.tensor([0, 1]))
+
+
 def test_aig_wrapper_rejects_unknown_entropy_regularization_mode():
     with pytest.raises(ValueError, match="entropy_regularization must be one of"):
         ClassificationFeatureSelectionWrapper(

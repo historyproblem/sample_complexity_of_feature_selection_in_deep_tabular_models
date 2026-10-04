@@ -1,0 +1,9 @@
+# @package _global_
+# 4 * 20 search + 3 * 10 intermediate recovery + 40 final recovery = 150.
+
+cyclic_channel_pruning:
+  max_cycles: 4
+  stop_on_convergence: false
+  gumbel_epochs: 20
+  recovery_epochs: 10
+  final_epochs: 40

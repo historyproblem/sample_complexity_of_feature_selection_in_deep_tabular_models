@@ -106,11 +106,45 @@ def test_aig_efficientnetv2_zero_entropy_coef_keeps_aig_active():
     model.eval()
 
     output = model(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]))
-
     assert all(not module.bypass for module in get_AIG_modules(model).values())
     torch.testing.assert_close(output.regularization_loss, output.mean_p_open)
     torch.testing.assert_close(output.reg_loss, 0.25 * output.mean_p_open)
     torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+
+def test_aig_efficientnetv2_positive_entropy_coef_remains_active_at_zero_lambda():
+    model = AIGEfficientNetV2S(
+        num_classes=10,
+        lambda_coef=0.0,
+        bypass_on_zero_lambda=True,
+        gate_regularization="l1_probability",
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.3,
+    )
+    model.eval()
+
+    output = model(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]))
+
+    assert all(not module.bypass for module in get_AIG_modules(model).values())
+    torch.testing.assert_close(output.reg_loss, 0.3 * output.negative_entropy)
+    torch.testing.assert_close(output.loss, output.ce_loss + output.reg_loss)
+
+    model.set_lambda_coef(0.0, bypass_gumbel=True)
+    assert all(not module.bypass for module in get_AIG_modules(model).values())
+
+
+def test_aig_efficientnetv2_positive_entropy_coef_requires_probability_regularization():
+    model = AIGEfficientNetV2S(
+        num_classes=10,
+        lambda_coef=0.25,
+        gate_regularization="l2_gate",
+        entropy_regularization="plus_negative_entropy",
+        entropy_regularization_coef=0.3,
+    )
+    model.eval()
+
+    with pytest.raises(ValueError, match="gate_regularization='l1_probability'"):
+        model(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]))
 
 
 def test_aig_efficientnetv2_s_bypass_on_zero_lambda():

@@ -1,0 +1,11 @@
+# First full-length experiment, launched alone during the day.
+# "nightly" selects the existing 150-epoch protocol, not a time of day.
+name: pruning_dense_control
+profile: nightly
+jobs:
+  - J1_dense_control
+# Expected about 2.5–3 hours on the previous V100; allow preflight/headroom.
+hours: 4.0
+data: data
+run_history:
+  root_dir: outputs/runs

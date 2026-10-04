@@ -1,0 +1,21 @@
+# @package _global_
+# Thirty-epoch ResNet50/CIFAR-10 adaptive-pruning search used only for the
+# base-LR/cosine-horizon validation grid. Recovery and test are deliberately
+# excluded. The launcher promotes the epoch-30 checkpoint to a stable root
+# artifact before pruning other nested checkpoints.
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_30_120_search
+  - _self_
+
+one_shot:
+  search_scheduler_eta_min: 0.0
+
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.001
+
+mlflow:
+  run_name: resnet50_cifar10_pruning30_lr_grid_search
+
+run_history:
+  run_name: resnet50_cifar10_pruning30_lr_grid_search

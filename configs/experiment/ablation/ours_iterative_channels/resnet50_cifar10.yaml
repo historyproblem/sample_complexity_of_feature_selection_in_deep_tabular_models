@@ -70,7 +70,7 @@ cyclic_channel_pruning:
   enabled: true
   max_cycles: 10
   drop_mode: threshold
-  g_prob_threshold: 0.1
+  g_prob_threshold: 0.7
   threshold_max_param_fraction: 0.20
   # Epochs per intermediate Gumbel (search) cycle.
   gumbel_epochs: 120
@@ -86,6 +86,12 @@ cyclic_channel_pruning:
   final_epochs: 150
 
   disable_mlflow_for_cycles: false
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+    # Optional dense/plain warm start. Set either path directly or a run dir.
+    initial_checkpoint: null
+    initial_run_dir: null
 
 mlflow:
   enabled: true
@@ -97,6 +103,7 @@ mlflow:
     dataset: "cifar10"
     recipe: "ablation_ours_iterative_channels_resnet50_cifar10"
     entropy_regularization: "plus_negative_entropy"
+    channel_prune_threshold: "${cyclic_channel_pruning.g_prob_threshold}"
 
 run_history:
   log_gate_history: true

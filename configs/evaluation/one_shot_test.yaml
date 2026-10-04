@@ -1,0 +1,8 @@
+one_shot_test:
+  run_dir: outputs/runs/one_shot_60_90_inherited_vs_scratch
+  data: data
+  device: cuda:0
+  output_subdir: test_evaluation
+  batch_size: 128
+  num_workers: 2
+  download: false

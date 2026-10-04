@@ -66,6 +66,14 @@ class PrunedGumbelBottleneck(nn.Module):
     ):
         super().__init__()
         full_channels = out_channels * self.expansion
+        for label, indices, width in (
+            ("output", disabled_channels or [], full_channels),
+            ("mid1", disabled_mid1_channels or [], out_channels),
+            ("mid2", disabled_mid2_channels or [], out_channels),
+        ):
+            if len(indices) != len(set(indices)) or any(
+                    type(i) is not int or not 0 <= i < width for i in indices):
+                raise ValueError(f"Invalid/duplicate {label} original channel indices.")
         disabled = set(disabled_channels or [])
         active = [ch for ch in range(full_channels) if ch not in disabled]
         if not active:
@@ -112,15 +120,25 @@ class PrunedGumbelBottleneck(nn.Module):
         self.stride = stride
         self.relu = nn.ReLU()
 
-        # active_selection[ch, j] = 1 iff active[j] == ch — scatters the
-        # narrowed [B, n_active, H, W] residual back to [B, full_channels, H, W].
-        active_sel = torch.zeros(full_channels, n_active)
-        for j, ch in enumerate(active):
-            active_sel[ch, j] = 1.0
-        self.register_buffer("active_selection", active_sel)
+        # Residual width stays fixed; no dense one-hot matrix is needed.
+        self._full_channels = int(full_channels)
         self.register_buffer("active_indices", torch.tensor(active, dtype=torch.long))
         self.register_buffer("mid1_active_indices", torch.tensor(mid1_active, dtype=torch.long))
         self.register_buffer("mid2_active_indices", torch.tensor(mid2_active, dtype=torch.long))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Legacy snapshots stored a redundant dense one-hot matrix. Active
+        # channel indices are the authoritative mapping in both formats.
+        state_dict.pop(prefix + "active_selection", None)
+        for key in ("active_indices", "mid1_active_indices", "mid2_active_indices"):
+            saved = state_dict.get(prefix + key)
+            if saved is not None and not torch.equal(saved.cpu(), getattr(self, key).cpu()):
+                error_msgs.append(f"{prefix}{key} disagrees with the constructed pruning topology.")
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
@@ -129,7 +147,13 @@ class PrunedGumbelBottleneck(nn.Module):
         out = self.relu(self.batch_norm2(self.conv2(out)))     # [B, w2, H, W]
         out = self.batch_norm3(self.conv3(out))                 # [B, n_active, H, W]
 
-        full_out = torch.einsum("pn,bnhw->bphw", self.active_selection, out)
+        if self.active_indices.numel() == self._full_channels:
+            # The constructor enumerates surviving original channels in order.
+            full_out = out
+        else:
+            full_out = out.new_zeros(
+                (out.shape[0], self._full_channels, *out.shape[2:])
+            ).index_copy(1, self.active_indices, out)
 
         if self.i_downsample is not None:
             identity = self.i_downsample(identity)
@@ -167,32 +191,35 @@ class PrunedResNet(nn.Module):
         stem_stride: int = 2,
         stem_padding: int = 3,
         use_maxpool: bool = True,
+        base_width: int = 64,
     ):
         super().__init__()
-        self.in_channels = 64
+        if type(base_width) is not int or base_width < 1:
+            raise ValueError("base_width must be a positive integer.")
+        self.in_channels = base_width
         self.pruning_spec = dict(pruning_spec)
 
         self.conv1 = nn.Conv2d(
             in_channels,
-            64,
+            base_width,
             kernel_size=stem_kernel_size,
             stride=stem_stride,
             padding=stem_padding,
             bias=False,
         )
-        self.batch_norm1 = nn.BatchNorm2d(64)
+        self.batch_norm1 = nn.BatchNorm2d(base_width)
         self.relu = nn.ReLU()
         self.max_pool = (
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1) if use_maxpool else nn.Identity()
         )
 
-        self.layer1 = self._make_layer("layer1", layer_list[0], planes=64, stride=1)
-        self.layer2 = self._make_layer("layer2", layer_list[1], planes=128, stride=2)
-        self.layer3 = self._make_layer("layer3", layer_list[2], planes=256, stride=2)
-        self.layer4 = self._make_layer("layer4", layer_list[3], planes=512, stride=2)
+        self.layer1 = self._make_layer("layer1", layer_list[0], planes=base_width, stride=1)
+        self.layer2 = self._make_layer("layer2", layer_list[1], planes=base_width * 2, stride=2)
+        self.layer3 = self._make_layer("layer3", layer_list[2], planes=base_width * 4, stride=2)
+        self.layer4 = self._make_layer("layer4", layer_list[3], planes=base_width * 8, stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * PrunedGumbelBottleneck.expansion, num_classes)
+        self.fc = nn.Linear(base_width * 8 * PrunedGumbelBottleneck.expansion, num_classes)
 
     def _spec_for_block(self, key: str) -> tuple[list[int], list[int], list[int]]:
         raw = self.pruning_spec.get(key, [])

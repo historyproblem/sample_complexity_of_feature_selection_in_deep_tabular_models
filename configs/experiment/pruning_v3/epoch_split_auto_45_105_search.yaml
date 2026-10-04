@@ -1,0 +1,17 @@
+# @package _global_
+# Horizon-aware automatic-step variant. Eight warmup epochs are the nearest
+# integer to one sixth of the 45-epoch adaptive search horizon.
+defaults:
+  - /experiment/pruning_v3/epoch_split_45_105_search
+  - _self_
+
+training_arguments:
+  adaptive_lambda:
+    initial_search_warmup: 8
+    log_step: auto
+
+mlflow:
+  run_name: epoch_split_auto_45_105_search
+
+run_history:
+  run_name: epoch_split_auto_45_105_search

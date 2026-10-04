@@ -1,0 +1,20 @@
+# @package _global_
+# Adaptive controller state follows selected search checkpoints across cycles.
+defaults:
+  - /experiment/audit/_base
+  - _self_
+training_arguments:
+  adaptive_lambda:
+    enabled: true
+    baseline_history_dir: null
+metrics:
+  valid_metrics:
+    - _target_: net_complexity.metrics.base.MultiLossMetric
+    - _target_: net_complexity.metrics.classification.Accuracy
+      return_counts: true
+    - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+      log_channel_zero_probs: false
+cyclic_channel_pruning:
+  audit_protocol: adaptive_lambda_v1
+  # The launcher sets this to its verified, immutable copy of J1's validation curve.
+  adaptive_reference_history: null

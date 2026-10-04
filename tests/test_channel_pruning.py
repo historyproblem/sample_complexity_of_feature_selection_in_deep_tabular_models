@@ -8,6 +8,8 @@ from net_complexity.models.channel_pruning import (
     _mask_dict_to_bottleneck_pruning_spec,
     apply_channel_mask,
     build_structurally_pruned_model_from_config,
+    transfer_gated_weights_to_structural,
+    transfer_structural_weights_to_gated,
 )
 from net_complexity.models.feature_selection import (
     CIFARMaskedGumbelBasicBlock,
@@ -227,3 +229,105 @@ def test_masked_gumbel_bottleneck_channels_discovered_by_apply_channel_mask():
     # Untouched channels/gates stay enabled.
     assert block.gumbel_layer.channel_mask[2].item() == 1.0
     assert block.mid1_gumbel_layer.channel_mask[0].item() == 1.0
+
+
+def test_bottleneck_weight_handoff_preserves_surviving_function():
+    gated_backbone = ResNet50(
+        num_classes=5,
+        in_channels=3,
+        resnet_block=partial(
+            MaskedGumbelBottleneckLayer,
+            gate_internal_width=True,
+            force_ones_mask=True,
+        ),
+        stem_kernel_size=3,
+        stem_stride=1,
+        stem_padding=1,
+        use_maxpool=False,
+    )
+    gated_model = ClassificationFeatureSelectionWrapper(
+        backbone=gated_backbone,
+        lambda_coef=0.0,
+    )
+    mask = {
+        "backbone.layer2.0.gumbel_layer": [0, 7],
+        "backbone.layer2.0.mid1_gumbel_layer": [2, 9],
+        "backbone.layer2.0.mid2_gumbel_layer": [3, 11],
+        "backbone.layer3.1.gumbel_layer": [5],
+        "backbone.layer3.1.mid1_gumbel_layer": [6],
+        "backbone.layer3.1.mid2_gumbel_layer": [8],
+    }
+    apply_channel_mask(gated_model, mask)
+    config = OmegaConf.create(
+        {
+            "model": {
+                "lambda_coef": 0.0,
+                "backbone": {
+                    "_target_": "net_complexity.wrappers.ResNet50",
+                    "num_classes": 5,
+                    "in_channels": 3,
+                    "stem_kernel_size": 3,
+                    "stem_stride": 1,
+                    "stem_padding": 1,
+                    "use_maxpool": False,
+                },
+            }
+        }
+    )
+    pruning_cfg = OmegaConf.create(
+        {
+            "enabled": True,
+            "structural": True,
+            "mode": "explicit",
+            "mask": mask,
+        }
+    )
+    structural_model = build_structurally_pruned_model_from_config(config, pruning_cfg)
+    transfer_gated_weights_to_structural(gated_model, structural_model)
+
+    gated_model.eval()
+    structural_model.eval()
+    sample = torch.randn(2, 3, 16, 16)
+    targets = torch.tensor([0, 1])
+    with torch.no_grad():
+        expected = gated_model(sample, targets).logits
+        actual = structural_model(sample, targets).logits
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+    # Simulate recovery fine-tuning, then scatter only surviving tensors back
+    # into the full-width gated carrier used by the next search cycle.
+    with torch.no_grad():
+        structural_model.backbone.layer2[0].conv2.weight.add_(0.25)
+        structural_model.backbone.layer2[0].batch_norm2.bias.add_(0.1)
+    next_gated_model = ClassificationFeatureSelectionWrapper(
+        backbone=ResNet50(
+            num_classes=5,
+            in_channels=3,
+            resnet_block=partial(
+                MaskedGumbelBottleneckLayer,
+                gate_internal_width=True,
+                force_ones_mask=True,
+            ),
+            stem_kernel_size=3,
+            stem_stride=1,
+            stem_padding=1,
+            use_maxpool=False,
+        ),
+        lambda_coef=0.0,
+    )
+    next_gated_model.load_state_dict(gated_model.state_dict(), strict=True)
+    inactive_weight_before = (
+        next_gated_model.backbone.layer2[0].conv2.weight[3].detach().clone()
+    )
+    transfer_structural_weights_to_gated(structural_model, next_gated_model)
+    apply_channel_mask(next_gated_model, mask)
+    next_gated_model.eval()
+
+    with torch.no_grad():
+        carried = next_gated_model(sample, targets).logits
+        recovered = structural_model(sample, targets).logits
+    torch.testing.assert_close(carried, recovered, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(
+        next_gated_model.backbone.layer2[0].conv2.weight[3],
+        inactive_weight_before,
+    )

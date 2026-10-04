@@ -1,0 +1,18 @@
+# @package _global_
+# Horizon-aware automatic-step variant of the completed 30/120 study point.
+# Five warmup epochs preserve the 60-epoch anchor's 1/6-search warmup fraction,
+# so `auto` has five controller updates before the 1/3-search lambda target.
+defaults:
+  - /experiment/pruning_v3/epoch_split_30_120_search
+  - _self_
+
+training_arguments:
+  adaptive_lambda:
+    initial_search_warmup: 5
+    log_step: auto
+
+mlflow:
+  run_name: epoch_split_auto_30_120_search
+
+run_history:
+  run_name: epoch_split_auto_30_120_search
