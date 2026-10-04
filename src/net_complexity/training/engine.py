@@ -1778,6 +1778,9 @@ def train(model: nn.Module,
     stage_metadata = OmegaConf.to_container(
         getattr(training_arguments, "accuracy_guided_stage", OmegaConf.create({})), resolve=True)
     epoch_events_enabled = bool(stage_metadata) or isinstance(adaptive_lambda, AccuracyOnlyLambdaController)
+    checkpoint_retention = stage_metadata.get("checkpoint_retention", "all_epochs")
+    if checkpoint_retention not in {"all_epochs", "online_selection"}:
+        raise ValueError(f"Unsupported checkpoint retention policy: {checkpoint_retention!r}")
 
     def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
         _set_model_lambda_coef(target_model, lambda_coef, bypass_gumbel=False)
@@ -2057,7 +2060,7 @@ def train(model: nn.Module,
                        if adaptive_lambda is not None else {}),
                 },
             )
-            if epoch_event is not None:
+            if epoch_event is not None and checkpoint_retention == "all_epochs":
                 # Every evaluated epoch is available for best_feasible_compact.
                 # Byte-copy the atomic last snapshot: no repeated RNG sampling.
                 import shutil

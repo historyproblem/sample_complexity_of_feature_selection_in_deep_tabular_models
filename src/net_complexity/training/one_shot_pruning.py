@@ -252,6 +252,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
     protocol = str(config.one_shot.protocol)
     branch_plan = resolved_branch_plan(config)
     search_epochs, final_epochs = int(config.one_shot.search_epochs), int(config.one_shot.final_epochs)
+    checkpoint_retention = str(getattr(config.one_shot, "checkpoint_retention", "all_epochs"))
     reference = load_adaptive_reference(cfg.accuracy_guided.reference.history_path, total)
     output_root = Path(output_root).resolve()
     if output_root.exists():
@@ -360,7 +361,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             "id": name, "kind": "physical_final" if structural else "search",
             "end_global_epoch": offset + epochs, "provenance": provenance,
             "selection_identity": identity, "held_controller_state": held_state,
-            "original_gate_normalization_metadata": normalization}, force_add=True)
+            "original_gate_normalization_metadata": normalization,
+            "checkpoint_retention": checkpoint_retention}, force_add=True)
         stage_cfg.mlflow.run_name = stage_cfg.run_history.run_name = name
         _configure_run_history(stage_cfg, output_root / name / "training")
         source_state = {key: value.detach().cpu().clone() for key, value in source.state_dict().items()}
@@ -374,8 +376,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             "scheduler_state_initialization": scheduler_state_policy,
             "scheduler_horizon_epochs": int(stage_cfg.scheduler.T_max),
             "initialization_state_hash": initial_hash, "training_initializer_verified": False,
-            "epoch_events": []}
+            "checkpoint_retention": checkpoint_retention,
+            "epoch_events": [], "selection_candidates": []}
         state["stages"][name] = record
+        retained_candidate_path = None
+        retained_candidate_epoch = None
 
         def initialize(model):
             model.load_state_dict(source_state, strict=True)
@@ -400,9 +405,98 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             return handoff
 
         def epoch_end(epoch, train, valid, model, optimizer, history):
+            nonlocal retained_candidate_path, retained_candidate_epoch
             record["epoch_events"].append({"epoch": epoch, "ledger": deepcopy(ledger),
                 "validation": {"accuracy": valid["valid_accuracy"], "ce_loss": valid["valid_ce_loss"]},
                 "train_L_gate_mean": train["train_L_gate_mean"]})
+            if checkpoint_retention == "online_selection":
+                last_path = history.checkpoints_dir / "last.pt"
+                checkpoint = torch.load(last_path, map_location="cpu", weights_only=True)
+                evaluated = deepcopy(source).cpu()
+                evaluated.load_state_dict(checkpoint["model_state_dict"], strict=True)
+                validate_epoch_eval_checkpoint(checkpoint, evaluated)
+                candidate_path = history.checkpoints_dir / f"epoch_{epoch:04d}.pt"
+                if structural:
+                    candidate = {
+                        "path": str(candidate_path), "epoch": int(checkpoint["epoch"]),
+                        "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                        "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                        "physical_cost": selected["physical_cost"],
+                        "checkpoint_retained": False,
+                    }
+                else:
+                    candidate_mask, selector = select_pruning_mask(
+                        evaluated,
+                        {},
+                        float(cfg.accuracy_guided.eligibility.min_keep_ratio),
+                        drop_mode=str(cfg.accuracy_guided.drop_mode),
+                    )
+                    materialized = materialize_physical_survivor_carrier(
+                        evaluated, candidate_mask
+                    )
+                    with isolated_diagnostic_rng(data.valid_dataloader):
+                        materialized_validation = evaluate_deployment(
+                            materialized, data.valid_dataloader, device
+                        )
+                    materialized.cpu()
+                    candidate = {
+                        "epoch": int(checkpoint["epoch"]), "path": str(candidate_path),
+                        "accuracy": float(materialized_validation["accuracy"]),
+                        "ce_loss": float(materialized_validation["ce_loss"]),
+                        "raw_gated_validation": {
+                            "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                            "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                        },
+                        "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                        "retained_learned_closed_channels": retained_learned_closed_channels(
+                            evaluated, candidate_mask
+                        ),
+                        "physical_cost": selector["params_after"],
+                        "pruning_mask": candidate_mask,
+                        "selector": selector,
+                        "checkpoint_retained": False,
+                    }
+                candidates = record["selection_candidates"]
+                candidates.append(candidate)
+                accuracy_key = lambda item: (
+                    -item["accuracy"], item["ce_loss"], item["epoch"]
+                )
+                if structural:
+                    winner = min(candidates, key=accuracy_key)
+                else:
+                    threshold = (
+                        float(reference[offset + epochs])
+                        - float(cfg.training_arguments.adaptive_lambda.hard_drop)
+                    )
+                    feasible = [item for item in candidates if item["accuracy"] >= threshold]
+                    if feasible:
+                        winner = min(
+                            feasible,
+                            key=lambda item: (item["physical_cost"], *accuracy_key(item)),
+                        )
+                    else:
+                        fallback_start = max(
+                            1, epochs - NO_FEASIBLE_FALLBACK_LAST_EPOCHS + 1
+                        )
+                        fallback = [
+                            item for item in candidates
+                            if item["epoch"] >= fallback_start
+                        ]
+                        winner = min(fallback, key=accuracy_key) if fallback else None
+                if winner is not None and winner["epoch"] != retained_candidate_epoch:
+                    if winner is not candidate:
+                        raise AssertionError(
+                            "Online selection requested a discarded historical checkpoint"
+                        )
+                    if retained_candidate_path is not None:
+                        Path(retained_candidate_path).unlink()
+                        for old in candidates:
+                            old["checkpoint_retained"] = False
+                    _atomic_copy(last_path, candidate_path)
+                    candidate["checkpoint_retained"] = True
+                    retained_candidate_path = candidate_path
+                    retained_candidate_epoch = candidate["epoch"]
+                record["retained_candidate_epoch"] = retained_candidate_epoch
             persist()
             epoch_progress(name, epoch, epochs, valid, ledger, time.perf_counter() - stage_started)
 
@@ -421,9 +515,25 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
         if result["num_epochs_executed"] != epochs or ledger["global_training_epoch"] != offset + epochs:
             raise RuntimeError("Incomplete training stage; consumed budget cannot be fabricated.")
         record.update(run_dir=result["run_dir"], status="completed")
-        paths = sorted((Path(result["run_dir"]) / "checkpoints").glob("epoch_*.pt"))
-        if len(paths) != epochs:
-            raise ValueError("Missing complete epoch candidates for validation-only selection.")
+        if checkpoint_retention == "online_selection":
+            candidates = record["selection_candidates"]
+            selected_preview, _ = select_checkpoint_records(
+                candidates,
+                reference[offset + epochs],
+                float(cfg.training_arguments.adaptive_lambda.hard_drop),
+                search=not structural,
+                no_feasible_fallback_last_epochs=(
+                    NO_FEASIBLE_FALLBACK_LAST_EPOCHS if not structural else None
+                ),
+            )
+            paths = [Path(selected_preview["path"])]
+            if (len(candidates) != epochs or selected_preview["epoch"] != retained_candidate_epoch
+                    or not paths[0].is_file()):
+                raise ValueError("Online checkpoint retention lost the selected candidate.")
+        else:
+            paths = sorted((Path(result["run_dir"]) / "checkpoints").glob("epoch_*.pt"))
+            if len(paths) != epochs:
+                raise ValueError("Missing complete epoch candidates for validation-only selection.")
         return paths, record
 
     def load_model(path, source):
@@ -444,7 +554,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 search_scheduler_eta_min = float(
                     getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
                 )
-                paths, _ = train_stage(
+                paths, search_record = train_stage(
                     "shared_search",
                     carrier,
                     {},
@@ -456,38 +566,46 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     scheduler_state_policy="new_search_cosine",
                     training_seed=seed,
                 )
-                candidates = []
-                with phase_progress(
-                    "selection",
-                    f"checking {len(paths)} search checkpoints by dependency-safe validation and physical size",
-                ):
-                    for index, path in enumerate(paths, 1):
-                        model, checkpoint = load_model(path, carrier)
-                        mask, selector = select_pruning_mask(
-                            model,
-                            {},
-                            float(cfg.accuracy_guided.eligibility.min_keep_ratio),
-                            drop_mode=str(cfg.accuracy_guided.drop_mode),
-                        )
-                        materialized = materialize_physical_survivor_carrier(model, mask)
-                        with isolated_diagnostic_rng(data.valid_dataloader):
-                            materialized_validation = evaluate_deployment(
-                                materialized, data.valid_dataloader, device
+                if checkpoint_retention == "online_selection":
+                    candidates = deepcopy(search_record["selection_candidates"])
+                    progress_message(
+                        "selection",
+                        f"using online physical validation trace for {len(candidates)} epochs; "
+                        "only the current winner was retained",
+                    )
+                else:
+                    candidates = []
+                    with phase_progress(
+                        "selection",
+                        f"checking {len(paths)} search checkpoints by dependency-safe validation and physical size",
+                    ):
+                        for index, path in enumerate(paths, 1):
+                            model, checkpoint = load_model(path, carrier)
+                            mask, selector = select_pruning_mask(
+                                model,
+                                {},
+                                float(cfg.accuracy_guided.eligibility.min_keep_ratio),
+                                drop_mode=str(cfg.accuracy_guided.drop_mode),
                             )
-                        materialized.cpu()
-                        retained_closed = retained_learned_closed_channels(model, mask)
-                        candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
-                            "accuracy": float(materialized_validation["accuracy"]),
-                            "ce_loss": float(materialized_validation["ce_loss"]),
-                            "raw_gated_validation": {
-                                "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
-                                "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
-                            },
-                            "selection_predictor": "dependency_safe_all_physical_survivors_open",
-                            "retained_learned_closed_channels": retained_closed,
-                            "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
-                        if index % 10 == 0 or index == len(paths):
-                            progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
+                            materialized = materialize_physical_survivor_carrier(model, mask)
+                            with isolated_diagnostic_rng(data.valid_dataloader):
+                                materialized_validation = evaluate_deployment(
+                                    materialized, data.valid_dataloader, device
+                                )
+                            materialized.cpu()
+                            retained_closed = retained_learned_closed_channels(model, mask)
+                            candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
+                                "accuracy": float(materialized_validation["accuracy"]),
+                                "ce_loss": float(materialized_validation["ce_loss"]),
+                                "raw_gated_validation": {
+                                    "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+                                    "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+                                },
+                                "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                                "retained_learned_closed_channels": retained_closed,
+                                "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
+                            if index % 10 == 0 or index == len(paths):
+                                progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
                 selected, selection_trace = select_checkpoint_records(
                     candidates,
                     reference[search_epochs],
@@ -900,13 +1018,21 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     scheduler_horizon=scheduler_horizon,
                     training_seed=branch_spec["training_seed"],
                 )
-                final_candidates = []
-                with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
-                    for path in paths:
-                        payload = torch.load(path, map_location="cpu", weights_only=True)
-                        final_candidates.append({"path": str(path), "epoch": int(payload["epoch"]),
-                            "accuracy": float(payload["metrics"]["valid_accuracy"]),
-                            "ce_loss": float(payload["metrics"]["valid_ce_loss"]), "physical_cost": selected["physical_cost"]})
+                if checkpoint_retention == "online_selection":
+                    final_candidates = deepcopy(stage_record["selection_candidates"])
+                    progress_message(
+                        name,
+                        f"selecting from {len(final_candidates)} online validation records; "
+                        "only the current best checkpoint was retained",
+                    )
+                else:
+                    final_candidates = []
+                    with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
+                        for path in paths:
+                            payload = torch.load(path, map_location="cpu", weights_only=True)
+                            final_candidates.append({"path": str(path), "epoch": int(payload["epoch"]),
+                                "accuracy": float(payload["metrics"]["valid_accuracy"]),
+                                "ce_loss": float(payload["metrics"]["valid_ce_loss"]), "physical_cost": selected["physical_cost"]})
                 final_selected, final_selection = select_checkpoint_records(final_candidates, reference[total],
                     float(cfg.training_arguments.adaptive_lambda.hard_drop), search=False)
                 deployed, _ = load_model(final_selected["path"], model)

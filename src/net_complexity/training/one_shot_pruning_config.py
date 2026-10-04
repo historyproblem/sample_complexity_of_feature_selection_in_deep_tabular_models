@@ -37,6 +37,7 @@ QUALITY_RECOVERY_OUTPUT_NAME = "target5m_quality_recovery90"
 MAPPED_OPTIMIZER = "mapped_adamw_moments_and_step"
 FRESH_SCHEDULER = "fresh_final_stage_cosine"
 RESUMED_SCHEDULER = "continue_selected_checkpoint_cosine"
+CHECKPOINT_RETENTION_POLICIES = {"all_epochs", "online_selection"}
 
 
 def _require(condition, message):
@@ -106,7 +107,7 @@ def validate_config(config):
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        optional_fields = {"search_scheduler_eta_min"}
+        optional_fields = {"search_scheduler_eta_min", "checkpoint_retention"}
         _require(required_fields <= set(one) <= required_fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
                  f"missing={sorted(required_fields - set(one))}")
@@ -131,11 +132,11 @@ def validate_config(config):
             fields.add("search_scheduler_eta_min")
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
-        optional_fields = (
+        optional_fields = ({"checkpoint_retention"} | (
             {"recovery_source_search_epoch"}
             if protocol == EPOCH_SPLIT_RECOVERY_PROTOCOL
             else set()
-        )
+        ))
         _require(fields <= set(one) <= fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - fields - optional_fields)}, "
                  f"missing={sorted(fields - set(one))}")
@@ -206,6 +207,10 @@ def validate_config(config):
                      "search_scheduler_eta_min must be in [0, optimizer.lr)")
     else:
         _require(False, "unsupported one-shot protocol")
+    _require(
+        one.get("checkpoint_retention", "all_epochs") in CHECKPOINT_RETENTION_POLICIES,
+        f"checkpoint_retention must be one of {sorted(CHECKPOINT_RETENTION_POLICIES)}",
+    )
     for field in ("search_epochs", "final_epochs"):
         _require(type(one[field]) is int and one[field] > 0, f"{field} must be a positive integer")
     shared = to_v3_config(config)
@@ -362,6 +367,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
             else "best_feasible_compact; reference fixed at shared search end"
         ),
         "no_feasible_search": "best_validation_accuracy_among_last_30_search_epochs",
+        "checkpoint_retention": one.get("checkpoint_retention", "all_epochs"),
         "export_diagnostics": "before_branch_training; eval/no_grad; weights_and_bn_unchanged",
         "export_diagnostic_quality": "measure opening/export jumps without calibration or training",
         "bn_calibration_batches": 0,

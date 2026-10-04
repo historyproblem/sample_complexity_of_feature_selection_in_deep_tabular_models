@@ -20,6 +20,7 @@ def test_suite_is_exactly_four_60_plus_90_models():
     assert plan["epochs_per_model"] == 150
     assert plan["total_training_epochs"] == 600
     assert plan["drop_mode"] == "expected_open_count"
+    assert plan["checkpoint_retention"] == "online_selection"
     assert plan["gate_threshold_replaced"] == 0.5
     assert {
         ((row["soft_drop"], row["hard_drop"]), row["entropy_beta"])

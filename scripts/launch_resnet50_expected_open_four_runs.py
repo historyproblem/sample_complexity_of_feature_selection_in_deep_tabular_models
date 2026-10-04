@@ -121,6 +121,10 @@ def validate_suite_configs(path=SUITE_CONFIG):
                 f"{row['id']}: selector changed",
             )
             _require(
+                str(config.one_shot.checkpoint_retention) == "online_selection",
+                f"{row['id']}: checkpoint retention is not online selection",
+            )
+            _require(
                 float(adaptive.soft_drop) == row["soft_drop"]
                 and float(adaptive.hard_drop) == row["hard_drop"],
                 f"{row['id']}: validation-drop point changed",
@@ -159,6 +163,7 @@ def validate_suite_configs(path=SUITE_CONFIG):
         "epochs_per_model": 150,
         "total_training_epochs": 600,
         "drop_mode": "expected_open_count",
+        "checkpoint_retention": "online_selection",
         "gate_threshold_replaced": 0.5,
         "official_test_selects_nothing": True,
     }
@@ -305,9 +310,10 @@ def main(argv=None):
         "output": str(output),
         "official_test_after_each_frozen_recovery": not args.skip_test,
         "checkpoint_policy": (
-            "retain temporary per-epoch checkpoints"
+            "retain debug snapshots instead of pruning the bounded online set"
             if args.keep_nested_checkpoints
-            else "prune nested checkpoints after each verified pair; retain root selected/deployment"
+            else "online selection retains only the current winner plus rolling last/best; "
+                 "prune that bounded set after each verified pair"
         ),
     })
     print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)

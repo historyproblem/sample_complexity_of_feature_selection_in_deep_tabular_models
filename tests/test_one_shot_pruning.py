@@ -304,6 +304,97 @@ def test_expected_open_count_search_exports_a_mode_identified_mask(tmp_path):
     assert diagnostics["selector"]["selection_scope"] == "independent_gate_boundary"
 
 
+def test_online_selection_retains_only_the_current_stage_winner(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
+    cfg.accuracy_guided.drop_mode = "expected_open_count"
+    OmegaConf.update(
+        cfg, "one_shot.checkpoint_retention", "online_selection", force_add=True
+    )
+    validate_config(cfg)
+
+    output = tmp_path / "run"
+    result = run_one_shot_pruning(cfg, output)
+
+    assert result["status"] == "completed"
+    assert len(result["stages"]["shared_search"]["selection_candidates"]) == 3
+    assert all(
+        len(record["selection_candidates"]) == 2
+        for name, record in result["stages"].items()
+        if name != "shared_search"
+    )
+    checkpoint_dirs = {
+        path.parent for path in output.rglob("checkpoints/epoch_*.pt")
+    }
+    assert len(checkpoint_dirs) == 3
+    assert all(
+        len(list(directory.glob("epoch_*.pt"))) == 1
+        for directory in checkpoint_dirs
+    )
+    assert all(
+        len(list(directory.glob("*.pt"))) <= 3
+        for directory in checkpoint_dirs
+    )
+    assert sum(
+        record["checkpoint_retained"]
+        for record in result["stages"]["shared_search"]["selection_candidates"]
+    ) == 1
+
+
+def test_unknown_checkpoint_retention_policy_is_rejected(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs")
+    OmegaConf.update(
+        cfg, "one_shot.checkpoint_retention", "save_everything_forever", force_add=True
+    )
+
+    with pytest.raises(ValueError, match="checkpoint_retention"):
+        validate_config(cfg)
+
+
+def test_online_selection_matches_full_epoch_retention(tmp_path):
+    full_cfg = one_shot_fixture(tmp_path / "full_inputs", learned_closed=True)
+    online_cfg = one_shot_fixture(tmp_path / "online_inputs", learned_closed=True)
+    for cfg in (full_cfg, online_cfg):
+        cfg.accuracy_guided.drop_mode = "expected_open_count"
+    OmegaConf.update(
+        online_cfg, "one_shot.checkpoint_retention", "online_selection", force_add=True
+    )
+    validate_config(full_cfg)
+    validate_config(online_cfg)
+
+    full = run_one_shot_pruning(full_cfg, tmp_path / "full", search_only=True)
+    online = run_one_shot_pruning(online_cfg, tmp_path / "online", search_only=True)
+
+    for key in (
+        "selected_epoch", "selected_model_state_hash", "mask_hash",
+        "pruning_mask", "policy", "quality_threshold",
+    ):
+        assert online["selection"][key] == full["selection"][key]
+    metric_trace = lambda result: [
+        (row["epoch"], row["accuracy"], row["ce_loss"], row["physical_cost"])
+        for row in result["selection"]["trace"]["trace"]
+    ]
+    assert metric_trace(online) == metric_trace(full)
+
+
+def test_online_selection_retains_one_recent_fallback_checkpoint(tmp_path):
+    cfg = one_shot_fixture(tmp_path / "inputs", reject_after=1)
+    OmegaConf.update(
+        cfg, "one_shot.checkpoint_retention", "online_selection", force_add=True
+    )
+    validate_config(cfg)
+
+    output = tmp_path / "run"
+    result = run_one_shot_pruning(cfg, output, search_only=True)
+
+    assert result["selection"]["policy"] == "best_validation_last_epochs_fallback"
+    assert result["selection"]["trace"]["fallback_used"] is True
+    retained = list((output / "shared_search").rglob("checkpoints/epoch_*.pt"))
+    assert len(retained) == 1
+    assert torch.load(retained[0], map_location="cpu", weights_only=True)["epoch"] == (
+        result["selection"]["selected_epoch"]
+    )
+
+
 def test_completed_search_can_feed_two_mapped_recoveries_with_fresh_schedulers(tmp_path):
     cfg = one_shot_fixture(tmp_path / "inputs", learned_closed=True)
     OmegaConf.update(cfg, "one_shot.search_scheduler_eta_min", 0.0005, force_add=True)
