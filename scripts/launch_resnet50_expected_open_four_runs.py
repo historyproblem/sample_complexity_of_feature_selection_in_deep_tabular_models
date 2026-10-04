@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -33,6 +34,7 @@ EXPECTED_POINTS = {
     (0.01, 0.02),
 }
 EXPECTED_BETAS = {0.0, 0.3}
+DEFAULT_MIN_FREE_GIB = 10.0
 
 
 def _require(condition, message):
@@ -194,6 +196,49 @@ def _run(command):
     subprocess.run(command, cwd=ROOT, env=environment, check=True)
 
 
+def _runtime_preflight(plan, dense_source, output, min_free_gib):
+    if str(ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(ROOT / "src"))
+    from net_complexity.training import one_shot_pruning_config as schema
+
+    _require(min_free_gib > 0, "--min-free-gib must be positive")
+    first = plan["runs"][0]
+    reports = {}
+    for phase in ("search", "recovery"):
+        config = schema.compose_config(
+            first[f"{phase}_config"],
+            overrides=list(_overrides(first)),
+            dense_source=dense_source,
+        )
+        reports[phase] = schema.validate_inputs(config)
+    probe = output
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    usage = shutil.disk_usage(probe)
+    free_gib = usage.free / 2 ** 30
+    _require(
+        free_gib >= min_free_gib,
+        f"Only {free_gib:.1f} GiB free on {probe}; require {min_free_gib:.1f} GiB",
+    )
+    return {
+        "status": "ready",
+        "baseline": {
+            "source": str(dense_source),
+            "search": reports["search"]["status"],
+            "recovery": reports["recovery"]["status"],
+            "initializer_model_state_hash": reports["search"].get(
+                "initializer_model_state_hash"
+            ),
+            "reference_epochs": reports["search"].get("reference_epochs"),
+        },
+        "storage": {
+            "filesystem_probe": str(probe),
+            "free_gib": free_gib,
+            "required_free_gib": min_free_gib,
+        },
+    }
+
+
 def _verify_resolved_config(path, row):
     config = OmegaConf.load(Path(path) / "resolved_config.yaml")
     adaptive = config.training_arguments.adaptive_lambda
@@ -294,6 +339,15 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Validate the uploaded baseline and free disk without training",
+    )
+    parser.add_argument(
+        "--min-free-gib", type=float, default=DEFAULT_MIN_FREE_GIB,
+        help="Refuse training when less free space is available",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Verify and reuse completed searches/recoveries after an interrupted suite",
@@ -316,8 +370,15 @@ def main(argv=None):
                  "prune that bounded set after each verified pair"
         ),
     })
-    print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
     if args.dry_run:
+        print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
+        return plan
+
+    plan["preflight"] = _runtime_preflight(
+        plan, dense_source, output, float(args.min_free_gib)
+    )
+    print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
+    if args.preflight_only:
         return plan
 
     results = []
