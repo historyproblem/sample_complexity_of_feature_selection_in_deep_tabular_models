@@ -27,7 +27,7 @@ SUITE_CONFIG = (
     ROOT
     / "configs/experiment/pruning_v3/resnet50_cifar10_expected_open_four_runs.yaml"
 )
-DEFAULT_DENSE_SOURCE = Path("outputs/runs/epoch_split_dense_reference_seed42_fresh")
+DEFAULT_DENSE_SOURCE = Path("outputs/baseline/one_shot_dense_reference_seed42")
 DEFAULT_OUTPUT = Path(
     "outputs/runs/resnet50_cifar10_expected_open_four_runs_online_selection_v1"
 )

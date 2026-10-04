@@ -11,6 +11,12 @@ launcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(launcher)
 
 
+def test_default_dense_source_is_the_original_uploaded_baseline():
+    assert launcher.DEFAULT_DENSE_SOURCE == Path(
+        "outputs/baseline/one_shot_dense_reference_seed42"
+    )
+
+
 def test_suite_is_exactly_four_60_plus_90_models():
     plan = launcher.validate_suite_configs()
 
