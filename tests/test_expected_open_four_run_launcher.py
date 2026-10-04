@@ -30,6 +30,7 @@ def test_suite_is_exactly_four_60_plus_90_models():
         "epochs": 150,
         "seed": 42,
         "checkpoint_retention": "metadata_only",
+        "prepare_if_missing": True,
     }
     assert plan["drop_mode"] == "expected_open_count"
     assert plan["checkpoint_retention"] == "online_selection"

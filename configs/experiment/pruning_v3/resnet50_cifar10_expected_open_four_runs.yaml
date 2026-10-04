@@ -7,6 +7,7 @@ baseline:
   epochs: 150
   seed: 42
   checkpoint_retention: metadata_only
+  prepare_if_missing: true
 search_config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
 recovery_config: experiment/pruning_v3/resnet50_cifar10_expected_open_recovery
 drop_mode: expected_open_count

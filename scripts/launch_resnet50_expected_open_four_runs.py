@@ -1,7 +1,7 @@
 """Run exactly four expected-open-count ResNet50/CIFAR-10 models.
 
-The checked-in suite can first train its matched seed-42 dense validation
-reference, then runs the Cartesian product of two accepted validation-drop
+The checked-in suite trains its matched seed-42 dense validation reference when
+it is missing, then runs the Cartesian product of two accepted validation-drop
 points and entropy beta in {0.0, 0.3}. Every model performs one 60-epoch
 adaptive-lambda search followed by one 90-epoch physical recovery. There are no
 scratch branches, repeats, curve points, or other hidden training jobs. Epoch
@@ -82,9 +82,9 @@ def validate_suite_configs(path=SUITE_CONFIG):
     baseline = suite["baseline"]
     _require(
         isinstance(baseline, dict) and set(baseline) == {
-            "config", "epochs", "seed", "checkpoint_retention",
+            "config", "epochs", "seed", "checkpoint_retention", "prepare_if_missing",
         },
-        "Suite baseline must define config, epochs, seed and checkpoint_retention",
+        "Suite baseline contract changed",
     )
     _require(
         baseline == {
@@ -92,6 +92,7 @@ def validate_suite_configs(path=SUITE_CONFIG):
             "epochs": 150,
             "seed": 42,
             "checkpoint_retention": "metadata_only",
+            "prepare_if_missing": True,
         },
         "Suite baseline must be the matched seed-42 dense150 metadata-only reference",
     )
@@ -393,19 +394,6 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
-        "--train-baseline",
-        action="store_true",
-        help=(
-            "Train the matched seed-42 dense150 reference at --dense-source before "
-            "preflight; combine with --preflight-only to prepare only the baseline"
-        ),
-    )
-    parser.add_argument(
-        "--preflight-only",
-        action="store_true",
-        help="Validate the uploaded baseline and free disk without training",
-    )
-    parser.add_argument(
         "--min-free-gib", type=float, default=DEFAULT_MIN_FREE_GIB,
         help="Refuse training when less free space is available",
     )
@@ -424,7 +412,7 @@ def main(argv=None):
         "suite_config": str(suite_path),
         "dense_source": str(dense_source),
         "output": str(output),
-        "baseline_training_requested": bool(args.train_baseline),
+        "baseline_action": "reuse" if dense_source.exists() else "train",
         "official_test_after_each_frozen_recovery": not args.skip_test,
         "checkpoint_policy": (
             "retain debug snapshots instead of pruning the bounded online set"
@@ -437,11 +425,7 @@ def main(argv=None):
         print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
         return plan
 
-    if args.train_baseline:
-        _require(
-            not dense_source.exists(),
-            f"Refusing to overwrite existing baseline: {dense_source}",
-        )
+    if not dense_source.exists():
         print(
             f"[suite baseline] training dense150 seed42 reference: {dense_source}",
             flush=True,
@@ -458,8 +442,6 @@ def main(argv=None):
         plan, dense_source, output, float(args.min_free_gib)
     )
     print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
-    if args.preflight_only:
-        return plan
 
     results = []
     for index, row in enumerate(plan["runs"], start=1):
