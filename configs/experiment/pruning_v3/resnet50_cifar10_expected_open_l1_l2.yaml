@@ -1,0 +1,43 @@
+# Four new 60/90 models for the expected-open-count regularization comparison.
+# The two L1 points already completed by the preceding beta=0 suite are listed
+# explicitly as skipped controls and are not trained again.
+protocol: resnet50_cifar10_expected_open_l1_l2_v1
+baseline:
+  config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+  epochs: 150
+  seed: 42
+  checkpoint_retention: metadata_only
+  prepare_if_missing: false
+search_config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_expected_open_recovery
+drop_mode: expected_open_count
+search_epochs: 60
+recovery_epochs: 90
+skipped_completed_runs:
+  - id: soft5em4_hard1em3_l1_probability
+    prior_suite_id: target12m_beta0
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l1_probability
+  - id: soft1em2_hard2em2_l1_probability
+    prior_suite_id: target5m_beta0
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l1_probability
+runs:
+  - id: soft2p5em4_hard5em4_l1_probability
+    soft_drop: 0.00025
+    hard_drop: 0.0005
+    gate_regularization: l1_probability
+  - id: soft2p5em4_hard5em4_l2_probability
+    soft_drop: 0.00025
+    hard_drop: 0.0005
+    gate_regularization: l2_probability
+  - id: soft5em4_hard1em3_l2_probability
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l2_probability
+  - id: soft1em2_hard2em2_l2_probability
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l2_probability

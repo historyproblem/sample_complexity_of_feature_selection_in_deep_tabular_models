@@ -31,6 +31,9 @@ model:
       train_gate_mode: null
       eval_gate_mode: null
       gate_threshold: 0.5
+      # L1: mean(p_open); L2: mean(p_open^2). This is a gate-probability
+      # penalty, not optimizer weight decay.
+      gate_regularization: l1_probability
       # false (default): only conv3's output is gated/prunable — conv1/conv2
       # stay at full width regardless of pruning decisions (see
       # MaskedGumbelBottleneckLayer's docstring).

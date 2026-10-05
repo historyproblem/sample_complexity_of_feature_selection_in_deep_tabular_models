@@ -21,6 +21,7 @@ SCHEMA_VERSION = 3
 ROOT = Path(__file__).resolve().parents[3]
 SUPPORTED_DROP_MODES = {"learned_closed_gates", "expected_open_count"}
 SUPPORTED_ENTROPY_BETAS = {0.0, 0.3}
+SUPPORTED_GATE_REGULARIZATIONS = {"l1_probability", "l2_probability"}
 
 
 def _require(condition, message):
@@ -140,17 +141,23 @@ def validate_config_v3(config):
     _require(not any(block.get(k) for k in ("force_ones_mask", "deterministic_soft_mask", "deterministic_hard_mask")),
              "legacy gate mode overrides conflict with explicit runtime modes")
     _require(_number(block.get("gate_threshold")) and 0 <= block["gate_threshold"] <= 1, "invalid hard threshold")
+    _require(
+        block.get("gate_regularization") in SUPPORTED_GATE_REGULARIZATIONS,
+        "gate_regularization must be l1_probability or l2_probability",
+    )
     _require(cfg["model"].get("lambda_coef") == a["alpha_init"], "model alpha differs from controller alpha_init")
     entropy_mode = cfg["model"].get("entropy_regularization")
     entropy_beta = cfg["model"].get("entropy_regularization_coef")
-    _require(
-        entropy_mode == "plus_negative_entropy",
-        "entropy mode must remain plus_negative_entropy",
-    )
-    _require(
-        _number(entropy_beta) and float(entropy_beta) in SUPPORTED_ENTROPY_BETAS,
-        f"entropy beta must be one of {sorted(SUPPORTED_ENTROPY_BETAS)}",
-    )
+    _require(entropy_mode in {"disabled", "plus_negative_entropy"},
+             "entropy mode must be disabled or plus_negative_entropy")
+    _require(_number(entropy_beta), "entropy beta must be finite")
+    if entropy_mode == "disabled":
+        _require(float(entropy_beta) == 0.0, "disabled entropy requires beta=0")
+    else:
+        _require(
+            float(entropy_beta) in SUPPORTED_ENTROPY_BETAS,
+            f"entropy beta must be one of {sorted(SUPPORTED_ENTROPY_BETAS)}",
+        )
     _require(cfg["optimizer"].get("_target_") == "torch.optim.AdamW"
              and cfg["optimizer"].get("gate_weight_decay_scale") == 0.0, "AdamW with zero gate decay is required")
     _require(cfg["scheduler"].get("_target_") == "torch.optim.lr_scheduler.CosineAnnealingLR", "cosine scheduler required")

@@ -16,6 +16,7 @@ from .resnet import Block, Bottleneck, ResNet
 
 _VALID_BACKBONE_WEIGHT_INITS = {"default", "paper_kaiming_normal"}
 _VALID_CHANNEL_REGULARIZATION_NORMALIZATIONS = {"enabled_channels", "initial_channels"}
+_VALID_GUMBEL_REGULARIZATIONS = {"l1_probability", "l2_probability"}
 
 
 def _normalize_channel_regularization(value: str) -> str:
@@ -26,6 +27,22 @@ def _normalize_channel_regularization(value: str) -> str:
             f"regularization_normalization must be one of: {allowed}. Got: {value!r}"
         )
     return normalized
+
+
+def _normalize_gumbel_regularization(value: str) -> str:
+    normalized = str(value).strip().lower()
+    aliases = {
+        "l1": "l1_probability",
+        "l1_probability": "l1_probability",
+        "l2": "l2_probability",
+        "l2_probability": "l2_probability",
+    }
+    if normalized not in aliases:
+        allowed = ", ".join(sorted(_VALID_GUMBEL_REGULARIZATIONS))
+        raise ValueError(
+            f"gate_regularization must be one of: {allowed}. Got: {value!r}"
+        )
+    return aliases[normalized]
 
 
 def apply_paper_style_conv_init(model: nn.Module) -> None:
@@ -308,6 +325,7 @@ class GumbelLayer(nn.Module):
         train_gate_mode: str | None = None,
         eval_gate_mode: str | None = None,
         gate_threshold: float = 0.5,
+        gate_regularization: str = "l1_probability",
     ):
         super().__init__()
         if beta < 0:
@@ -318,6 +336,9 @@ class GumbelLayer(nn.Module):
         self.normalization_metadata_status = "native"
         self.temperature = temperature
         self.beta = float(beta)
+        self.gate_regularization = _normalize_gumbel_regularization(
+            gate_regularization
+        )
         self.gate_threshold = float(gate_threshold)
         if not 0.0 <= self.gate_threshold <= 1.0:
             raise ValueError("gate_threshold must be within [0.0, 1.0].")
@@ -620,11 +641,16 @@ class GumbelLayer(nn.Module):
 
     # ACTUAL: regularizer used by the current main_gumbel training loss.
     def regularization_loss(self) -> torch.Tensor:
-        """Compute regularization: sum of "on" state probabilities."""
+        """Return the configured probability penalty for this gate boundary."""
         if self._bypass:
             return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
-        return torch.mean(probs)
+        penalty = (
+            probs
+            if self.gate_regularization == "l1_probability"
+            else probs.square()
+        )
+        return torch.mean(penalty)
 
     def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return mean p(open) and mean negative entropy of the per-channel posterior.
@@ -874,6 +900,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
         disabled_mid1_channels: list[int] | None = None,
         disabled_mid2_channels: list[int] | None = None,
         regularization_normalization: str = "enabled_channels",
+        gate_regularization: str = "l1_probability",
     ):
         regularization_normalization = _normalize_channel_regularization(
             regularization_normalization
@@ -892,6 +919,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
             train_gate_mode=train_gate_mode,
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
+            gate_regularization=gate_regularization,
             disabled_channels=disabled_channels,
             regularization_normalization=regularization_normalization,
         ) if self.gate_output else nn.Identity()
@@ -910,6 +938,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
                 train_gate_mode=train_gate_mode,
                 eval_gate_mode=eval_gate_mode,
                 gate_threshold=gate_threshold,
+                gate_regularization=gate_regularization,
                 disabled_channels=disabled_mid1_channels,
                 regularization_normalization=regularization_normalization,
             )
@@ -923,6 +952,7 @@ class MaskedGumbelBottleneckLayer(Bottleneck):
                 train_gate_mode=train_gate_mode,
                 eval_gate_mode=eval_gate_mode,
                 gate_threshold=gate_threshold,
+                gate_regularization=gate_regularization,
                 disabled_channels=disabled_mid2_channels,
                 regularization_normalization=regularization_normalization,
             )
@@ -1024,6 +1054,7 @@ class MaskedGumbelLayer(GumbelLayer):
         gate_threshold: float = 0.5,
         disabled_channels: list[int] | None = None,
         regularization_normalization: str = "enabled_channels",
+        gate_regularization: str = "l1_probability",
     ):
         regularization_normalization = _normalize_channel_regularization(
             regularization_normalization
@@ -1038,6 +1069,7 @@ class MaskedGumbelLayer(GumbelLayer):
             train_gate_mode=train_gate_mode,
             eval_gate_mode=eval_gate_mode,
             gate_threshold=gate_threshold,
+            gate_regularization=gate_regularization,
         )
         self._regularization_normalization = regularization_normalization
         channel_mask = torch.ones(input_dim)
@@ -1074,10 +1106,15 @@ class MaskedGumbelLayer(GumbelLayer):
         if self._bypass and self.regularization_normalization == "initial_channels":
             return self.logits.new_zeros(())
         probs = F.softmax(self.logits, dim=1)[:, 1]
+        penalty = (
+            probs
+            if self.gate_regularization == "l1_probability"
+            else probs.square()
+        )
         denominator = self._regularization_denominator()
         if denominator == 0:
             return self.logits.new_zeros(())
-        return (probs * self.channel_mask).sum() / denominator
+        return (penalty * self.channel_mask).sum() / denominator
 
     def posterior_regularization_terms(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return open-probability and negative-entropy sums, equally normalized.

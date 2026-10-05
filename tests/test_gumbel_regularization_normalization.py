@@ -122,6 +122,42 @@ def test_probability_and_entropy_terms_use_same_original_width_without_changing_
     torch.testing.assert_close(gate.get_selection_probs(), historical.get_selection_probs())
 
 
+@pytest.mark.parametrize(
+    ("regularization", "power"),
+    [("l1_probability", 1), ("l2_probability", 2)],
+)
+def test_probability_regularization_norm_is_explicit_and_mask_normalized(
+    regularization, power,
+):
+    gate = MaskedGumbelLayer(
+        4,
+        regularization_normalization="initial_channels",
+        gate_regularization=regularization,
+    ).double()
+    with torch.no_grad():
+        probabilities = torch.tensor([0.2, 0.4, 0.6, 0.8], dtype=torch.double)
+        gate.logits[:, 0].zero_()
+        gate.logits[:, 1].copy_(torch.logit(probabilities))
+        gate.channel_mask[1] = 0
+    expected = (probabilities.pow(power) * gate.channel_mask).sum() / 4
+    torch.testing.assert_close(gate.regularization_loss(), expected)
+
+
+def test_probability_regularization_does_not_change_initializer_state():
+    torch.manual_seed(42)
+    l1 = MaskedGumbelLayer(8, gate_regularization="l1_probability")
+    torch.manual_seed(42)
+    l2 = MaskedGumbelLayer(8, gate_regularization="l2_probability")
+    assert l1.state_dict().keys() == l2.state_dict().keys()
+    for key, value in l1.state_dict().items():
+        assert torch.equal(value, l2.state_dict()[key])
+
+
+def test_invalid_probability_regularization_is_rejected():
+    with pytest.raises(ValueError, match="gate_regularization"):
+        MaskedGumbelLayer(4, gate_regularization="weight_decay")
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("mode", ["initial_channels", "enabled_channels"])
 def test_all_disabled_terms_are_finite_zeros_on_gate_dtype_and_device(dtype, mode):
