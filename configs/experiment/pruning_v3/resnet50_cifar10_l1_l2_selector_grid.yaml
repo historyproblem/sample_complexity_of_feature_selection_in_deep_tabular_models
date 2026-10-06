@@ -1,0 +1,121 @@
+# ResNet50/CIFAR-10 selector comparison: 12 independent 60/90 models.
+#
+# automatic means the existing expected_open_count policy: at every gated
+# boundary retain the top-K channels, where K = round_half_up(sum(raw p_open)).
+# The automatic selector does not use gate_threshold for materialization; its
+# configured 0.5 value is only the unchanged runtime threshold used by the
+# gated search model. No temporal smoothing or physical-parameter target is
+# introduced by this suite.
+protocol: resnet50_cifar10_l1_l2_selector_grid_v1
+baseline:
+  config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+  epochs: 150
+  seed: 42
+  checkpoint_retention: metadata_only
+  prepare_if_missing: false
+search_config: experiment/pruning_v3/resnet50_cifar10_expected_open_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_expected_open_recovery
+search_epochs: 60
+recovery_epochs: 90
+independent_search_per_run: true
+entropy_regularization: disabled
+min_keep_ratio: 0.08
+selectors:
+  threshold_0p5:
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.5
+    policy: remove channels whose learned hard gate is closed at 0.5
+  threshold_0p7:
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.7
+    policy: remove channels whose learned hard gate is closed at 0.7
+  automatic:
+    drop_mode: expected_open_count
+    gate_threshold: 0.5
+    gate_threshold_used_for_materialization: false
+    policy: retain top round_half_up(sum(raw_p_open)) channels per gate
+runs:
+  - id: soft5em4_hard1em3_l1_threshold0p5
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l1_probability
+    selector: threshold_0p5
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.5
+  - id: soft5em4_hard1em3_l1_threshold0p7
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l1_probability
+    selector: threshold_0p7
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.7
+  - id: soft5em4_hard1em3_l1_automatic
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l1_probability
+    selector: automatic
+    drop_mode: expected_open_count
+    gate_threshold: 0.5
+  - id: soft5em4_hard1em3_l2_threshold0p5
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l2_probability
+    selector: threshold_0p5
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.5
+  - id: soft5em4_hard1em3_l2_threshold0p7
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l2_probability
+    selector: threshold_0p7
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.7
+  - id: soft5em4_hard1em3_l2_automatic
+    soft_drop: 0.0005
+    hard_drop: 0.001
+    gate_regularization: l2_probability
+    selector: automatic
+    drop_mode: expected_open_count
+    gate_threshold: 0.5
+  - id: soft1em2_hard2em2_l1_threshold0p5
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l1_probability
+    selector: threshold_0p5
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.5
+  - id: soft1em2_hard2em2_l1_threshold0p7
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l1_probability
+    selector: threshold_0p7
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.7
+  - id: soft1em2_hard2em2_l1_automatic
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l1_probability
+    selector: automatic
+    drop_mode: expected_open_count
+    gate_threshold: 0.5
+  - id: soft1em2_hard2em2_l2_threshold0p5
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l2_probability
+    selector: threshold_0p5
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.5
+  - id: soft1em2_hard2em2_l2_threshold0p7
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l2_probability
+    selector: threshold_0p7
+    drop_mode: learned_closed_gates
+    gate_threshold: 0.7
+  - id: soft1em2_hard2em2_l2_automatic
+    soft_drop: 0.01
+    hard_drop: 0.02
+    gate_regularization: l2_probability
+    selector: automatic
+    drop_mode: expected_open_count
+    gate_threshold: 0.5
