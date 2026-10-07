@@ -314,6 +314,9 @@ class RunHistory:
         return str(monitor) if monitor is not None else None, mode
 
     def should_update_best(self, epoch: int, valid_metrics: Mapping[str, Any]) -> bool:
+        run_history_cfg = getattr(self.config, "run_history", None)
+        if int(epoch) < int(getattr(run_history_cfg, "min_epoch", 1)):
+            return False
         filtered_valid_metrics = _filter_channel_metrics(valid_metrics)
         monitor, mode = self.resolve_monitor(filtered_valid_metrics)
         if monitor is None:

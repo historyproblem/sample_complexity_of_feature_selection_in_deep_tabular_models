@@ -44,6 +44,8 @@ from .models.feature_selection import (
     replace_layers_by_regex,
 )
 from .models.aig import AIGBlockGate
+from .models.autopruner import AutoPrunerWrapper
+from .models.autopruner_mobilenet_v2 import AutoPrunerMobileNetV2
 from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .models.mobilenet_v2 import (
     AIGInvertedResidual,
@@ -59,6 +61,8 @@ from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_fr
 from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
 __all__ = [
+    "AutoPrunerWrapper",
+    "AutoPrunerMobileNetV2",
     "AIGRegularizationLoss",
     "AIGTargetRateLoss",
     "apply_paper_style_conv_init",
