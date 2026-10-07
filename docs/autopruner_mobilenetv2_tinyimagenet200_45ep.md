@@ -7,6 +7,20 @@ started from torchvision `IMAGENET1K_V2` weights. The checkpoint contains the
 must point to its project-format `checkpoints/best.pt`. It is distinct from the
 `model.backbone.pretrained_weights` setting for raw torchvision weights.
 
+If the baseline checkpoint is absent on the server, upload the local archive
+`mobilenet_baseline_partial.tar.gz` to the repository root. It already contains
+the selected checkpoint at the path expected by this recipe. Restore and verify
+only that member before launching the sweep:
+
+```bash
+tar -xzf mobilenet_baseline_partial.tar.gz \
+  outputs/runs/20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200/checkpoints/best.pt
+echo 'a8230a3cc5ffd0263f8c7c6b90fc8b5a1c2c7f71207ee469b2444e74a1a5ef7a  outputs/runs/20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200/checkpoints/best.pt' | sha256sum -c -
+```
+
+This is the project checkpoint with a fine-tuned 200-class head; the raw
+torchvision ImageNet checkpoint is not interchangeable with it.
+
 From the repository root on the CUDA server, run the fixed-size schedule
 comparison with one command:
 

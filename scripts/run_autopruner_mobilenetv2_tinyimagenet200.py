@@ -26,7 +26,12 @@ def main() -> None:
         parser.error("Run this script from the repository root.")
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
-        parser.error(f"Pretrained checkpoint is missing or empty: {checkpoint}")
+        parser.error(
+            f"Pretrained checkpoint is missing or empty: {checkpoint}. "
+            "Upload mobilenet_baseline_partial.tar.gz and restore its "
+            "checkpoints/best.pt member as described in "
+            "docs/autopruner_mobilenetv2_tinyimagenet200_45ep.md."
+        )
 
     override = f"model.pretrained_checkpoint={checkpoint}"
     command = [
