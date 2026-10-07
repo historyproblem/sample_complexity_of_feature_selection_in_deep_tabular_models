@@ -28,6 +28,18 @@ comparison with one command:
 .venv/bin/python -u scripts/run_autopruner_mobilenetv2_tinyimagenet200.py
 ```
 
+If the server has only 64 MiB in `/dev/shm`, `num_workers: 0` still works:
+DataLoader collates batches in the main process and does not copy them through
+worker shared memory. Keep batch size 128 unless GPU or host memory becomes a
+problem. To run the entire five-schedule comparison at batch size 64, use:
+
+```bash
+.venv/bin/python -u scripts/run_autopruner_mobilenetv2_tinyimagenet200.py --batch-size 64
+```
+
+Use one batch size across all five schedules because changing it changes the
+number of optimizer and selector updates within each epoch.
+
 The five runs use 5+40, 10+35, 15+30, 20+25, and 30+15 search/fine-tuning
 epochs. Each run starts from the same plain `best.pt`, uses the same seed and
 keep target 0.63, and receives a fresh optimizer state and a 45-epoch budget.

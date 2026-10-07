@@ -18,12 +18,15 @@ DEFAULT_CHECKPOINT = (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=Path(DEFAULT_CHECKPOINT))
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training")
     args = parser.parse_args()
 
     root = Path.cwd()
     if not (root / "configs" / "train.yaml").is_file():
         parser.error("Run this script from the repository root.")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be a positive integer.")
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
         parser.error(
@@ -38,6 +41,7 @@ def main() -> None:
         sys.executable, "-u", "src/net_complexity/tune.py",
         "--config-name=tune_autopruner_mobilenetv2_tinyimagenet200_schedule_45",
         override,
+        f"dataloaders.batch_size={args.batch_size}",
     ]
     print(f"[AutoPruner] Starting fixed-size schedule sweep: {' '.join(command)}", flush=True)
     if args.dry_run:
