@@ -50,7 +50,9 @@ from 0.01 during 150 fine-tuning epochs. Their lambda starts at 10 and follows
 term. At 224x224 they obtain 71.18% ImageNet top-1 with 207.93M MACs.
 
 This TinyImageNet-200 recipe keeps the requested 45-epoch total and batch size
-128. It uses the author's alpha range, SGD momentum and weight decay,
+128. It loads batches with `num_workers: 0` because worker-side collation of
+224x224 images exhausted shared memory on the CUDA server. It uses the
+author's alpha range, SGD momentum and weight decay,
 fixed search learning rate 0.01, and cosine fine-tuning learning rate. Alpha
 updates every batch. [TinyImageNet has 100,000 training images](https://cs231n.stanford.edu/reports/2016/pdfs/405_Report.pdf);
 with this recipe's 10% validation split, about 90,000 remain for training, or
