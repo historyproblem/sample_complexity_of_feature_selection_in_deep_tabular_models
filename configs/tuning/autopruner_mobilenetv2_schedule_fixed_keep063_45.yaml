@@ -1,0 +1,59 @@
+# @package _global_
+# Five independent 45-epoch AutoPruner runs with identical per-block widths.
+tuning:
+  enabled: true
+  mode: grid
+  study_name: autopruner_mobilenetv2_tinyimagenet200_schedule_fixed_keep063_45
+  direction: maximize
+  objective_metric: valid_accuracy
+  n_trials: 5
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  restart_guard:
+    enabled: false
+    metric: null
+    mode: null
+    epoch: 1
+    threshold: 0.0
+    max_attempts_per_repeat: 1
+  storage: null
+  load_if_exists: false
+  output_dir: outputs/studies
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.pruning_epochs_per_stage: 5
+      model.final_fine_tune_epochs: 40
+      run_history.min_epoch: 6
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_schedule_5_40_keep063
+      mlflow.tags.pruning_epochs: "5"
+      mlflow.tags.fine_tune_epochs: "40"
+    - model.pruning_epochs_per_stage: 10
+      model.final_fine_tune_epochs: 35
+      run_history.min_epoch: 11
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_schedule_10_35_keep063
+      mlflow.tags.pruning_epochs: "10"
+      mlflow.tags.fine_tune_epochs: "35"
+    - model.pruning_epochs_per_stage: 15
+      model.final_fine_tune_epochs: 30
+      run_history.min_epoch: 16
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_schedule_15_30_keep063
+      mlflow.tags.pruning_epochs: "15"
+      mlflow.tags.fine_tune_epochs: "30"
+    - model.pruning_epochs_per_stage: 20
+      model.final_fine_tune_epochs: 25
+      run_history.min_epoch: 21
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_schedule_20_25_keep063
+      mlflow.tags.pruning_epochs: "20"
+      mlflow.tags.fine_tune_epochs: "25"
+    - model.pruning_epochs_per_stage: 30
+      model.final_fine_tune_epochs: 15
+      run_history.min_epoch: 31
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_schedule_30_15_keep063
+      mlflow.tags.pruning_epochs: "30"
+      mlflow.tags.fine_tune_epochs: "15"

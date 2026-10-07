@@ -56,6 +56,7 @@ class AutoPrunerLayer(nn.Module):
         *,
         stage_index: int,
         target_keep_ratio: float = 0.5,
+        exact_keep_count: bool = False,
         alpha_start: float = AUTHOR_ALPHA_START_RESNET,
         alpha_stop: float = AUTHOR_ALPHA_STOP_RESNET,
         code_window_size: int = AUTHOR_CODE_WINDOW_SIZE,
@@ -97,6 +98,7 @@ class AutoPrunerLayer(nn.Module):
         self.activation_size = activation_size
         self.stage_index = int(stage_index)
         self.target_keep_ratio = target_keep_ratio
+        self.exact_keep_count = bool(exact_keep_count)
         self.alpha_start = alpha_start
         self.alpha_stop = alpha_stop
         self.code_window_size = code_window_size
@@ -136,6 +138,7 @@ class AutoPrunerLayer(nn.Module):
         )
         self.register_buffer("binary_mask", torch.ones(channels))
         self.register_buffer("last_code", torch.ones(channels))
+        self.register_buffer("consensus_score", torch.zeros(channels))
         self.register_buffer(
             "code_window",
             torch.zeros(code_window_size, channels),
@@ -168,6 +171,7 @@ class AutoPrunerLayer(nn.Module):
         self.phase.fill_(self.PHASE_OPEN)
         self.binary_mask.fill_(1.0)
         self.last_code.fill_(1.0)
+        self.consensus_score.zero_()
         self.code_window.zero_()
         self.window_count.zero_()
         self.has_consensus.zero_()
@@ -182,6 +186,7 @@ class AutoPrunerLayer(nn.Module):
         self.pruning_threshold.fill_(AUTHOR_INITIAL_PRUNING_THRESHOLD)
         self.binary_mask.fill_(1.0)
         self.last_code.fill_(1.0)
+        self.consensus_score.zero_()
         self.code_window.zero_()
         self.window_count.zero_()
         self.has_consensus.zero_()
@@ -254,6 +259,13 @@ class AutoPrunerLayer(nn.Module):
             raise ValueError("lambda_log_step must be finite and nonnegative.")
         self.lambda_log_step.fill_(step)
 
+    def _quota_mask(self, scores: torch.Tensor) -> torch.Tensor:
+        keep = max(1, min(self.channels, round(self.channels * self.target_keep_ratio)))
+        indices = scores.topk(keep).indices
+        mask = torch.zeros_like(scores)
+        mask[indices] = 1.0
+        return mask
+
     @torch.no_grad()
     def observe_current_code(self, *, allow_convergence_boost: bool) -> bool:
         """Update the author's 20-batch consensus and adaptive lambda.
@@ -301,7 +313,13 @@ class AutoPrunerLayer(nn.Module):
     ) -> None:
         per_batch_binary = (codes >= 0.5).to(codes.dtype)
         consensus = (per_batch_binary.mean(dim=0) >= 0.5).to(codes.dtype)
-        self.binary_mask.copy_(consensus.to(self.binary_mask))
+        self.consensus_score.copy_(codes.mean(dim=0).to(self.consensus_score))
+        chosen_mask = (
+            self._quota_mask(self.consensus_score)
+            if self.exact_keep_count
+            else consensus
+        )
+        self.binary_mask.copy_(chosen_mask.to(self.binary_mask))
         self.has_consensus.fill_(True)
 
         preserved_ratio = float(consensus.mean().item())
@@ -345,6 +363,9 @@ class AutoPrunerLayer(nn.Module):
             and not bool(self.has_consensus.item())
         ):
             self.binary_mask.copy_((self.last_code >= 0.5).to(self.binary_mask))
+        if self.exact_keep_count:
+            scores = self.consensus_score if bool(self.has_consensus.item()) else self.last_code
+            self.binary_mask.copy_(self._quota_mask(scores).to(self.binary_mask))
         # The author's code only accepts complete 20-batch windows. Discard a
         # trailing partial window and retain the most recent full consensus.
         self.code_window.zero_()

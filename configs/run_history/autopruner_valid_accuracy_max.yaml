@@ -4,7 +4,7 @@ run_history:
   root_dir: outputs/runs
   monitor: valid_accuracy
   mode: max
-  # The pilot starts fine-tuning at epoch 16; the 30+15 sweep overrides this to 31.
-  min_epoch: 33
+  # The 5+40 pilot starts fine-tuning at epoch 6; the 10+35 sweep overrides this to 11.
+  min_epoch: 6
   use_hydra_output_dir: true
   log_gate_history: false

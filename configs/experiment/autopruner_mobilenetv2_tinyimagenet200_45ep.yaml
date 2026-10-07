@@ -1,7 +1,7 @@
 # @package _global_
 # AutoPruner adaptation for MobileNetV2/TinyImageNet-200, initialized from
 # the validation-selected plain MobileNetV2 checkpoint. The schedule is
-# overridden by the 15+30 pilot or the 30+15 sweep, both within 45 epochs.
+# overridden by the 5+40 pilot or the 10+35 sweep, both within 45 epochs.
 defaults:
   - /data: tinyimagenet200_resize224_imagenet_norm
   - /optimizer: sgd_autopruner_author
@@ -18,8 +18,8 @@ model:
   _target_: net_complexity.wrappers.AutoPrunerWrapper
   pretrained_checkpoint: ???
   require_pretrained: true
-  pruning_epochs_per_stage: 15
-  final_fine_tune_epochs: 30
+  pruning_epochs_per_stage: 5
+  final_fine_tune_epochs: 40
   alpha_update_interval: 1
   lambda_log_step_init: auto
   entropy_regularization: plus_negative_entropy
@@ -37,7 +37,7 @@ model:
     input_size: 224
     stem_stride: 2
     dropout: 0.2
-    target_keep_ratio: 0.5
+    target_keep_ratio: 0.63
     alpha_start: 0.1
     alpha_stop: 100.0
 
@@ -55,12 +55,12 @@ training_arguments:
     enabled: false
 
 run_history:
-  min_epoch: 16
+  min_epoch: 6
 
 mlflow:
   enabled: true
   experiment_name: mobilenetv2_pretrained_autopruner
-  run_name: autopruner_mobilenetv2_tinyimagenet200_45ep_keep05
+  run_name: autopruner_mobilenetv2_tinyimagenet200_5_40_keep063
   tags:
     model_type: MobileNetV2_AutoPruner
     method: autopruner

@@ -1,28 +1,27 @@
 defaults:
   - experiment: autopruner_mobilenetv2_tinyimagenet200_45ep
-  - tuning: autopruner_mobilenetv2_keep_03_09_30_15_ordered
+  - tuning: autopruner_mobilenetv2_schedule_fixed_keep063_45
   - _self_
 
 model:
   pretrained_checkpoint: ${hydra:runtime.cwd}/outputs/runs/20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200/checkpoints/best.pt
-  pruning_epochs_per_stage: 30
-  final_fine_tune_epochs: 15
+  backbone:
+    target_keep_ratio: 0.63
+    exact_keep_count: true
 
 training_arguments:
   num_epochs: 45
 
-run_history:
-  min_epoch: 31
-
 mlflow:
   tags:
-    recipe: autopruner_mobilenetv2_tinyimagenet200_30_15_sweep
-    pruning_epochs: "30"
-    fine_tune_epochs: "15"
+    recipe: autopruner_mobilenetv2_tinyimagenet200_schedule_fixed_keep063_45
+    exact_keep_count: "true"
+    target_keep_ratio: "0.63"
 
 reporting:
   run_label_fields:
-    keep_ratio: model.backbone.target_keep_ratio
+    pruning_epochs: model.pruning_epochs_per_stage
+    fine_tune_epochs: model.final_fine_tune_epochs
 
 hydra:
   run:

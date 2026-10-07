@@ -7,21 +7,24 @@ started from torchvision `IMAGENET1K_V2` weights. The checkpoint contains the
 must point to its project-format `checkpoints/best.pt`. It is distinct from the
 `model.backbone.pretrained_weights` setting for raw torchvision weights.
 
-From the repository root on the CUDA server, run the pilot and then all six
-ratio points with one command:
+From the repository root on the CUDA server, run the fixed-size schedule
+comparison with one command:
 
 ```bash
 .venv/bin/python -u scripts/run_autopruner_mobilenetv2_tinyimagenet200.py
 ```
 
-The first run is a pilot at keep ratio 0.5 with 15 pruning epochs and 30
-fine-tuning epochs. If it fails, the launcher stops before starting the sweep.
-The sweep then runs keep ratios 0.3, 0.5, 0.63, 0.7, 0.8, and 0.9 in order,
-with 30 pruning epochs and 15 fine-tuning epochs **per run**. Every run starts
-from the same plain `best.pt` and gets its own optimizer state and 45-epoch
-budget. To run only one phase, pass `--pilot-only` or `--sweep-only`; use
-`--checkpoint=/absolute/path/to/best.pt` if the server keeps the baseline
-elsewhere.
+The five runs use 5+40, 10+35, 15+30, 20+25, and 30+15 search/fine-tuning
+epochs. Each run starts from the same plain `best.pt`, uses the same seed and
+keep target 0.63, and receives a fresh optimizer state and a 45-epoch budget.
+The comparison enables `exact_keep_count`, selecting exactly
+`round(0.63 * channels)` hidden channels in each of the 16 blocks. Thus the
+exported models have identical parameter and MAC counts even when the chosen
+channels differ. At width 1.0 and 200 classes the fixed deployment has
+1,811,897 parameters (4,477 of 7,104 gated channels kept). This fixed-width
+rule is an experimental control, not an
+operation in the original paper. Use `--checkpoint=/absolute/path/to/best.pt`
+if the server keeps the baseline elsewhere.
 
 AutoPruner searches all 16 independently narrowable expansion widths. The
 MobileNetV2 ImageNet setting in Luo and Wu's [paper](https://cs.nju.edu.cn/wujx/paper/AutoPruner_PR2020.pdf)
@@ -32,12 +35,17 @@ from 0.01 during 150 fine-tuning epochs. Their lambda starts at 10 and follows
 `100 * abs(actual_keep_ratio - target_keep_ratio)`; their loss has no entropy
 term. At 224x224 they obtain 71.18% ImageNet top-1 with 207.93M MACs.
 
-This TinyImageNet-200 recipe keeps the requested 45-epoch schedules and batch
-size 128. It uses the author's alpha range, SGD momentum and weight decay,
+This TinyImageNet-200 recipe keeps the requested 45-epoch total and batch size
+128. It uses the author's alpha range, SGD momentum and weight decay,
 fixed search learning rate 0.01, and cosine fine-tuning learning rate. Alpha
-updates every batch. The 0.63 sweep point reproduces the author's channel
-target; other points explore the compression curve. The selector remains after
-depthwise activation, so deployment matches the physically narrow model. A
+updates every batch. [TinyImageNet has 100,000 training images](https://cs231n.stanford.edu/reports/2016/pdfs/405_Report.pdf);
+with this recipe's 10% validation split, about 90,000 remain for training, or
+about 703 full batches per epoch at batch size 128.
+Thus 5 TinyImageNet search epochs give about 3,515 updates, compared with
+about 25,000 for 5 ImageNet epochs at batch size 256. The schedule series
+tests whether more search updates improve the final validation accuracy enough
+to justify fewer fine-tuning epochs. The selector remains after depthwise activation,
+so deployment matches the physically narrow model. A
 2x2 pooled coder keeps the selectors tractable at 224x224.
 
 The requested lambda-step and entropy changes form a hybrid objective. The
@@ -51,11 +59,13 @@ alpha gradually binarizes them. Neither change is in the original paper.
 `training_arguments.adaptive_lambda.enabled: false` refers only to the
 separate Gumbel/AIG controller, which requires `model.lambda_coef`.
 
-Validation selects the best checkpoint only from fine-tuning epochs 16–45 for
-the pilot or 31–45
-for the sweep. Each run writes `checkpoints/autopruner_pruned.pt` with
-physically narrowed channels and evaluates that frozen deployment on the
-official TinyImageNet validation set, held out as the project's test split.
-Report the earlier plain baseline cost separately from each 45-epoch pruning
-run; compare final quality with the official test metric and use validation
-for configuration selection.
+For each schedule, validation selects the best checkpoint only from its
+fine-tuning phase. The study chooses the schedule with highest validation
+accuracy and records it in `best_trial.yaml`. Each run writes
+`checkpoints/autopruner_pruned.pt` with physically narrowed channels and
+evaluates that frozen deployment on the official TinyImageNet validation set,
+held out as the project's test split. Use validation to choose the schedule;
+report official test results as exploratory because they can inform subsequent
+experiments. Once the schedule is chosen, the separate keep-ratio sweep can use
+that schedule. Report the earlier plain baseline cost separately from each
+45-epoch pruning run.

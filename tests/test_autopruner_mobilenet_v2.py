@@ -26,8 +26,8 @@ def test_project_checkpoint_loads_and_mask_exports_same_function(tmp_path):
     model = AutoPrunerWrapper(
         AutoPrunerMobileNetV2(num_classes=200, input_size=32),
         pretrained_checkpoint=str(checkpoint_path),
-        pruning_epochs_per_stage=15,
-        final_fine_tune_epochs=30,
+        pruning_epochs_per_stage=10,
+        final_fine_tune_epochs=35,
     )
     assert model.expected_num_epochs == 45
     assert model.pretrained_load_info["missing_parameter_keys"] == []
@@ -62,8 +62,8 @@ def test_project_checkpoint_loads_and_mask_exports_same_function(tmp_path):
 def test_search_phase_trains_mobile_selectors():
     model = AutoPrunerWrapper(
         AutoPrunerMobileNetV2(num_classes=10, input_size=32),
-        pruning_epochs_per_stage=15,
-        final_fine_tune_epochs=30,
+        pruning_epochs_per_stage=10,
+        final_fine_tune_epochs=35,
     )
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     model.on_train_epoch_start(epoch=1, optimizer=optimizer, batches_per_epoch=1)
@@ -88,8 +88,8 @@ def test_auto_lambda_step_and_entropy_are_active_during_search():
 
     model = AutoPrunerWrapper(
         TinyBackbone(),
-        pruning_epochs_per_stage=15,
-        final_fine_tune_epochs=30,
+        pruning_epochs_per_stage=10,
+        final_fine_tune_epochs=35,
         lambda_log_step_init="auto",
         entropy_regularization="plus_negative_entropy",
         entropy_regularization_coef=0.3,
@@ -100,7 +100,7 @@ def test_auto_lambda_step_and_entropy_are_active_during_search():
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     model.on_train_epoch_start(epoch=1, optimizer=optimizer, batches_per_epoch=4)
     selector = model.backbone.pruner
-    expected_step = math.log(100.0 / 10.0) / (2 * 5)
+    expected_step = math.log(100.0 / 10.0) / (2 * 4)
     assert math.isclose(float(selector.lambda_log_step), expected_step, rel_tol=1e-6)
     assert optimizer.param_groups[0]["lr"] == 0.01
 
@@ -129,13 +129,43 @@ def test_auto_lambda_step_and_entropy_are_active_during_search():
     )
 
     model.on_validation_epoch_end(
-        epoch=15, valid_metrics={"valid_accuracy": 0.5}, optimizer=optimizer
+        epoch=10, valid_metrics={"valid_accuracy": 0.5}, optimizer=optimizer
     )
-    model.on_train_epoch_start(epoch=16, optimizer=optimizer, batches_per_epoch=4)
+    model.on_train_epoch_start(epoch=11, optimizer=optimizer, batches_per_epoch=4)
     assert optimizer.param_groups[0]["lr"] == 0.01
-    model.on_train_epoch_start(epoch=17, optimizer=optimizer, batches_per_epoch=4)
+    model.on_train_epoch_start(epoch=12, optimizer=optimizer, batches_per_epoch=4)
     assert math.isclose(
         optimizer.param_groups[0]["lr"],
-        0.01 * 0.5 * (1.0 + math.cos(math.pi / 30)),
+        0.01 * 0.5 * (1.0 + math.cos(math.pi / 35)),
         rel_tol=1e-6,
     )
+
+
+def test_exact_keep_count_gives_same_deployment_size_across_searches():
+    parameter_counts = []
+    for seed in (1, 2):
+        torch.manual_seed(seed)
+        model = AutoPrunerWrapper(
+            AutoPrunerMobileNetV2(
+                num_classes=10,
+                input_size=32,
+                target_keep_ratio=0.63,
+                exact_keep_count=True,
+            ),
+            pruning_epochs_per_stage=5 if seed == 1 else 30,
+            final_fine_tune_epochs=40 if seed == 1 else 15,
+        )
+        selectors = list(get_autopruner_modules(model).values())
+        for selector in selectors:
+            selector.start_soft_pruning()
+            selector._update_consensus(
+                torch.rand(selector.code_window_size, selector.channels),
+                allow_convergence_boost=False,
+            )
+            selector.finalize()
+            assert int(selector.binary_mask.sum()) == max(
+                1, round(selector.channels * 0.63)
+            )
+        deployment = export_pruned_autopruner_backbone(model)
+        parameter_counts.append(sum(p.numel() for p in deployment.parameters()))
+    assert parameter_counts[0] == parameter_counts[1]
