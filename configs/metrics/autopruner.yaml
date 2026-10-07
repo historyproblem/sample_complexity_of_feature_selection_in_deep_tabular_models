@@ -7,6 +7,7 @@ metrics:
     - _target_: net_complexity.metrics.classification.Accuracy
     - _target_: net_complexity.metrics.autopruner.AutoPrunerProbMetric
       log_channel_zero_probs: false
+    - _target_: net_complexity.metrics.autopruner.AutoPrunerControllerMetric
   valid_metrics:
     - _target_: net_complexity.metrics.base.MultiLossMetric
     - _target_: net_complexity.metrics.classification.Accuracy

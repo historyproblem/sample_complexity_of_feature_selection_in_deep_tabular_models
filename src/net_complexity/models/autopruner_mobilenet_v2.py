@@ -24,6 +24,8 @@ class AutoPrunerInvertedResidual(InvertedResidual):
         *,
         activation_size: int,
         target_keep_ratio: float = 0.5,
+        alpha_start: float = 0.1,
+        alpha_stop: float = 100.0,
         norm_layer=None,
     ) -> None:
         super().__init__(inp, oup, stride, expand_ratio, norm_layer=norm_layer)
@@ -33,6 +35,8 @@ class AutoPrunerInvertedResidual(InvertedResidual):
                 activation_size,
                 stage_index=0,
                 target_keep_ratio=target_keep_ratio,
+                alpha_start=alpha_start,
+                alpha_stop=alpha_stop,
                 max_pool_kernel=max(1, activation_size // 2),
             )
             if self.has_expand
@@ -59,6 +63,8 @@ class AutoPrunerMobileNetV2(MobileNetV2):
         *,
         input_size: int = 224,
         target_keep_ratio: float = 0.5,
+        alpha_start: float = 0.1,
+        alpha_stop: float = 100.0,
         stem_stride: int = 2,
         **kwargs,
     ) -> None:
@@ -78,6 +84,8 @@ class AutoPrunerMobileNetV2(MobileNetV2):
                 inp, oup, stride, expand_ratio,
                 activation_size=spatial_size,
                 target_keep_ratio=target_keep_ratio,
+                alpha_start=alpha_start,
+                alpha_stop=alpha_stop,
                 norm_layer=norm_layer,
             )
 

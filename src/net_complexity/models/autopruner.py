@@ -19,6 +19,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from .aig import entropy_regularization_sign
 from .outputs import ClassifModelOutput
 
 
@@ -79,6 +80,8 @@ class AutoPrunerLayer(nn.Module):
             raise ValueError("alpha values must satisfy 0 < alpha_start <= alpha_stop.")
         if code_window_size <= 0:
             raise ValueError("code_window_size must be positive.")
+        if float(initial_regularization) <= 0.0:
+            raise ValueError("initial_regularization must be positive.")
 
         if max_pool_kernel is None:
             max_pool_kernel = min(2, activation_size)
@@ -97,6 +100,7 @@ class AutoPrunerLayer(nn.Module):
         self.alpha_start = alpha_start
         self.alpha_stop = alpha_stop
         self.code_window_size = code_window_size
+        self.initial_regularization = float(initial_regularization)
         self.max_pool_kernel = max_pool_kernel
         self.pooled_size = pooled_size
 
@@ -123,6 +127,9 @@ class AutoPrunerLayer(nn.Module):
             "adaptive_regularization",
             torch.tensor(float(initial_regularization), dtype=torch.float32),
         )
+        # Zero retains the paper's direct lambda update. A positive value
+        # bounds each consensus-window update in log space.
+        self.register_buffer("lambda_log_step", torch.zeros((), dtype=torch.float32))
         self.register_buffer(
             "pruning_threshold",
             torch.tensor(AUTHOR_INITIAL_PRUNING_THRESHOLD, dtype=torch.float32),
@@ -171,7 +178,7 @@ class AutoPrunerLayer(nn.Module):
         self.phase.fill_(self.PHASE_SOFT)
         self.alpha.fill_(self.alpha_start)
         self.alpha_boost.zero_()
-        self.adaptive_regularization.fill_(AUTHOR_INITIAL_REGULARIZATION)
+        self.adaptive_regularization.fill_(self.initial_regularization)
         self.pruning_threshold.fill_(AUTHOR_INITIAL_PRUNING_THRESHOLD)
         self.binary_mask.fill_(1.0)
         self.last_code.fill_(1.0)
@@ -237,6 +244,16 @@ class AutoPrunerLayer(nn.Module):
         )
         return coefficient * self.regularization_error()
 
+    def negative_entropy(self) -> torch.Tensor:
+        code = self.current_code().clamp(1e-6, 1.0 - 1e-6)
+        return (code * code.log() + (1.0 - code) * torch.log1p(-code)).mean()
+
+    def set_lambda_log_step(self, value: float | None) -> None:
+        step = 0.0 if value is None else float(value)
+        if not math.isfinite(step) or step < 0.0:
+            raise ValueError("lambda_log_step must be finite and nonnegative.")
+        self.lambda_log_step.fill_(step)
+
     @torch.no_grad()
     def observe_current_code(self, *, allow_convergence_boost: bool) -> bool:
         """Update the author's 20-batch consensus and adaptive lambda.
@@ -288,10 +305,16 @@ class AutoPrunerLayer(nn.Module):
         self.has_consensus.fill_(True)
 
         preserved_ratio = float(consensus.mean().item())
-        self.adaptive_regularization.fill_(
-            AUTHOR_REGULARIZATION_SCALE
-            * abs(preserved_ratio - self.target_keep_ratio)
+        target_lambda = AUTHOR_REGULARIZATION_SCALE * abs(
+            preserved_ratio - self.target_keep_ratio
         )
+        log_step = float(self.lambda_log_step.item())
+        if log_step > 0.0:
+            current = max(float(self.adaptive_regularization.item()), 1e-8)
+            target = max(target_lambda, 1e-8)
+            delta = max(-log_step, min(log_step, math.log(target / current)))
+            target_lambda = current * math.exp(delta)
+        self.adaptive_regularization.fill_(target_lambda)
 
         pruning_ratio = 1.0 - preserved_ratio
         if pruning_ratio >= float(self.pruning_threshold.item()):
@@ -744,9 +767,14 @@ class AutoPrunerWrapper(nn.Module):
         pruning_epochs_per_stage: int = AUTHOR_PRUNING_EPOCHS_PER_STAGE,
         final_fine_tune_epochs: int = AUTHOR_FINAL_FINE_TUNE_EPOCHS,
         alpha_update_interval: int = AUTHOR_ALPHA_UPDATE_INTERVAL,
+        lambda_log_step_init: float | str | None = None,
+        entropy_regularization: str = "disabled",
+        entropy_regularization_coef: float = 0.0,
         pruning_lr: float = AUTHOR_PRUNING_LR,
         pruning_weight_decay: float = AUTHOR_PRUNING_WEIGHT_DECAY,
         final_weight_decay: float = AUTHOR_FINAL_WEIGHT_DECAY,
+        pruning_lr_policy: str = "half_decay",
+        fine_tune_lr_policy: str = "third_decay",
         stagewise: bool = True,
         reset_optimizer_each_stage: bool = True,
         select_best_per_stage: bool = True,
@@ -757,9 +785,17 @@ class AutoPrunerWrapper(nn.Module):
         self.pruning_epochs_per_stage = int(pruning_epochs_per_stage)
         self.final_fine_tune_epochs = int(final_fine_tune_epochs)
         self.alpha_update_interval = int(alpha_update_interval)
+        self.lambda_log_step_init = lambda_log_step_init
+        self.entropy_regularization = str(entropy_regularization).strip().lower()
+        self.entropy_regularization_sign = entropy_regularization_sign(
+            self.entropy_regularization
+        )
+        self.entropy_regularization_coef = float(entropy_regularization_coef)
         self.pruning_lr = float(pruning_lr)
         self.pruning_weight_decay = float(pruning_weight_decay)
         self.final_weight_decay = float(final_weight_decay)
+        self.pruning_lr_policy = str(pruning_lr_policy).strip().lower()
+        self.fine_tune_lr_policy = str(fine_tune_lr_policy).strip().lower()
         self.stagewise = bool(stagewise)
         self.reset_optimizer_each_stage = bool(reset_optimizer_each_stage)
         self.select_best_per_stage = bool(select_best_per_stage)
@@ -767,6 +803,12 @@ class AutoPrunerWrapper(nn.Module):
             raise ValueError("pruning_epochs_per_stage must be positive.")
         if self.alpha_update_interval <= 0:
             raise ValueError("alpha_update_interval must be positive.")
+        if self.entropy_regularization_coef < 0.0:
+            raise ValueError("entropy_regularization_coef must be nonnegative.")
+        if self.pruning_lr_policy not in {"half_decay", "constant"}:
+            raise ValueError("pruning_lr_policy must be half_decay or constant.")
+        if self.fine_tune_lr_policy not in {"third_decay", "cosine"}:
+            raise ValueError("fine_tune_lr_policy must be third_decay or cosine.")
 
         self.pretrained_checkpoint = pretrained_checkpoint
         self.pretrained_load_info: dict[str, Any] | None = None
@@ -863,8 +905,11 @@ class AutoPrunerWrapper(nn.Module):
     ) -> None:
         if stage_position < self.num_pruning_phases:
             epoch_within_stage = (int(epoch) - 1) % self.pruning_epochs_per_stage
-            decay_epoch = max(self.pruning_epochs_per_stage // 2, 1)
-            lr = self.pruning_lr * (0.1 ** (epoch_within_stage // decay_epoch))
+            if self.pruning_lr_policy == "constant":
+                lr = self.pruning_lr
+            else:
+                decay_epoch = max(self.pruning_epochs_per_stage // 2, 1)
+                lr = self.pruning_lr * (0.1 ** (epoch_within_stage // decay_epoch))
             weight_decay = self.pruning_weight_decay
         else:
             fine_tune_epoch = (
@@ -872,12 +917,41 @@ class AutoPrunerWrapper(nn.Module):
                 - self.num_pruning_phases * self.pruning_epochs_per_stage
                 - 1
             )
-            decay_epoch = max(self.final_fine_tune_epochs // 3, 1)
-            lr = self.pruning_lr * (0.1 ** (fine_tune_epoch // decay_epoch))
+            if self.fine_tune_lr_policy == "cosine":
+                lr = self.pruning_lr * 0.5 * (
+                    1.0 + math.cos(math.pi * fine_tune_epoch / self.final_fine_tune_epochs)
+                )
+            else:
+                decay_epoch = max(self.final_fine_tune_epochs // 3, 1)
+                lr = self.pruning_lr * (0.1 ** (fine_tune_epoch // decay_epoch))
             weight_decay = self.final_weight_decay
         for group in optimizer.param_groups:
             group["lr"] = float(lr)
             group["weight_decay"] = float(weight_decay)
+
+    def _configure_lambda_step(self, *, batches_per_epoch: int) -> None:
+        for module in self._active_modules():
+            requested = self.lambda_log_step_init
+            if requested is None:
+                step = None
+            elif str(requested).strip().lower() == "auto":
+                if module.initial_regularization >= AUTHOR_REGULARIZATION_SCALE:
+                    raise ValueError(
+                        "Automatic lambda log step requires an initial "
+                        "regularization below 100."
+                    )
+                # Match the repo's automatic-step horizon (first third of
+                # search), while using AutoPruner's author lambda range and
+                # its actual consensus-window update cadence.
+                windows_per_epoch = max(batches_per_epoch // module.code_window_size, 1)
+                horizon = max(math.ceil(self.pruning_epochs_per_stage / 3), 1)
+                update_slots = windows_per_epoch * horizon
+                step = math.log(
+                    AUTHOR_REGULARIZATION_SCALE / module.initial_regularization
+                ) / update_slots
+            else:
+                step = float(requested)
+            module.set_lambda_log_step(step)
 
     def on_train_epoch_start(
         self,
@@ -912,6 +986,7 @@ class AutoPrunerWrapper(nn.Module):
         else:
             for module in self._active_modules():
                 module.discard_partial_consensus_window()
+        self._configure_lambda_step(batches_per_epoch=int(batches_per_epoch))
         self.batch_step_in_epoch.zero_()
         self._set_optimizer_recipe(
             optimizer,
@@ -1018,7 +1093,14 @@ class AutoPrunerWrapper(nn.Module):
             raw_terms = [module.regularization_error() for module in active_modules]
             weighted_terms = [module.weighted_regularization() for module in active_modules]
             raw_regularization = sum(raw_terms)
-            reg_loss = sum(weighted_terms)
+            negative_entropy = torch.stack(
+                [module.negative_entropy() for module in active_modules]
+            ).mean()
+            reg_loss = sum(weighted_terms) + (
+                self.entropy_regularization_sign
+                * self.entropy_regularization_coef
+                * negative_entropy
+            )
 
             total_steps = (
                 self.pruning_epochs_per_stage * int(self.batches_per_epoch.item())
@@ -1038,6 +1120,7 @@ class AutoPrunerWrapper(nn.Module):
         else:
             raw_regularization = logits.new_zeros(())
             reg_loss = logits.new_zeros(())
+            negative_entropy = logits.new_zeros(())
 
         modules = list(get_autopruner_modules(self).values())
         mean_p_open = torch.cat(
@@ -1048,6 +1131,7 @@ class AutoPrunerWrapper(nn.Module):
             regularization_loss=raw_regularization,
             reg_loss=reg_loss,
             mean_p_open=mean_p_open,
+            negative_entropy=negative_entropy,
             loss=ce_loss + reg_loss,
             logits=logits,
         )

@@ -1,7 +1,7 @@
 # @package _global_
 # AutoPruner adaptation for MobileNetV2/TinyImageNet-200, initialized from
-# the validation-selected plain MobileNetV2 checkpoint. Fifteen epochs search
-# all internal expansion widths, followed by 30 epochs of fine-tuning.
+# the validation-selected plain MobileNetV2 checkpoint. The schedule is
+# overridden by the 15+30 pilot or the 30+15 sweep, both within 45 epochs.
 defaults:
   - /data: tinyimagenet200_resize224_imagenet_norm
   - /optimizer: sgd_autopruner_author
@@ -20,6 +20,15 @@ model:
   require_pretrained: true
   pruning_epochs_per_stage: 15
   final_fine_tune_epochs: 30
+  alpha_update_interval: 1
+  lambda_log_step_init: auto
+  entropy_regularization: plus_negative_entropy
+  entropy_regularization_coef: 0.3
+  pruning_lr: 0.01
+  pruning_lr_policy: constant
+  pruning_weight_decay: 0.0005
+  fine_tune_lr_policy: cosine
+  final_weight_decay: 0.0005
   backbone:
     _target_: net_complexity.wrappers.AutoPrunerMobileNetV2
     num_classes: 200
@@ -29,12 +38,15 @@ model:
     stem_stride: 2
     dropout: 0.2
     target_keep_ratio: 0.5
+    alpha_start: 0.1
+    alpha_stop: 100.0
 
 training_arguments:
   num_epochs: 45
   lambda_warmup:
     enabled: false
-  # AutoPruner uses its own per-window adaptive regularization coefficient.
+  # AutoPruner has its own per-window adaptive lambda and automatic log step.
+  # The generic Gumbel/AIG controller expects model.lambda_coef and is separate.
   adaptive_lambda:
     enabled: false
   batchnorm_recalibration:
@@ -54,3 +66,4 @@ mlflow:
     method: autopruner
     dataset: tinyimagenet200
     recipe: autopruner_mobilenetv2_tinyimagenet200_45ep
+    variant: mobilenet_paper_lr_alpha_auto_lambda_entropy03

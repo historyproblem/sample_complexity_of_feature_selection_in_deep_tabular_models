@@ -23,6 +23,45 @@ class AutoPrunerProbMetric(ChannelZeroProbMetric):
         )
 
 
+class AutoPrunerControllerMetric(BaseMetric):
+    """Track the search controller's actual lambda and chosen log step."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def update(self, input, output, targets, model=None):
+        del input, output, targets
+        if model is None:
+            return
+        selectors = [
+            selector
+            for selector in get_autopruner_modules(model).values()
+            if selector.phase_name == "soft"
+        ]
+        if not selectors:
+            return
+        self.lambda_sum += sum(
+            float(selector.adaptive_regularization) for selector in selectors
+        ) / len(selectors)
+        self.step_sum += sum(
+            float(selector.lambda_log_step) for selector in selectors
+        ) / len(selectors)
+        self.count += 1
+
+    def compute(self):
+        if self.count == 0:
+            return {}
+        return {
+            "autopruner_lambda_mean": self.lambda_sum / self.count,
+            "autopruner_lambda_log_step_mean": self.step_sum / self.count,
+        }
+
+    def reset(self):
+        self.lambda_sum = 0.0
+        self.step_sum = 0.0
+        self.count = 0
+
+
 def _num_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
 
