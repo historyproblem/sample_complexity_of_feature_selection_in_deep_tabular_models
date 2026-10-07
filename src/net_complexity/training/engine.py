@@ -624,16 +624,29 @@ def _assert_runtime_lambda_consistency(
 ) -> dict[str, Any]:
     cfg_lambda = _resolve_lambda_value(config)
     model_lambda = _resolve_model_lambda_coef(model)
-    assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
-    assert model_lambda is not None, "Instantiated model is missing lambda_coef."
-    assert abs(float(cfg_lambda) - float(model_lambda)) < 1e-12, (
-        f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match model.lambda_coef={model_lambda}."
-    )
+    # Some pruning methods (including AutoPruner) own their regularization
+    # coefficient inside channel selectors rather than on the top-level model.
+    # Keep the strict check whenever the generic lambda controller is in use.
+    if cfg_lambda is None and model_lambda is None:
+        assert not _adaptive_lambda_enabled(config.training_arguments), (
+            f"cfg.{LAMBDA_CONFIG_PATH} is missing for adaptive_lambda."
+        )
+        warmup_cfg = getattr(config.training_arguments, "lambda_warmup", None)
+        assert not bool(getattr(warmup_cfg, "enabled", False)), (
+            f"cfg.{LAMBDA_CONFIG_PATH} is missing for lambda_warmup."
+        )
+    else:
+        assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
+        assert model_lambda is not None, "Instantiated model is missing lambda_coef."
+        assert abs(float(cfg_lambda) - float(model_lambda)) < 1e-12, (
+            f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda} does not match model.lambda_coef={model_lambda}."
+        )
 
     progress_context = progress_context or {}
     grid_params = progress_context.get("grid_params") or {}
     if LAMBDA_CONFIG_PATH in grid_params:
         grid_lambda = float(grid_params[LAMBDA_CONFIG_PATH])
+        assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
         assert abs(float(cfg_lambda) - grid_lambda) < 1e-12, (
             f"grid_params['{LAMBDA_CONFIG_PATH}']={grid_lambda} does not match "
             f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."
@@ -642,6 +655,7 @@ def _assert_runtime_lambda_consistency(
     trial_params = progress_context.get("optuna_trial_params") or {}
     if LAMBDA_CONFIG_PATH in trial_params:
         trial_lambda = float(trial_params[LAMBDA_CONFIG_PATH])
+        assert cfg_lambda is not None, f"cfg.{LAMBDA_CONFIG_PATH} is missing."
         assert abs(float(cfg_lambda) - trial_lambda) < 1e-12, (
             f"trial.params['{LAMBDA_CONFIG_PATH}']={trial_lambda} does not match "
             f"cfg.{LAMBDA_CONFIG_PATH}={cfg_lambda}."

@@ -1,7 +1,10 @@
 import math
+from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
+from omegaconf import OmegaConf
 
 from net_complexity.metrics.autopruner import AutoPrunerControllerMetric
 from net_complexity.models.autopruner import (
@@ -12,6 +15,40 @@ from net_complexity.models.autopruner import (
 )
 from net_complexity.models.autopruner_mobilenet_v2 import AutoPrunerMobileNetV2
 from net_complexity.models.mobilenet_v2 import MobileNetV2
+from net_complexity.training.engine import _assert_runtime_lambda_consistency
+
+
+def test_runtime_accepts_selector_owned_lambda_but_rejects_generic_lambda_mismatch(tmp_path):
+    config = OmegaConf.create({
+        "model": {},
+        "training_arguments": {
+            "adaptive_lambda": {"enabled": False},
+            "lambda_warmup": {"enabled": False},
+        },
+        "mlflow": {"run_name": "autopruner_test"},
+    })
+    model = nn.Linear(2, 2)
+    history = SimpleNamespace(run_name="autopruner_test", run_dir=tmp_path)
+
+    snapshot = _assert_runtime_lambda_consistency(config, model, history)
+    assert snapshot["cfg_model_lambda_coef"] is None
+    assert snapshot["model_lambda_coef"] is None
+
+    with pytest.raises(AssertionError, match="cfg.model.lambda_coef is missing"):
+        _assert_runtime_lambda_consistency(
+            config, model, history,
+            progress_context={"grid_params": {"model.lambda_coef": 1.0}},
+        )
+
+    config.training_arguments.adaptive_lambda.enabled = True
+    with pytest.raises(AssertionError, match="missing for adaptive_lambda"):
+        _assert_runtime_lambda_consistency(config, model, history)
+
+    config.training_arguments.adaptive_lambda.enabled = False
+    config.model.lambda_coef = 2.0
+    model.lambda_coef = 1.0
+    with pytest.raises(AssertionError, match="does not match model.lambda_coef"):
+        _assert_runtime_lambda_consistency(config, model, history)
 
 
 def test_project_checkpoint_loads_and_mask_exports_same_function(tmp_path):
