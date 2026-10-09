@@ -1,0 +1,57 @@
+defaults:
+  - tune_autopruner_mobilenetv2_tinyimagenet200_schedule_45
+  - _self_
+
+model:
+  pruning_epochs_per_stage: 20
+  final_fine_tune_epochs: 25
+  backbone:
+    exact_keep_count: true
+
+training_arguments:
+  num_epochs: 45
+
+run_history:
+  min_epoch: 21
+
+mlflow:
+  tags:
+    recipe: autopruner_mobilenetv2_tinyimagenet200_params_20_25
+    pruning_epochs: "20"
+    fine_tune_epochs: "25"
+
+reporting:
+  run_label_fields:
+    target_keep_ratio: model.backbone.target_keep_ratio
+
+tuning:
+  study_name: autopruner_mobilenetv2_tinyimagenet200_params_20_25
+  n_trials: 5
+  points:
+    # Uniform targets in [1M, 2.5M): 1.0, 1.3, 1.6, 1.9, 2.2M.
+    # Counts refer to the exported model, excluding temporary coders.
+    - model.backbone.target_keep_ratio: 0.1809
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1000052
+      mlflow.tags.target_keep_ratio: "0.1809"
+      mlflow.tags.target_parameters: "1000000"
+      mlflow.tags.expected_deployment_parameters: "1000052"
+    - model.backbone.target_keep_ratio: 0.3469
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1300045
+      mlflow.tags.target_keep_ratio: "0.3469"
+      mlflow.tags.target_parameters: "1300000"
+      mlflow.tags.expected_deployment_parameters: "1300045"
+    - model.backbone.target_keep_ratio: 0.5125
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1599096
+      mlflow.tags.target_keep_ratio: "0.5125"
+      mlflow.tags.target_parameters: "1600000"
+      mlflow.tags.expected_deployment_parameters: "1599096"
+    - model.backbone.target_keep_ratio: 0.6792
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1900248
+      mlflow.tags.target_keep_ratio: "0.6792"
+      mlflow.tags.target_parameters: "1900000"
+      mlflow.tags.expected_deployment_parameters: "1900248"
+    - model.backbone.target_keep_ratio: 0.8452
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_2200241
+      mlflow.tags.target_keep_ratio: "0.8452"
+      mlflow.tags.target_parameters: "2200000"
+      mlflow.tags.expected_deployment_parameters: "2200241"
