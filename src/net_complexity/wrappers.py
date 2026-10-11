@@ -46,6 +46,10 @@ from .models.feature_selection import (
 from .models.aig import AIGBlockGate
 from .models.autopruner import AutoPrunerWrapper
 from .models.autopruner_mobilenet_v2 import AutoPrunerMobileNetV2
+from .models.stochastic_depth import (
+    HuangStochasticDepthInvertedResidual,
+    StochasticDepthMobileNetV2,
+)
 from .models.efficientnet_v2_aig import AIGEfficientNetV2, AIGEfficientNetV2M, AIGEfficientNetV2S
 from .models.mobilenet_v2 import (
     AIGInvertedResidual,
@@ -61,6 +65,8 @@ from .models.layer_skipping import apply_layer_skipping, apply_layer_skipping_fr
 from .models.pruned_resnet import CIFARPrunedGumbelBasicBlock, PrunedCIFARResNet
 
 __all__ = [
+    "HuangStochasticDepthInvertedResidual",
+    "StochasticDepthMobileNetV2",
     "AutoPrunerWrapper",
     "AutoPrunerMobileNetV2",
     "AIGRegularizationLoss",

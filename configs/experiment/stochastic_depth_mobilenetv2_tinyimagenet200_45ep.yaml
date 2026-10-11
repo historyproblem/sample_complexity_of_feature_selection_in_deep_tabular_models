@@ -1,0 +1,60 @@
+# @package _global_
+defaults:
+  - /data: tinyimagenet200_resize224_imagenet_norm
+  - /train: resnet50_best_practice
+  - /optimizer: sgd_resnet50
+  - /scheduler: cosine_200
+  - /metrics: stochastic_depth
+  - /run_history: valid_accuracy_max
+  - /tracking: default
+  - _self_
+
+device: cuda:0
+seed: 42
+
+dataloaders:
+  num_workers: 0
+
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  lambda_coef: 0.0
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  backbone:
+    _target_: net_complexity.wrappers.StochasticDepthMobileNetV2
+    num_classes: 200
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 2
+    dropout: 0.2
+    final_survival_probability: 0.5
+    survival_schedule: linear
+    pretrained_checkpoint: ${hydra:runtime.cwd}/outputs/runs/20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200/checkpoints/best.pt
+    require_pretrained: true
+
+training_arguments:
+  num_epochs: 45
+  # Huang stochastic depth has fixed Bernoulli probabilities, no learned gates.
+  adaptive_lambda:
+    enabled: false
+  batchnorm_recalibration:
+    enabled: false
+  collapse_guard:
+    enabled: false
+
+optimizer:
+  lr: 0.01
+
+scheduler:
+  T_max: 45
+
+mlflow:
+  experiment_name: mobilenetv2_pretrained_stochastic_depth
+  run_name: stochastic_depth_mobilenetv2_tinyimagenet200_pL_${model.backbone.final_survival_probability}_45ep
+  tags:
+    model_type: MobileNetV2_StochasticDepth
+    method: stochastic_depth
+    dataset: tinyimagenet200
+    recipe: stochastic_depth_mobilenetv2_tinyimagenet200_45ep
+    eval_mode: expected
+    training_budget_epochs: "45"
