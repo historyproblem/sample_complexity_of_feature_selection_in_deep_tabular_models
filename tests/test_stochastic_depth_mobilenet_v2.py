@@ -59,6 +59,50 @@ def test_mobilenet_only_identity_shortcuts_are_stochastic():
     assert sum(parameter.numel() for parameter in model.parameters()) == 2480072
 
 
+def test_mobile_uniform_matches_linear_expected_active_blocks():
+    linear = StochasticDepthMobileNetV2(num_classes=200)
+    uniform = StochasticDepthMobileNetV2(
+        num_classes=200,
+        survival_schedule="uniform",
+        final_survival_probability=0.725,
+    )
+    linear_blocks = get_stochastic_depth_blocks(linear)
+    uniform_blocks = get_stochastic_depth_blocks(uniform)
+    assert list(uniform_blocks) == list(linear_blocks)
+    assert uniform.stochastic_depth_survival_schedule == "uniform"
+    assert uniform.stochastic_depth_survival_probabilities == pytest.approx(
+        [0.725] * 10
+    )
+    assert [block.survival_probability for block in uniform_blocks.values()] == (
+        pytest.approx([0.725] * 10)
+    )
+    assert sum(block.survival_probability for block in uniform_blocks.values()) == (
+        pytest.approx(
+            sum(block.survival_probability for block in linear_blocks.values())
+        )
+    )
+    assert sum(parameter.numel() for parameter in uniform.parameters()) == 2480072
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"survival_schedule": "cosine"}, "survival_schedule"),
+        (
+            {"survival_schedule": "uniform", "final_survival_probability": -0.1},
+            "final_survival_probability",
+        ),
+        (
+            {"survival_schedule": "uniform", "final_survival_probability": 1.1},
+            "final_survival_probability",
+        ),
+    ],
+)
+def test_mobile_rejects_invalid_survival_schedule_or_probability(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        StochasticDepthMobileNetV2(num_classes=200, **kwargs)
+
+
 def test_closed_mobile_branch_skips_batchnorm_and_gradients():
     block = HuangStochasticDepthInvertedResidual(8, 8, 1, 6, survival_probability=0.0)
     block.train()
@@ -107,8 +151,9 @@ def test_mobile_eval_scales_residual_without_sampling():
 
 
 @pytest.mark.parametrize("prefix", ["", "backbone.", "module.backbone."])
+@pytest.mark.parametrize("survival_schedule", ["linear", "uniform"])
 def test_pretrained_mobile_checkpoint_loads_classifier_and_matches_dense_at_pl1(
-    tmp_path, prefix
+    tmp_path, prefix, survival_schedule
 ):
     plain = MobileNetV2(num_classes=200).eval()
     checkpoint = tmp_path / "best.pt"
@@ -123,6 +168,7 @@ def test_pretrained_mobile_checkpoint_loads_classifier_and_matches_dense_at_pl1(
     model = StochasticDepthMobileNetV2(
         num_classes=200,
         final_survival_probability=1.0,
+        survival_schedule=survival_schedule,
         pretrained_checkpoint=checkpoint,
         require_pretrained=True,
     ).eval()

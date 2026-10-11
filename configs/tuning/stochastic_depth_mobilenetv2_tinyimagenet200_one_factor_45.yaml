@@ -1,0 +1,50 @@
+# @package _global_
+reporting:
+  run_label_fields:
+    variant: mlflow.tags.sd_variant
+    lr: optimizer.lr
+    wd: optimizer.weight_decay
+    dropout: model.backbone.dropout
+    schedule: model.backbone.survival_schedule
+    pL: model.backbone.final_survival_probability
+
+tuning:
+  enabled: true
+  mode: grid
+  study_name: stochastic_depth_mobilenetv2_tinyimagenet200_one_factor_45
+  direction: maximize
+  objective_metric: valid_accuracy
+  n_trials: 6
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: false
+  output_dir: outputs/studies
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - mlflow.tags.sd_variant: baseline
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_baseline_45ep
+    - optimizer.lr: 0.003
+      mlflow.tags.sd_variant: lr_0.003
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_lr0003_45ep
+    - optimizer.lr: 0.03
+      mlflow.tags.sd_variant: lr_0.03
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_lr003_45ep
+    - optimizer.weight_decay: 0.0001
+      mlflow.tags.sd_variant: wd_0.0001
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_wd00001_45ep
+    - model.backbone.dropout: 0.0
+      mlflow.tags.sd_variant: dropout_0
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_dropout0_45ep
+    # linear p_L=0.5 over 10 branches has mean survival probability 0.725.
+    # Matching that mean changes the distribution, not the expected block count.
+    - model.backbone.survival_schedule: uniform
+      model.backbone.final_survival_probability: 0.725
+      mlflow.tags.sd_variant: uniform_0.725
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_uniform0725_45ep

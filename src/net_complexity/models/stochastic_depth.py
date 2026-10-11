@@ -216,9 +216,9 @@ def StochasticDepthMobileNetV2(
     require_pretrained: bool = False,
     **kwargs,
 ) -> MobileNetV2:
-    """Keep transition blocks dense and linearly schedule identity shortcuts."""
-    if survival_schedule != "linear":
-        raise ValueError("Only the Huang et al. linear survival schedule is supported.")
+    """Keep transition blocks dense; schedule identity shortcuts linearly or uniformly."""
+    if survival_schedule not in {"linear", "uniform"}:
+        raise ValueError("survival_schedule must be 'linear' or 'uniform'.")
     if not 0.0 <= float(final_survival_probability) <= 1.0:
         raise ValueError("final_survival_probability must be in [0, 1].")
     if pretrained_checkpoint and kwargs.get("pretrained_weights"):
@@ -242,6 +242,8 @@ def StochasticDepthMobileNetV2(
         len(blocks),
         final_survival_probability,
     )
+    if survival_schedule == "uniform":
+        probabilities = (float(final_survival_probability),) * len(blocks)
     for index, (block, probability) in enumerate(zip(blocks, probabilities), start=1):
         block.survival_probability = probability
         block.block_index = index
