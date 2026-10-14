@@ -36,6 +36,7 @@ def test_train_evaluates_and_reports_best_validation_checkpoint(tmp_path, monkey
         with torch.no_grad():
             model.weight.fill_(float(epoch))
         metric_state.train_metrics.values = {"train_loss": float(epoch)}
+        return {}
 
     def fake_evaluate(model, _dataloader, metrics, _device, *, stage, epoch, **kwargs):
         if stage == "valid":

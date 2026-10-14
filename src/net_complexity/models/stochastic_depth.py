@@ -178,20 +178,29 @@ def StochasticDepthResNet50(
 class HuangStochasticDepthInvertedResidual(InvertedResidual):
     """Batch-wise Huang dropout on a MobileNetV2 identity residual branch."""
 
-    def __init__(self, *args, survival_probability: float = 1.0, **kwargs):
+    def __init__(
+        self,
+        *args,
+        survival_probability: float = 1.0,
+        eval_mode: str = "expected",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if not self.use_res_connect:
             raise ValueError("Stochastic depth requires an identity residual shortcut.")
         if not 0.0 <= float(survival_probability) <= 1.0:
             raise ValueError("survival_probability must be in [0, 1].")
+        if eval_mode not in {"expected", "stochastic"}:
+            raise ValueError("eval_mode must be 'expected' or 'stochastic'.")
         self.survival_probability = float(survival_probability)
+        self.eval_mode = eval_mode
         self.block_index = None
         self.total_blocks = None
         self.last_residual_branch_active = True
         self.register_buffer("last_survival_mask", torch.ones(()), persistent=False)
 
     def forward(self, x):
-        if not self.training:
+        if not self.training and self.eval_mode == "expected":
             self.last_survival_mask = x.new_ones(())
             self.last_residual_branch_active = True
             return x + self.branch(x) * self.survival_probability
@@ -212,6 +221,7 @@ def StochasticDepthMobileNetV2(
     *,
     final_survival_probability: float = 0.5,
     survival_schedule: str = "linear",
+    eval_mode: str = "expected",
     pretrained_checkpoint: str | Path | None = None,
     require_pretrained: bool = False,
     **kwargs,
@@ -219,6 +229,8 @@ def StochasticDepthMobileNetV2(
     """Keep transition blocks dense; schedule identity shortcuts linearly or uniformly."""
     if survival_schedule not in {"linear", "uniform"}:
         raise ValueError("survival_schedule must be 'linear' or 'uniform'.")
+    if eval_mode not in {"expected", "stochastic"}:
+        raise ValueError("eval_mode must be 'expected' or 'stochastic'.")
     if not 0.0 <= float(final_survival_probability) <= 1.0:
         raise ValueError("final_survival_probability must be in [0, 1].")
     if pretrained_checkpoint and kwargs.get("pretrained_weights"):
@@ -234,6 +246,8 @@ def StochasticDepthMobileNetV2(
             if stride == 1 and inp == oup
             else InvertedResidual
         )
+        if block_type is HuangStochasticDepthInvertedResidual:
+            block_kwargs["eval_mode"] = eval_mode
         return block_type(inp, oup, stride, expand_ratio, **block_kwargs)
 
     model = MobileNetV2(block=make_block, **kwargs)
@@ -252,6 +266,7 @@ def StochasticDepthMobileNetV2(
         final_survival_probability
     )
     model.stochastic_depth_survival_schedule = survival_schedule
+    model.stochastic_depth_eval_mode = eval_mode
     model.stochastic_depth_survival_probabilities = probabilities
     model.pretrained_checkpoint = (
         str(pretrained_checkpoint) if pretrained_checkpoint else None
