@@ -1,0 +1,60 @@
+# @package _global_
+
+# For this width-1, 200-class MobileNetV2 with ten SD branches:
+# E[executed parameters] = 1,604,948.8 + 875,123.2 * p_L.
+# The minimum uses p_L=0; the nominal 2.5M point is the full 2,480,072 model.
+reporting:
+  run_label_fields:
+    params: mlflow.tags.expected_active_parameters
+    pL: model.backbone.final_survival_probability
+
+tuning:
+  enabled: true
+  mode: grid
+  study_name: stochastic_depth_mobilenetv2_tinyimagenet200_params_lr003_45
+  direction: maximize
+  objective_metric: valid_accuracy
+  n_trials: 5
+  repeats_per_trial: 1
+  timeout: null
+  n_jobs: 1
+  seed_base: 42
+  seed_stride: 1
+  storage: null
+  load_if_exists: false
+  output_dir: outputs/studies
+  sampler: null
+  pruner:
+    _target_: optuna.pruners.NopPruner
+  points_in_order: true
+  points:
+    - model.backbone.final_survival_probability: 0.0
+      mlflow.tags.sd_variant: params_minimum
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_params_min_lr003_45ep
+      mlflow.tags.final_survival_probability: "0.0"
+      mlflow.tags.expected_active_blocks: "4.5"
+      mlflow.tags.expected_active_parameters: "1604948.8"
+    - model.backbone.final_survival_probability: 0.10861464991443491
+      mlflow.tags.sd_variant: params_1700000
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_params1700000_lr003_45ep
+      mlflow.tags.final_survival_probability: "0.10861464991443491"
+      mlflow.tags.expected_active_blocks: "5.097380574529392"
+      mlflow.tags.expected_active_parameters: "1700000"
+    - model.backbone.final_survival_probability: 0.45142352528192603
+      mlflow.tags.sd_variant: params_2000000
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_params2000000_lr003_45ep
+      mlflow.tags.final_survival_probability: "0.45142352528192603"
+      mlflow.tags.expected_active_blocks: "6.982829389050593"
+      mlflow.tags.expected_active_parameters: "2000000"
+    - model.backbone.final_survival_probability: 0.6799627755269201
+      mlflow.tags.sd_variant: params_2200000
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_params2200000_lr003_45ep
+      mlflow.tags.final_survival_probability: "0.6799627755269201"
+      mlflow.tags.expected_active_blocks: "8.23979526539806"
+      mlflow.tags.expected_active_parameters: "2200000"
+    - model.backbone.final_survival_probability: 1.0
+      mlflow.tags.sd_variant: params_2480072_dense
+      mlflow.run_name: stochastic_depth_mobilenetv2_tinyimagenet200_params2480072_lr003_45ep_dense
+      mlflow.tags.final_survival_probability: "1.0"
+      mlflow.tags.expected_active_blocks: "10.0"
+      mlflow.tags.expected_active_parameters: "2480072"
