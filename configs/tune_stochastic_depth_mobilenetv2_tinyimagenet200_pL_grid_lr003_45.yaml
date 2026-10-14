@@ -1,0 +1,23 @@
+defaults:
+  - experiment: stochastic_depth_mobilenetv2_tinyimagenet200_45ep
+  - tuning: stochastic_depth_mobilenetv2_tinyimagenet200_pL_grid_lr003_45
+  - _self_
+
+# Keep the latest one-factor baseline recipe; sweep only p_L at lr=0.03.
+model:
+  backbone:
+    dropout: 0.2
+    survival_schedule: linear
+
+optimizer:
+  lr: 0.03
+  weight_decay: 0.0005
+
+mlflow:
+  tags:
+    recipe: stochastic_depth_mobilenetv2_tinyimagenet200_pL_grid_lr003_45
+
+hydra:
+  run:
+    dir: ${tuning.output_dir}/${now:%Y%m%d_%H%M%S}_${tuning.study_name}
+  output_subdir: .hydra
