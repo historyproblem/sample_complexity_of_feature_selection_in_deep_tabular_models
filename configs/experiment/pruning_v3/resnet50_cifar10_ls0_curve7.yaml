@@ -1,0 +1,35 @@
+# Study manifest for scripts/launch_resnet50_cifar10_ls0_curve7.py.
+# Targets are planning labels, never width quotas or checkpoint-selection inputs.
+# Internal-width-only ResNet50 cannot reach the requested 1.5M endpoint: the
+# one-channel-per-boundary floor is 2,876,538 parameters. Report that limitation.
+protocol: resnet50_cifar10_ls0_curve7_v1
+search_config: experiment/pruning_v3/resnet50_cifar10_ls0_curve7_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_ls0_curve7_recovery
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/resnet50_cifar10_ls0_curve7_v1
+requested_min_parameters: 2900000
+min_keep_ratio: 0.001
+label_smoothing: 0.0
+profiles:
+  - id: near_dense_23m
+    target_parameters: 23000000
+    hard_drop: 0.0001
+  - id: large_18m
+    target_parameters: 18000000
+    hard_drop: 0.0005
+  - id: anchor_12m
+    target_parameters: 12000000
+    hard_drop: 0.001
+  - id: middle_8m
+    target_parameters: 8000000
+    hard_drop: 0.005
+  - id: compact_5m
+    target_parameters: 5000000
+    hard_drop: 0.015
+  - id: compact_4m
+    target_parameters: 4000000
+    hard_drop: 0.03
+  - id: floor_probe_2p9m
+    target_parameters: 2900000
+    hard_drop: 0.10
+# Every profile uses soft_drop = hard_drop / 2. Everything else is shared.

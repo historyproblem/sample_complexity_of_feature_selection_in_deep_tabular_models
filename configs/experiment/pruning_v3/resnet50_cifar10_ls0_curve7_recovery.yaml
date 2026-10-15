@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/epoch_split_auto_60_90_recovery
+  - _self_
+
+# CrossEntropyLoss defaults to label_smoothing=0; checked by the study runner.
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  entropy_regularization_coef: 0.0
+  backbone:
+    resnet_block:
+      gate_threshold: 0.5
+      gate_internal_width: true
+      gate_output: false
+
+accuracy_guided:
+  drop_mode: learned_closed_gates
+  eligibility:
+    min_keep_ratio: 0.001
+
+mlflow:
+  run_name: resnet50_cifar10_ls0_curve7_recovery
+run_history:
+  run_name: resnet50_cifar10_ls0_curve7_recovery

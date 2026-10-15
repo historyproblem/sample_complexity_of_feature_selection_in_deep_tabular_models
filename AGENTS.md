@@ -5,6 +5,8 @@
 
 # Pruning experiment requirements
 
+- New pruning experiments keep label_smoothing=0 in both search and recovery,
+  per the team's decision. Do not tune it without a new explicit instruction.
 - Adaptive lambda is a core requirement. Do not disable it or replace it with
   fixed-lambda experiments without explicit user approval. The historical fixed
   pilot remains only for reproduction, not the default next experiment.
