@@ -31,6 +31,7 @@ FIELDS = (
     "id", "status", "error", "target_parameters", "physical_parameters",
     "theoretical_parameter_floor", "target_architecturally_reachable",
     "soft_drop", "hard_drop", "min_keep_ratio", "label_smoothing", "split",
+    "search_selection_epoch_start", "search_selection_epoch_end",
     "validation_accuracy", "validation_ce_loss", "quality_feasible",
     "selected_final_epoch", "test_accuracy", "test_ce_loss", "search_dir", "recovery_dir",
 )
@@ -45,12 +46,16 @@ def load_study(path=DEFAULT_CONFIG):
     study = yaml.safe_load(Path(path).read_text())
     expected = {
         "protocol", "search_config", "recovery_config", "reference_output", "output",
-        "requested_min_parameters", "min_keep_ratio", "label_smoothing", "profiles",
+        "requested_min_parameters", "min_keep_ratio", "search_selection_last_epochs",
+        "label_smoothing", "profiles",
     }
     require(isinstance(study, dict) and set(study) == expected, "Invalid study fields")
-    require(study["protocol"] == "resnet50_cifar10_ls0_curve7_v1", "Unexpected protocol")
+    require(study["protocol"] == "resnet50_cifar10_ls0_curve7_v2", "Unexpected protocol")
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
-    require(0 < study["min_keep_ratio"] <= 1, "Invalid common keep floor")
+    require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
+    require(type(study["search_selection_last_epochs"]) is int
+            and study["search_selection_last_epochs"] == 30,
+            "Search checkpoint selection must stay inside epochs 31-60")
     require(len(study["profiles"]) == 7, "Expected exactly seven independent models")
     identifiers = set()
     for row in study["profiles"]:
@@ -81,6 +86,9 @@ def validate_recipe(config, study, row, phase):
     require(schema.validate_config(config) == 150, "Pair must have a 150-epoch budget")
     require(config.one_shot.search_epochs == 60 and config.one_shot.final_epochs == 90,
             "The common split must stay 60/90")
+    require(config.one_shot.get("search_selection_last_epochs")
+            == study["search_selection_last_epochs"],
+            "Feasible and fallback search selection must both use epochs 31-60")
     criterion = dict(config.model.criterion)
     require(criterion.pop("label_smoothing", 0) == 0
             and criterion == {"_target_": "torch.nn.CrossEntropyLoss"},
@@ -153,6 +161,8 @@ def validate_curve_configs(study):
             **profile, "soft_drop": profile["hard_drop"] / 2,
             "min_keep_ratio": study["min_keep_ratio"], "label_smoothing": 0.0,
             "split": "60/90", "resolved_log_step": step,
+            "search_selection_epoch_start": SEARCH_EPOCHS - study["search_selection_last_epochs"] + 1,
+            "search_selection_epoch_end": SEARCH_EPOCHS,
             "theoretical_parameter_floor": floor,
             "target_architecturally_reachable": profile["target_parameters"] >= floor,
         })
@@ -225,6 +235,9 @@ def run_pair(study, row, reference, output, args):
     if not search_dir.exists():
         launch("search", search_dir)
     search = epoch_split._search_result(search_dir, SEARCH_EPOCHS, RECOVERY_EPOCHS)
+    require(row["search_selection_epoch_start"] <= search["selected_epoch"]
+            <= row["search_selection_epoch_end"],
+            "Saved search checkpoint is outside epochs 31-60")
     validate_recipe(OmegaConf.load(search_dir / "resolved_config.yaml"), study, row, "search")
     if not args.keep_nested_checkpoints:
         # Search is verified complete and root selected_checkpoint.pt is retained.

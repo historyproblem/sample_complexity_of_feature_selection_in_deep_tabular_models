@@ -34,9 +34,11 @@ from .one_shot_pruning_config import (
     RESUMED_SCHEDULER,
     SEARCH_PROTOCOLS,
     resolved_branch_plan,
+    search_selection_bounds,
     to_v3_config,
     validate_config,
     validate_inputs,
+    validate_search_handoff,
 )
 from .one_shot_progress import epoch_progress, phase_progress, progress_message
 from .optimizer_handoff import (
@@ -54,6 +56,20 @@ from .randomness import set_random_seed
 
 
 NO_FEASIBLE_FALLBACK_LAST_EPOCHS = 30
+
+
+def select_search_checkpoint_records(config, records, reference_accuracy, hard_drop):
+    """Apply the allowed epoch window before either feasible or fallback selection."""
+    start, end = search_selection_bounds(config)
+    candidates = [record for record in records if start <= int(record["epoch"]) <= end]
+    if not candidates:
+        raise ValueError(f"No search checkpoints inside the allowed epoch window {start}-{end}")
+    selected, trace = select_checkpoint_records(
+        candidates, reference_accuracy, hard_drop, search=True,
+        no_feasible_fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
+    )
+    trace.update(candidate_epoch_start=start, candidate_epoch_end=end)
+    return selected, trace
 
 
 def materialize_physical_survivor_carrier(carrier, mask):
@@ -435,12 +451,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                             "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
                         if index % 10 == 0 or index == len(paths):
                             progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
-                selected, selection_trace = select_checkpoint_records(
+                selected, selection_trace = select_search_checkpoint_records(
+                    config,
                     candidates,
                     reference[search_epochs],
                     float(cfg.training_arguments.adaptive_lambda.hard_drop),
-                    search=True,
-                    no_feasible_fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
                 )
                 selection_trace["reference_epoch"] = search_epochs
                 if selection_trace["no_feasible_search"] and not selection_trace["fallback_used"]:
@@ -488,12 +503,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     records = source_selection.get("trace")
                     if not isinstance(records, list) or not records:
                         raise ValueError("No-feasible reusable search has no checkpoint trace")
-                    selected, selection_trace = select_checkpoint_records(
+                    selected, selection_trace = select_search_checkpoint_records(
+                        config,
                         records,
                         source_selection["reference_accuracy"],
                         source_selection["reference_accuracy"] - source_selection["quality_threshold"],
-                        search=True,
-                        no_feasible_fallback_last_epochs=NO_FEASIBLE_FALLBACK_LAST_EPOCHS,
                     )
                     selection_trace["reference_epoch"] = int(
                         source_selection.get("reference_epoch", search_epochs)
@@ -534,6 +548,9 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     source_ledger = source_selection.get("search_ledger_consumed")
                     if not isinstance(source_ledger, dict):
                         raise ValueError("Reusable selection has no consumed search ledger")
+                if "search_selection_last_epochs" in config.one_shot:
+                    source_config = OmegaConf.load(source_root / "resolved_config.yaml")
+                    validate_search_handoff(config, source_config, selected["epoch"])
                 source_payload = torch.load(source_checkpoint_path, map_location="cpu", weights_only=True)
                 if int(source_payload.get("epoch", -1)) != int(selected["epoch"]):
                     raise ValueError("Reusable checkpoint epoch differs from selected epoch")
@@ -560,6 +577,9 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     f"reusing completed search selection from {source_root}; epoch={selected['epoch']}"
                     + ("; policy=best_validation_last_30_epochs" if reused_fallback else ""),
                 )
+            start, end = search_selection_bounds(config)
+            if not start <= int(selected["epoch"]) <= end:
+                raise ValueError(f"Selected search checkpoint must be inside {start}-{end}")
             selected_carrier, checkpoint = load_model(selected["path"], carrier)
             if "optimizer_state_dict" not in checkpoint:
                 raise ValueError("Selected search checkpoint has no optimizer_state_dict for handoff.")

@@ -25,6 +25,32 @@ SEARCH_SWEEP = {
 }
 
 
+@pytest.mark.parametrize("phase", ["search", "recovery"])
+@pytest.mark.parametrize("last_epochs", [0, -1, 61, True, None, 30.5, "30"])
+def test_search_selection_window_rejects_invalid_bounds(phase, last_epochs):
+    cfg = schema.compose_config(f"experiment/pruning_v3/resnet50_cifar10_ls0_curve7_{phase}")
+    OmegaConf.update(cfg, "one_shot.search_selection_last_epochs", last_epochs)
+    with pytest.raises(ValueError, match="search_selection_last_epochs"):
+        schema.validate_config(cfg)
+
+
+def test_search_selection_window_is_reported_and_reuse_checks_floor_and_epoch():
+    cfg = schema.compose_config("experiment/pruning_v3/resnet50_cifar10_ls0_curve7_recovery")
+    report = schema.resolved_one_shot(cfg, check_inputs=False)
+    assert report["execution_policy"]["search_selection_epoch_window"] == {
+        "start": 31, "end": 60, "applies_to": "feasible_and_fallback",
+    }
+    source = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    schema.validate_search_handoff(cfg, source, 31)
+    schema.validate_search_handoff(cfg, source, 60)
+    for epoch in (19, 21, 30, 61):
+        with pytest.raises(ValueError, match="inside 31-60"):
+            schema.validate_search_handoff(cfg, source, epoch)
+    source.accuracy_guided.eligibility.min_keep_ratio = 0.001
+    with pytest.raises(ValueError, match="different min_keep_ratio"):
+        schema.validate_search_handoff(cfg, source, 31)
+
+
 def test_only_authorized_full_plan_composes_with_shared_base_contract():
     cfg = schema.compose_config()
     assert schema.validate_config(cfg) == 150

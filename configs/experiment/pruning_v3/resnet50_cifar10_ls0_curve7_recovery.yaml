@@ -17,7 +17,10 @@ model:
 accuracy_guided:
   drop_mode: learned_closed_gates
   eligibility:
-    min_keep_ratio: 0.001
+    min_keep_ratio: 0.08
+
+one_shot:
+  search_selection_last_epochs: 30
 
 mlflow:
   run_name: resnet50_cifar10_ls0_curve7_recovery

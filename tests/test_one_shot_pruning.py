@@ -12,7 +12,9 @@ from torch import nn
 
 from net_complexity.models.channel_pruning import build_structurally_pruned_model_from_config
 from net_complexity.models.pruning_budget import gates, select_learned_closed
-from net_complexity.training.one_shot_pruning import build_physical_branches, run_one_shot_pruning
+from net_complexity.training.one_shot_pruning import (
+    build_physical_branches, run_one_shot_pruning, select_search_checkpoint_records,
+)
 from net_complexity.training.one_shot_pruning_config import (
     FRESH_SCHEDULER,
     MAPPED_REPEATS_PROTOCOL,
@@ -57,6 +59,61 @@ def one_shot_fixture(directory, *, learned_closed=True, reject_after=None):
     ]
     validate_config(cfg)
     return cfg
+
+
+@pytest.mark.parametrize("feasible", [True, False])
+def test_search_window_excludes_early_epochs_for_feasible_and_fallback_selection(feasible):
+    cfg = OmegaConf.create({"one_shot": {
+        "search_epochs": 60, "search_selection_last_epochs": 30,
+    }})
+    records = [
+        {"epoch": 19, "accuracy": .99, "ce_loss": .1, "physical_cost": 1},
+        {"epoch": 21, "accuracy": .98, "ce_loss": .2, "physical_cost": 2},
+        {"epoch": 30, "accuracy": .97, "ce_loss": .2, "physical_cost": 3},
+        {"epoch": 31, "accuracy": .94, "ce_loss": .3, "physical_cost": 10},
+        {"epoch": 60, "accuracy": .93, "ce_loss": .4, "physical_cost": 11},
+        {"epoch": 61, "accuracy": 1., "ce_loss": 0., "physical_cost": 0},
+    ]
+    selected, report = select_search_checkpoint_records(
+        cfg, records, reference_accuracy=.94 if feasible else 1., hard_drop=.01,
+    )
+    assert selected["epoch"] == 31
+    assert [row["epoch"] for row in report["trace"]] == [31, 60]
+    assert (report["candidate_epoch_start"], report["candidate_epoch_end"]) == (31, 60)
+    assert report["fallback_used"] is not feasible
+
+
+def test_search_window_with_no_allowed_candidate_refuses_early_fallback():
+    cfg = OmegaConf.create({"one_shot": {
+        "search_epochs": 60, "search_selection_last_epochs": 30,
+    }})
+    with pytest.raises(ValueError, match="allowed epoch window 31-60"):
+        select_search_checkpoint_records(
+            cfg, [{"epoch": 19, "accuracy": .99, "ce_loss": .1, "physical_cost": 1}],
+            reference_accuracy=.94, hard_drop=.01,
+        )
+
+
+def test_runtime_search_and_recovery_obey_window_and_reject_incompatible_reuse(tmp_path, monkeypatch):
+    cfg = one_shot_fixture(tmp_path / "inputs")
+    OmegaConf.update(cfg, "one_shot.search_selection_last_epochs", 2, force_add=True)
+    search = tmp_path / "search"
+    result = run_one_shot_pruning(cfg, search, search_only=True)
+    assert result["selection"]["selected_epoch"] in (2, 3)
+    assert result["selection"]["trace"]["candidate_epoch_start"] == 2
+    recovered = run_one_shot_pruning(cfg, tmp_path / "recovery", reuse_search_from=search)
+    assert recovered["selection"]["selected_epoch"] == result["selection"]["selected_epoch"]
+    assert all(branch["ledger"]["global_training_epoch"] == 5
+               for branch in recovered["branches"].values())
+
+    changed = deepcopy(cfg)
+    changed.one_shot.search_selection_last_epochs = 1
+    monkeypatch.setattr(
+        "net_complexity.training.one_shot_pruning.run_training",
+        lambda *args, **kwargs: pytest.fail("Incompatible reuse started training"),
+    )
+    with pytest.raises(ValueError, match="different search_selection_last_epochs"):
+        run_one_shot_pruning(changed, tmp_path / "bad_recovery", reuse_search_from=search)
 
 
 def handoff_ablation_fixture(directory):

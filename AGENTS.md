@@ -7,6 +7,9 @@
 
 - New pruning experiments keep label_smoothing=0 in both search and recovery,
   per the team's decision. Do not tune it without a new explicit instruction.
+- The ResNet50/CIFAR10 threshold sweep keeps min_keep_ratio=0.08. For its
+  60-epoch search, both feasible and fallback checkpoint selection use only
+  epochs 31-60 inclusive. Recovery must preserve this selection policy.
 - Adaptive lambda is a core requirement. Do not disable it or replace it with
   fixed-lambda experiments without explicit user approval. The historical fixed
   pilot remains only for reproduction, not the default next experiment.

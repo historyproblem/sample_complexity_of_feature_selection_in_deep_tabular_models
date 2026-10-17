@@ -26,11 +26,13 @@ def validated_rows():
 def test_seven_independent_150_epoch_profiles_report_real_architecture_floor(validated_rows):
     assert len(validated_rows) == 7
     assert [row["target_parameters"] for row in validated_rows] == [
-        23_000_000, 18_000_000, 12_000_000, 8_000_000, 5_000_000, 4_000_000, 2_900_000,
+        23_000_000, 18_000_000, 12_000_000, 8_000_000, 5_000_000, 4_000_000, 3_700_000,
     ]
-    assert {row["theoretical_parameter_floor"] for row in validated_rows} == {2_876_538}
-    assert launcher.load_study()["requested_min_parameters"] == 2_900_000
-    assert 2_876_538 > 1_500_000
+    assert {row["theoretical_parameter_floor"] for row in validated_rows} == {3_683_893}
+    assert launcher.load_study()["requested_min_parameters"] == 3_700_000
+    assert {row["min_keep_ratio"] for row in validated_rows} == {0.08}
+    assert {(row["search_selection_epoch_start"], row["search_selection_epoch_end"])
+            for row in validated_rows} == {(31, 60)}
     assert all(row["label_smoothing"] == 0 and row["split"] == "60/90" for row in validated_rows)
     assert all(row["soft_drop"] * 2 == row["hard_drop"] for row in validated_rows)
     assert all(row["resolved_log_step"] == pytest.approx(0.9210340371976183)
@@ -39,6 +41,7 @@ def test_seven_independent_150_epoch_profiles_report_real_architecture_floor(val
 
 @pytest.mark.parametrize("drift", [
     "label_smoothing", "entropy_beta", "gate_selector", "adaptive_lambda", "optimizer",
+    "search_window", "keep_floor",
 ])
 def test_saved_or_composed_recipe_drift_is_rejected(drift):
     from net_complexity.training import one_shot_pruning_config as schema
@@ -53,6 +56,8 @@ def test_saved_or_composed_recipe_drift_is_rejected(drift):
         "gate_selector": ("accuracy_guided.drop_mode", "expected_open_count"),
         "adaptive_lambda": ("training_arguments.adaptive_lambda.enabled", False),
         "optimizer": ("optimizer.lr", 0.002),
+        "search_window": ("one_shot.search_selection_last_epochs", 60),
+        "keep_floor": ("accuracy_guided.eligibility.min_keep_ratio", 0.001),
     }
     key, value = fields[drift]
     OmegaConf.update(config, key, value, force_add=True)

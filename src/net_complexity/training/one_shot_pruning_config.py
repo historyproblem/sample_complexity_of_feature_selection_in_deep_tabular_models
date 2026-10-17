@@ -106,7 +106,7 @@ def validate_config(config):
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        optional_fields = {"search_scheduler_eta_min"}
+        optional_fields = {"search_scheduler_eta_min", "search_selection_last_epochs"}
         _require(required_fields <= set(one) <= required_fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
                  f"missing={sorted(required_fields - set(one))}")
@@ -131,8 +131,10 @@ def validate_config(config):
             fields.add("search_scheduler_eta_min")
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
-        _require(set(one) == fields,
-                 f"one_shot unknown={sorted(set(one) - fields)}, missing={sorted(fields - set(one))}")
+        optional_fields = {"search_selection_last_epochs"}
+        _require(fields <= set(one) <= fields | optional_fields,
+                 f"one_shot unknown={sorted(set(one) - fields - optional_fields)}, "
+                 f"missing={sorted(fields - set(one))}")
         expected_methods = ([
                 {"id": "fresh_optimizer_fresh_scheduler",
                  "model_state": "selected_surviving_state",
@@ -196,6 +198,10 @@ def validate_config(config):
         _require(False, "unsupported one-shot protocol")
     for field in ("search_epochs", "final_epochs"):
         _require(type(one[field]) is int and one[field] > 0, f"{field} must be a positive integer")
+    if "search_selection_last_epochs" in one:
+        last_epochs = one["search_selection_last_epochs"]
+        _require(type(last_epochs) is int and 1 <= last_epochs <= one["search_epochs"],
+                 "search_selection_last_epochs must be an integer in [1, search_epochs]")
     shared = to_v3_config(config)
     total = validate_config_v3(shared)
     _require(one["search_epochs"] + one["final_epochs"] == total, "branch budget differs from shared stage plan")
@@ -226,6 +232,31 @@ def validate_config(config):
     # The base validator already checks the disabled engine recalibration/warmup,
     # quality-only controller, initial-width normalization, gates and no test access.
     return total
+
+
+def search_selection_bounds(config):
+    """Inclusive epoch bounds; absent options preserve historical run semantics."""
+    one = config.one_shot
+    end = int(one.search_epochs)
+    last_epochs = int(one.get("search_selection_last_epochs", end))
+    return end - last_epochs + 1, end
+
+
+def validate_search_handoff(config, source_config, selected_epoch):
+    """Reject an old export whose selection policy or width floor differs."""
+    if "search_selection_last_epochs" not in config.one_shot:
+        return
+    _require(source_config.one_shot.get("search_selection_last_epochs")
+             == config.one_shot.search_selection_last_epochs,
+             "reused search has a different search_selection_last_epochs policy")
+    _require(source_config.one_shot.search_epochs == config.one_shot.search_epochs,
+             "reused search has a different search horizon")
+    _require(source_config.accuracy_guided.eligibility.min_keep_ratio
+             == config.accuracy_guided.eligibility.min_keep_ratio,
+             "reused search has a different min_keep_ratio")
+    start, end = search_selection_bounds(config)
+    _require(start <= int(selected_epoch) <= end,
+             f"reused selected search epoch must be inside {start}-{end}")
 
 
 def resolved_branch_plan(config):
@@ -354,6 +385,11 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         "iterative_recovery_guard_executed": False,
         "final_test": "separate frozen physical evaluation; never training or selection",
     }
+    if "search_selection_last_epochs" in one:
+        start, end = search_selection_bounds(config)
+        execution["search_selection_epoch_window"] = {
+            "start": start, "end": end, "applies_to": "feasible_and_fallback",
+        }
     if one["protocol"] in SEARCH_PROTOCOLS:
         execution.update({
             "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
