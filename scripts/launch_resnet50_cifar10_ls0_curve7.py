@@ -27,9 +27,16 @@ import launch_epoch_split_study as epoch_split
 ROOT = SCRIPT_DIR.parent
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve7.yaml"
 NARROW_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve4_narrow.yaml"
+MODERATE_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve3_moderate.yaml"
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
     "resnet50_cifar10_ls0_curve4_narrow_v1": 4,
+    "resnet50_cifar10_ls0_curve3_moderate_v1": 3,
+}
+TEST_DIRECTORIES = {
+    "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
+    "resnet50_cifar10_ls0_curve4_narrow_v1": "test_evaluation_exploratory_curve4_narrow",
+    "resnet50_cifar10_ls0_curve3_moderate_v1": "test_evaluation_exploratory_curve3_moderate",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -56,7 +63,8 @@ def load_study(path=DEFAULT_CONFIG):
     }
     require(isinstance(study, dict) and set(study) == expected, "Invalid study fields")
     require(study["protocol"] in PROFILE_COUNTS, "Unexpected protocol")
-    narrow = study["protocol"] == "resnet50_cifar10_ls0_curve4_narrow_v1"
+    explicit_thresholds = study["protocol"] != "resnet50_cifar10_ls0_curve7_v2"
+    max_band = 0.01 if study["protocol"] == "resnet50_cifar10_ls0_curve3_moderate_v1" else 0.005
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
     require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
     require(type(study["search_selection_last_epochs"]) is int
@@ -68,7 +76,7 @@ def load_study(path=DEFAULT_CONFIG):
     identifiers = set()
     for row in study["profiles"]:
         fields = {"id", "target_parameters", "hard_drop"}
-        if narrow:
+        if explicit_thresholds:
             fields.add("soft_drop")
         require(isinstance(row, dict) and set(row) == fields, "Invalid profile fields")
         identifier = row["id"]
@@ -81,15 +89,15 @@ def load_study(path=DEFAULT_CONFIG):
         require(type(row["hard_drop"]) in (int, float)
                 and math.isfinite(row["hard_drop"]) and 0 < row["hard_drop"] < 1,
                 "Invalid hard_drop")
-        if narrow:
+        if explicit_thresholds:
             soft = row["soft_drop"]
             require(type(soft) in (int, float) and math.isfinite(soft)
                     and 0 <= soft < row["hard_drop"], "Invalid soft_drop")
-            require(row["hard_drop"] - soft <= 0.005 + 1e-12,
-                    "Narrow soft-hard interval must not exceed 0.5 percentage points")
-    if narrow:
+            require(row["hard_drop"] - soft <= max_band + 1e-12,
+                    f"Soft-hard interval must not exceed {max_band * 100:g} percentage points")
+    if explicit_thresholds:
         targets = [row["target_parameters"] for row in study["profiles"]]
-        require(targets == sorted(set(targets)), "Narrow profiles must run smallest first")
+        require(targets == sorted(set(targets)), "Profiles must run smallest first")
         require(targets[0] == study["requested_min_parameters"] and targets[-1] <= 15_000_000,
                 "Narrow planning range must start at the requested minimum and end at most 15M")
     return study
@@ -361,10 +369,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
                 if identifier not in state["runs"] or identifier in state["failures"]:
                     continue
                 recovery_dir = Path(state["runs"][identifier]["recovery"]["run_dir"])
-                test_directory = ("test_evaluation_exploratory_curve7"
-                                  if study["protocol"] == "resnet50_cifar10_ls0_curve7_v2"
-                                  else "test_evaluation_exploratory_curve4_narrow")
-                test_dir = recovery_dir / test_directory
+                test_dir = recovery_dir / TEST_DIRECTORIES[study["protocol"]]
                 try:
                     if not test_dir.exists():
                         epoch_split._run([sys.executable, ROOT / "scripts/evaluate_one_shot_pruning_test.py",

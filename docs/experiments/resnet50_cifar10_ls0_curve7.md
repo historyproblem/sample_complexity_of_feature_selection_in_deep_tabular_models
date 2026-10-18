@@ -1,5 +1,8 @@
 # ResNet-50 / CIFAR-10: seven LS=0 threshold profiles
 
+The reduced queue uses [three moderate-band runs](resnet50_cifar10_ls0_curve3_moderate.md)
+and retains the completed 14.85M comparison without retraining it.
+
 The later four-run study with independent, narrower soft/hard intervals is
 documented in [the narrow curve recipe](resnet50_cifar10_ls0_curve4_narrow.md).
 The seven-run manifest below remains available for reproduction.

@@ -28,6 +28,11 @@ def narrow_validated_rows():
     return launcher.validate_curve_configs(launcher.load_study(launcher.NARROW_CONFIG))
 
 
+@pytest.fixture(scope="module")
+def moderate_validated_rows():
+    return launcher.validate_curve_configs(launcher.load_study(launcher.MODERATE_CONFIG))
+
+
 def test_seven_independent_150_epoch_profiles_report_real_architecture_floor(validated_rows):
     assert len(validated_rows) == 7
     assert [row["target_parameters"] for row in validated_rows] == [
@@ -70,11 +75,15 @@ def test_saved_or_composed_recipe_drift_is_rejected(drift):
         launcher.validate_recipe(config, study, row, "recovery")
 
 
-@pytest.fixture(params=["curve7", "narrow4"])
-def simulated_study(monkeypatch, tmp_path, validated_rows, narrow_validated_rows, request):
-    narrow = request.param == "narrow4"
-    manifest_path = launcher.NARROW_CONFIG if narrow else launcher.DEFAULT_CONFIG
-    rows = copy.deepcopy(narrow_validated_rows if narrow else validated_rows)
+@pytest.fixture(params=["curve7", "narrow4", "moderate3"])
+def simulated_study(monkeypatch, tmp_path, validated_rows, narrow_validated_rows,
+                    moderate_validated_rows, request):
+    manifest_path, selected_rows = {
+        "curve7": (launcher.DEFAULT_CONFIG, validated_rows),
+        "narrow4": (launcher.NARROW_CONFIG, narrow_validated_rows),
+        "moderate3": (launcher.MODERATE_CONFIG, moderate_validated_rows),
+    }[request.param]
+    rows = copy.deepcopy(selected_rows)
     monkeypatch.setattr(launcher, "validate_curve_configs", lambda study: rows)
     monkeypatch.setattr(launcher, "validate_reference", lambda study, reference: {
         "root": str(reference), "sha256": {"initializer_path": "same_initializer"},
@@ -185,6 +194,18 @@ def test_narrow_profiles_have_independent_thresholds_and_run_smallest_first(narr
     assert all(row["target_architecturally_reachable"] for row in narrow_validated_rows)
     assert all(row["resolved_log_step"] == pytest.approx(0.9210340371976183)
                for row in narrow_validated_rows)
+
+
+def test_moderate_profiles_avoid_retraining_the_completed_large_model(moderate_validated_rows):
+    assert [row["target_parameters"] for row in moderate_validated_rows] == [
+        3_700_000, 6_000_000, 10_000_000,
+    ]
+    assert [(row["soft_drop"], row["hard_drop"]) for row in moderate_validated_rows] == [
+        (0.05, 0.06), (0.015, 0.018), (0.0075, 0.009),
+    ]
+    assert {row["theoretical_parameter_floor"] for row in moderate_validated_rows} == {3_683_893}
+    assert all(row["resolved_log_step"] == pytest.approx(0.9210340371976183)
+               for row in moderate_validated_rows)
 
 
 @pytest.mark.parametrize("phase", ["search", "recovery"])
