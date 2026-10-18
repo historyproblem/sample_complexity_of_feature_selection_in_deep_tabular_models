@@ -1,5 +1,9 @@
 # ResNet-50 / CIFAR-10: seven LS=0 threshold profiles
 
+The later four-run study with independent, narrower soft/hard intervals is
+documented in [the narrow curve recipe](resnet50_cifar10_ls0_curve4_narrow.md).
+The seven-run manifest below remains available for reproduction.
+
 The manifest is `configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve7.yaml`.
 Each profile independently trains 60 adaptive-lambda search epochs and 90
 physical ungated recovery epochs. Only `soft_drop` and `hard_drop` differ across

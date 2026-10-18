@@ -1,4 +1,4 @@
-"""Run seven independent LS=0 ResNet50/CIFAR10 adaptive-lambda 60/90 pairs.
+"""Run independent LS=0 ResNet50/CIFAR10 adaptive-lambda 60/90 pairs.
 
 Only soft/hard validation-accuracy tolerances differ across profiles. Planning
 sizes never enter checkpoint selection. The complete validation table is locked
@@ -26,6 +26,11 @@ import launch_epoch_split_study as epoch_split
 
 ROOT = SCRIPT_DIR.parent
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve7.yaml"
+NARROW_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve4_narrow.yaml"
+PROFILE_COUNTS = {
+    "resnet50_cifar10_ls0_curve7_v2": 7,
+    "resnet50_cifar10_ls0_curve4_narrow_v1": 4,
+}
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
     "id", "status", "error", "target_parameters", "physical_parameters",
@@ -50,16 +55,22 @@ def load_study(path=DEFAULT_CONFIG):
         "label_smoothing", "profiles",
     }
     require(isinstance(study, dict) and set(study) == expected, "Invalid study fields")
-    require(study["protocol"] == "resnet50_cifar10_ls0_curve7_v2", "Unexpected protocol")
+    require(study["protocol"] in PROFILE_COUNTS, "Unexpected protocol")
+    narrow = study["protocol"] == "resnet50_cifar10_ls0_curve4_narrow_v1"
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
     require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
     require(type(study["search_selection_last_epochs"]) is int
             and study["search_selection_last_epochs"] == 30,
             "Search checkpoint selection must stay inside epochs 31-60")
-    require(len(study["profiles"]) == 7, "Expected exactly seven independent models")
+    require(isinstance(study["profiles"], list)
+            and len(study["profiles"]) == PROFILE_COUNTS[study["protocol"]],
+            "Unexpected number of independent models")
     identifiers = set()
     for row in study["profiles"]:
-        require(set(row) == {"id", "target_parameters", "hard_drop"}, "Invalid profile fields")
+        fields = {"id", "target_parameters", "hard_drop"}
+        if narrow:
+            fields.add("soft_drop")
+        require(isinstance(row, dict) and set(row) == fields, "Invalid profile fields")
         identifier = row["id"]
         require(isinstance(identifier, str) and identifier.replace("_", "").isalnum(),
                 "Profile ID must be a simple directory name")
@@ -67,14 +78,30 @@ def load_study(path=DEFAULT_CONFIG):
         identifiers.add(identifier)
         require(type(row["target_parameters"]) is int and row["target_parameters"] > 0,
                 "Planning size must be a positive integer")
-        require(math.isfinite(row["hard_drop"]) and 0 < row["hard_drop"] < 1,
+        require(type(row["hard_drop"]) in (int, float)
+                and math.isfinite(row["hard_drop"]) and 0 < row["hard_drop"] < 1,
                 "Invalid hard_drop")
+        if narrow:
+            soft = row["soft_drop"]
+            require(type(soft) in (int, float) and math.isfinite(soft)
+                    and 0 <= soft < row["hard_drop"], "Invalid soft_drop")
+            require(row["hard_drop"] - soft <= 0.005 + 1e-12,
+                    "Narrow soft-hard interval must not exceed 0.5 percentage points")
+    if narrow:
+        targets = [row["target_parameters"] for row in study["profiles"]]
+        require(targets == sorted(set(targets)), "Narrow profiles must run smallest first")
+        require(targets[0] == study["requested_min_parameters"] and targets[-1] <= 15_000_000,
+                "Narrow planning range must start at the requested minimum and end at most 15M")
     return study
+
+
+def profile_soft_drop(row):
+    return row["soft_drop"] if "soft_drop" in row else row["hard_drop"] / 2
 
 
 def threshold_overrides(row):
     return [
-        f"training_arguments.adaptive_lambda.soft_drop={row['hard_drop'] / 2:.12g}",
+        f"training_arguments.adaptive_lambda.soft_drop={profile_soft_drop(row):.12g}",
         f"training_arguments.adaptive_lambda.hard_drop={row['hard_drop']:.12g}",
     ]
 
@@ -111,7 +138,7 @@ def validate_recipe(config, study, row, phase):
     adaptive = config.training_arguments.adaptive_lambda
     expected = {
         "enabled": True, "control_mode": "accuracy_only", "alpha_init": 0.001,
-        "alpha_min": 1e-8, "alpha_max": 80.0, "soft_drop": row["hard_drop"] / 2,
+        "alpha_min": 1e-8, "alpha_max": 80.0, "soft_drop": profile_soft_drop(row),
         "hard_drop": row["hard_drop"], "gap_window": 3,
         "update_every_search_epochs": 1, "initial_search_warmup": 10,
         "reentry_samples": 3, "log_step": "auto",
@@ -158,7 +185,7 @@ def validate_curve_configs(study):
             initial_lambda_coef=0.001, warmup_epochs=10, update_every_epochs=1,
         )
         rows.append({
-            **profile, "soft_drop": profile["hard_drop"] / 2,
+            **profile, "soft_drop": profile_soft_drop(profile),
             "min_keep_ratio": study["min_keep_ratio"], "label_smoothing": 0.0,
             "split": "60/90", "resolved_log_step": step,
             "search_selection_epoch_start": SEARCH_EPOCHS - study["search_selection_last_epochs"] + 1,
@@ -254,9 +281,9 @@ def run_pair(study, row, reference, output, args):
     return {"search": search, "recovery": recovery}
 
 
-def main(argv=None):
+def main(argv=None, *, default_config=DEFAULT_CONFIG):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, default=default_config)
     parser.add_argument("--reference-output", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate-only", action="store_true", help="CPU config/floor check; no data or GPU")
@@ -289,7 +316,7 @@ def main(argv=None):
     preflight["reference"] = reference_info
     print(json.dumps(preflight, indent=2), flush=True)
     if not preflight["requested_min_architecturally_reachable"]:
-        print(f"[curve7] Requested minimum {study['requested_min_parameters']:,} is below "
+        print(f"[ls0-curve] Requested minimum {study['requested_min_parameters']:,} is below "
               f"the {floor:,} architecture floor.", flush=True)
     if args.preflight_only:
         return preflight
@@ -312,14 +339,14 @@ def main(argv=None):
     try:
         for index, row in enumerate(rows, 1):
             identifier = row["id"]
-            print(f"[curve7] {index}/7 {identifier}: soft={row['soft_drop']:g} hard={row['hard_drop']:g}",
+            print(f"[ls0-curve] {index}/{len(rows)} {identifier}: soft={row['soft_drop']:g} hard={row['hard_drop']:g}",
                   flush=True)
             try:
                 state["runs"][identifier] = run_pair(study, row, reference, output, args)
                 state["failures"].pop(identifier, None)
             except Exception as exc:
                 state["failures"][identifier] = f"{type(exc).__name__}: {exc}"
-                print(f"[curve7] FAILED {identifier}: {exc}; continuing other profiles", flush=True)
+                print(f"[ls0-curve] FAILED {identifier}: {exc}; continuing other profiles", flush=True)
             epoch_split._write_json(state_path, state)
 
         validation_csv = output / "validation_results.csv"
@@ -334,7 +361,10 @@ def main(argv=None):
                 if identifier not in state["runs"] or identifier in state["failures"]:
                     continue
                 recovery_dir = Path(state["runs"][identifier]["recovery"]["run_dir"])
-                test_dir = recovery_dir / "test_evaluation_exploratory_curve7"
+                test_directory = ("test_evaluation_exploratory_curve7"
+                                  if study["protocol"] == "resnet50_cifar10_ls0_curve7_v2"
+                                  else "test_evaluation_exploratory_curve4_narrow")
+                test_dir = recovery_dir / test_directory
                 try:
                     if not test_dir.exists():
                         epoch_split._run([sys.executable, ROOT / "scripts/evaluate_one_shot_pruning_test.py",
@@ -355,7 +385,7 @@ def main(argv=None):
                     state["test_failures"].pop(identifier, None)
                 except Exception as exc:
                     state["test_failures"][identifier] = f"{type(exc).__name__}: {exc}"
-                    print(f"[curve7] TEST FAILED {identifier}: {exc}", flush=True)
+                    print(f"[ls0-curve] TEST FAILED {identifier}: {exc}", flush=True)
                 epoch_split._write_json(state_path, state)
         final_csv = output / "final_results.csv"
         failures = {**state["failures"], **state["test_failures"]}
@@ -367,7 +397,7 @@ def main(argv=None):
         state["test_skipped"] = args.skip_test
         epoch_split._write_json(state_path, state)
         epoch_split._write_json(output / "study_summary.json", state)
-        print(f"[curve7] {state['status']}: {final_csv}", flush=True)
+        print(f"[ls0-curve] {state['status']}: {final_csv}", flush=True)
         return state
     except BaseException as exc:
         state["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"

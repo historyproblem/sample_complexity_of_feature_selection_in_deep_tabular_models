@@ -23,6 +23,11 @@ def validated_rows():
     return launcher.validate_curve_configs(launcher.load_study())
 
 
+@pytest.fixture(scope="module")
+def narrow_validated_rows():
+    return launcher.validate_curve_configs(launcher.load_study(launcher.NARROW_CONFIG))
+
+
 def test_seven_independent_150_epoch_profiles_report_real_architecture_floor(validated_rows):
     assert len(validated_rows) == 7
     assert [row["target_parameters"] for row in validated_rows] == [
@@ -65,9 +70,11 @@ def test_saved_or_composed_recipe_drift_is_rejected(drift):
         launcher.validate_recipe(config, study, row, "recovery")
 
 
-@pytest.fixture
-def simulated_study(monkeypatch, tmp_path, validated_rows):
-    rows = copy.deepcopy(validated_rows)
+@pytest.fixture(params=["curve7", "narrow4"])
+def simulated_study(monkeypatch, tmp_path, validated_rows, narrow_validated_rows, request):
+    narrow = request.param == "narrow4"
+    manifest_path = launcher.NARROW_CONFIG if narrow else launcher.DEFAULT_CONFIG
+    rows = copy.deepcopy(narrow_validated_rows if narrow else validated_rows)
     monkeypatch.setattr(launcher, "validate_curve_configs", lambda study: rows)
     monkeypatch.setattr(launcher, "validate_reference", lambda study, reference: {
         "root": str(reference), "sha256": {"initializer_path": "same_initializer"},
@@ -94,7 +101,7 @@ def simulated_study(monkeypatch, tmp_path, validated_rows):
         assert state["validation_locked_before_test"] is True
         with (output / "validation_results.csv").open() as stream:
             locked = list(csv.DictReader(stream))
-        assert len(locked) == 7 and all(row["test_accuracy"] == "" for row in locked)
+        assert len(locked) == len(rows) and all(row["test_accuracy"] == "" for row in locked)
         test_dir = Path(command[command.index("--output") + 1])
         test_dir.mkdir(parents=True)
         evaluated.append(test_dir.parent.name.removeprefix("recovery_"))
@@ -113,7 +120,9 @@ def simulated_study(monkeypatch, tmp_path, validated_rows):
     monkeypatch.setattr(launcher.epoch_split, "_run", fake_evaluation)
     monkeypatch.setattr(launcher.epoch_split, "_test_result", fake_test_summary)
     return SimpleNamespace(rows=rows, output=output, evaluated=evaluated, fake_pair=fake_pair,
-                           argv=["--output", str(output), "--reference-output", str(tmp_path / "ref")])
+                           manifest_path=manifest_path,
+                           argv=["--config", str(manifest_path), "--output", str(output),
+                                 "--reference-output", str(tmp_path / "ref")])
 
 
 def test_one_failed_profile_does_not_discard_other_frozen_test_results(simulated_study, monkeypatch):
@@ -128,10 +137,10 @@ def test_one_failed_profile_does_not_discard_other_frozen_test_results(simulated
     monkeypatch.setattr(launcher, "run_pair", fail_one)
     state = launcher.main(simulation.argv)
     assert state["status"] == "completed_with_failures"
-    assert len(state["tests"]) == len(simulation.evaluated) == 6
+    assert len(state["tests"]) == len(simulation.evaluated) == len(simulation.rows) - 1
     with (simulation.output / "final_results.csv").open() as stream:
         rows = list(csv.DictReader(stream))
-    assert len(rows) == 7
+    assert len(rows) == len(simulation.rows)
     failed = next(row for row in rows if row["id"] == failed_id)
     assert failed["status"] == "failed" and failed["test_accuracy"] == ""
     assert failed["physical_parameters"] == ""
@@ -141,11 +150,11 @@ def test_one_failed_profile_does_not_discard_other_frozen_test_results(simulated
 def test_resume_reuses_existing_frozen_tests_and_rejects_manifest_changes(simulated_study, tmp_path):
     simulation = simulated_study
     launcher.main(simulation.argv)
-    assert len(simulation.evaluated) == 7
+    assert len(simulation.evaluated) == len(simulation.rows)
     resumed = launcher.main(simulation.argv + ["--resume-completed"])
-    assert resumed["status"] == "completed" and len(simulation.evaluated) == 7
-    manifest = launcher.load_study()
-    manifest["profiles"][0]["hard_drop"] *= 2
+    assert resumed["status"] == "completed" and len(simulation.evaluated) == len(simulation.rows)
+    manifest = launcher.load_study(simulation.manifest_path)
+    manifest["profiles"][-1]["hard_drop"] *= 1.1
     changed = tmp_path / "changed.yaml"
     changed.write_text(yaml.safe_dump(manifest))
     with pytest.raises(ValueError, match="different settings/reference"):
@@ -162,3 +171,71 @@ def test_incomplete_existing_search_is_not_silently_retrained(tmp_path, monkeypa
         launcher.run_pair(study, row, tmp_path / "ref", tmp_path,
                           SimpleNamespace(resume_completed=True, keep_nested_checkpoints=False))
     assert calls == []
+
+
+def test_narrow_profiles_have_independent_thresholds_and_run_smallest_first(narrow_validated_rows):
+    assert [row["target_parameters"] for row in narrow_validated_rows] == [
+        3_700_000, 6_000_000, 10_000_000, 15_000_000,
+    ]
+    assert [(row["soft_drop"], row["hard_drop"]) for row in narrow_validated_rows] == [
+        (0.05, 0.055), (0.015, 0.0165), (0.0075, 0.00825), (0.00025, 0.00035),
+    ]
+    assert all(row["soft_drop"] != row["hard_drop"] / 2 for row in narrow_validated_rows)
+    assert {row["theoretical_parameter_floor"] for row in narrow_validated_rows} == {3_683_893}
+    assert all(row["target_architecturally_reachable"] for row in narrow_validated_rows)
+    assert all(row["resolved_log_step"] == pytest.approx(0.9210340371976183)
+               for row in narrow_validated_rows)
+
+
+@pytest.mark.parametrize("phase", ["search", "recovery"])
+def test_narrow_saved_config_rejects_a_silently_halved_soft_threshold(phase):
+    from net_complexity.training import one_shot_pruning_config as schema
+    from omegaconf import OmegaConf
+
+    study = launcher.load_study(launcher.NARROW_CONFIG)
+    row = study["profiles"][0]
+    config = schema.compose_config(study[f"{phase}_config"], launcher.threshold_overrides(row))
+    launcher.validate_recipe(config, study, row, phase)
+    OmegaConf.update(config, "training_arguments.adaptive_lambda.soft_drop", row["hard_drop"] / 2)
+    with pytest.raises(ValueError, match="Adaptive-lambda settings"):
+        launcher.validate_recipe(config, study, row, phase)
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_soft", "negative_soft", "soft_equal_hard", "soft_above_hard", "nan_soft",
+    "boolean_soft", "nan_hard", "boolean_hard", "wide_band", "three_profiles",
+    "reversed_order", "target_above_15m", "duplicate_id",
+])
+def test_invalid_narrow_manifest_is_rejected(tmp_path, invalid):
+    study = launcher.load_study(launcher.NARROW_CONFIG)
+    row = study["profiles"][0]
+    if invalid == "missing_soft":
+        row.pop("soft_drop")
+    elif invalid == "negative_soft":
+        row["soft_drop"] = -0.01
+    elif invalid == "soft_equal_hard":
+        row["soft_drop"] = row["hard_drop"]
+    elif invalid == "soft_above_hard":
+        row["soft_drop"] = 0.06
+    elif invalid == "nan_soft":
+        row["soft_drop"] = float("nan")
+    elif invalid == "boolean_soft":
+        row["soft_drop"] = False
+    elif invalid == "nan_hard":
+        row["hard_drop"] = float("nan")
+    elif invalid == "boolean_hard":
+        row["hard_drop"] = True
+    elif invalid == "wide_band":
+        row["hard_drop"] = 0.10
+    elif invalid == "three_profiles":
+        study["profiles"].pop()
+    elif invalid == "reversed_order":
+        study["profiles"].reverse()
+    elif invalid == "target_above_15m":
+        study["profiles"][-1]["target_parameters"] = 16_000_000
+    elif invalid == "duplicate_id":
+        study["profiles"][-1]["id"] = row["id"]
+    path = tmp_path / "invalid.yaml"
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError):
+        launcher.load_study(path)
