@@ -33,6 +33,11 @@ def moderate_validated_rows():
     return launcher.validate_curve_configs(launcher.load_study(launcher.MODERATE_CONFIG))
 
 
+@pytest.fixture(scope="module")
+def night_validated_rows():
+    return launcher.validate_curve_configs(launcher.load_study(launcher.NIGHT_CONFIG))
+
+
 def test_seven_independent_150_epoch_profiles_report_real_architecture_floor(validated_rows):
     assert len(validated_rows) == 7
     assert [row["target_parameters"] for row in validated_rows] == [
@@ -75,13 +80,14 @@ def test_saved_or_composed_recipe_drift_is_rejected(drift):
         launcher.validate_recipe(config, study, row, "recovery")
 
 
-@pytest.fixture(params=["curve7", "narrow4", "moderate3"])
+@pytest.fixture(params=["curve7", "narrow4", "moderate3", "night9h"])
 def simulated_study(monkeypatch, tmp_path, validated_rows, narrow_validated_rows,
-                    moderate_validated_rows, request):
+                    moderate_validated_rows, night_validated_rows, request):
     manifest_path, selected_rows = {
         "curve7": (launcher.DEFAULT_CONFIG, validated_rows),
         "narrow4": (launcher.NARROW_CONFIG, narrow_validated_rows),
         "moderate3": (launcher.MODERATE_CONFIG, moderate_validated_rows),
+        "night9h": (launcher.NIGHT_CONFIG, night_validated_rows),
     }[request.param]
     rows = copy.deepcopy(selected_rows)
     monkeypatch.setattr(launcher, "validate_curve_configs", lambda study: rows)
@@ -111,6 +117,9 @@ def simulated_study(monkeypatch, tmp_path, validated_rows, narrow_validated_rows
         with (output / "validation_results.csv").open() as stream:
             locked = list(csv.DictReader(stream))
         assert len(locked) == len(rows) and all(row["test_accuracy"] == "" for row in locked)
+        assert [float(row["resolved_log_step"]) for row in locked] == [
+            row["resolved_log_step"] for row in rows
+        ]
         test_dir = Path(command[command.index("--output") + 1])
         test_dir.mkdir(parents=True)
         evaluated.append(test_dir.parent.name.removeprefix("recovery_"))
@@ -259,4 +268,64 @@ def test_invalid_narrow_manifest_is_rejected(tmp_path, invalid):
     path = tmp_path / "invalid.yaml"
     path.write_text(yaml.safe_dump(study))
     with pytest.raises(ValueError):
+        launcher.load_study(path)
+
+
+def test_night_control_and_half_step_change_only_one_training_parameter(night_validated_rows):
+    from net_complexity.training import one_shot_pruning_config as schema
+    from omegaconf import OmegaConf
+
+    assert len(night_validated_rows) == 3
+    assert [row["resolved_log_step"] for row in night_validated_rows] == pytest.approx([
+        0.9210340371976183, 0.9210340371976183, 0.46,
+    ])
+    study = launcher.load_study(launcher.NIGHT_CONFIG)
+    control, half_step = study["profiles"][1:]
+    for phase in ("search", "recovery"):
+        configs = [schema.compose_config(study[f"{phase}_config"], launcher.threshold_overrides(row))
+                   for row in (control, half_step)]
+        for config, row in zip(configs, (control, half_step)):
+            launcher.validate_recipe(config, study, row, phase)
+        left, right = [OmegaConf.to_container(config, resolve=False) for config in configs]
+        assert left["training_arguments"]["adaptive_lambda"].pop("log_step") == "auto"
+        assert right["training_arguments"]["adaptive_lambda"].pop("log_step") == 0.46
+        assert left == right
+
+
+@pytest.mark.parametrize("phase", ["search", "recovery"])
+def test_night_resume_rejects_a_different_lambda_step(phase):
+    from net_complexity.training import one_shot_pruning_config as schema
+    from omegaconf import OmegaConf
+
+    study = launcher.load_study(launcher.NIGHT_CONFIG)
+    row = study["profiles"][-1]
+    config = schema.compose_config(study[f"{phase}_config"], launcher.threshold_overrides(row))
+    OmegaConf.update(config, "training_arguments.adaptive_lambda.log_step", "auto")
+    with pytest.raises(ValueError, match="Adaptive-lambda settings"):
+        launcher.validate_recipe(config, study, row, phase)
+
+
+@pytest.mark.parametrize("invalid_step", [0, -0.1, False, float("nan"), "fixed", None])
+def test_invalid_night_step_is_rejected(tmp_path, invalid_step):
+    study = launcher.load_study(launcher.NIGHT_CONFIG)
+    study["profiles"][-1]["log_step"] = invalid_step
+    path = tmp_path / "invalid.yaml"
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match="log_step"):
+        launcher.load_study(path)
+
+
+def test_night_budget_retains_ninety_minutes_of_overhead(night_validated_rows, monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "validate_curve_configs", lambda study: night_validated_rows)
+    preflight = launcher.main(["--config", str(launcher.NIGHT_CONFIG), "--validate-only"])
+    assert preflight["time_budget"] == {
+        "hours": 9, "minutes_per_epoch": 1, "reserve_minutes": 90,
+        "planned_training_epochs": 450, "estimated_training_minutes": 450,
+        "estimated_total_minutes_with_reserve": 540, "hard_wallclock_timeout": False,
+    }
+    study = launcher.load_study(launcher.NIGHT_CONFIG)
+    study["time_budget"]["reserve_minutes"] = 91
+    path = tmp_path / "over_budget.yaml"
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match="exceed the time budget"):
         launcher.load_study(path)

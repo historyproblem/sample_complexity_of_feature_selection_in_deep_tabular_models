@@ -1,7 +1,8 @@
 """Run independent LS=0 ResNet50/CIFAR10 adaptive-lambda 60/90 pairs.
 
-Only soft/hard validation-accuracy tolerances differ across profiles. Planning
-sizes never enter checkpoint selection. The complete validation table is locked
+Profiles vary validation-accuracy tolerances and, in the overnight study, the
+adaptive controller's log step. Planning sizes never enter checkpoint selection.
+The complete validation table is locked
 before any frozen official-test inference. A failed profile is recorded without
 losing the other profiles' results or silently restarting partial training.
 """
@@ -28,21 +29,25 @@ ROOT = SCRIPT_DIR.parent
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve7.yaml"
 NARROW_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve4_narrow.yaml"
 MODERATE_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve3_moderate.yaml"
+NIGHT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_night9h.yaml"
+NIGHT_PROTOCOL = "resnet50_cifar10_ls0_night9h_v1"
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
     "resnet50_cifar10_ls0_curve4_narrow_v1": 4,
     "resnet50_cifar10_ls0_curve3_moderate_v1": 3,
+    NIGHT_PROTOCOL: 3,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
     "resnet50_cifar10_ls0_curve4_narrow_v1": "test_evaluation_exploratory_curve4_narrow",
     "resnet50_cifar10_ls0_curve3_moderate_v1": "test_evaluation_exploratory_curve3_moderate",
+    NIGHT_PROTOCOL: "test_evaluation_exploratory_night9h",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
     "id", "status", "error", "target_parameters", "physical_parameters",
     "theoretical_parameter_floor", "target_architecturally_reachable",
-    "soft_drop", "hard_drop", "min_keep_ratio", "label_smoothing", "split",
+    "soft_drop", "hard_drop", "resolved_log_step", "min_keep_ratio", "label_smoothing", "split",
     "search_selection_epoch_start", "search_selection_epoch_end",
     "validation_accuracy", "validation_ce_loss", "quality_feasible",
     "selected_final_epoch", "test_accuracy", "test_ce_loss", "search_dir", "recovery_dir",
@@ -61,10 +66,15 @@ def load_study(path=DEFAULT_CONFIG):
         "requested_min_parameters", "min_keep_ratio", "search_selection_last_epochs",
         "label_smoothing", "profiles",
     }
-    require(isinstance(study, dict) and set(study) == expected, "Invalid study fields")
+    require(isinstance(study, dict), "Invalid study fields")
+    night = study.get("protocol") == NIGHT_PROTOCOL
+    if night:
+        expected.add("time_budget")
+    require(set(study) == expected, "Invalid study fields")
     require(study["protocol"] in PROFILE_COUNTS, "Unexpected protocol")
     explicit_thresholds = study["protocol"] != "resnet50_cifar10_ls0_curve7_v2"
-    max_band = 0.01 if study["protocol"] == "resnet50_cifar10_ls0_curve3_moderate_v1" else 0.005
+    max_band = (0.01 if night or study["protocol"] == "resnet50_cifar10_ls0_curve3_moderate_v1"
+                else 0.005)
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
     require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
     require(type(study["search_selection_last_epochs"]) is int
@@ -78,6 +88,8 @@ def load_study(path=DEFAULT_CONFIG):
         fields = {"id", "target_parameters", "hard_drop"}
         if explicit_thresholds:
             fields.add("soft_drop")
+        if night:
+            fields.add("log_step")
         require(isinstance(row, dict) and set(row) == fields, "Invalid profile fields")
         identifier = row["id"]
         require(isinstance(identifier, str) and identifier.replace("_", "").isalnum(),
@@ -95,11 +107,26 @@ def load_study(path=DEFAULT_CONFIG):
                     and 0 <= soft < row["hard_drop"], "Invalid soft_drop")
             require(row["hard_drop"] - soft <= max_band + 1e-12,
                     f"Soft-hard interval must not exceed {max_band * 100:g} percentage points")
+        if night:
+            step = row["log_step"]
+            require(step == "auto" or (type(step) in (int, float)
+                    and math.isfinite(step) and step > 0), "Invalid profile log_step")
     if explicit_thresholds:
         targets = [row["target_parameters"] for row in study["profiles"]]
-        require(targets == sorted(set(targets)), "Profiles must run smallest first")
+        ordered = sorted(targets) if night else sorted(set(targets))
+        require(targets == ordered, "Profiles must run smallest first")
         require(targets[0] == study["requested_min_parameters"] and targets[-1] <= 15_000_000,
                 "Narrow planning range must start at the requested minimum and end at most 15M")
+    if night:
+        budget = study["time_budget"]
+        require(isinstance(budget, dict)
+                and set(budget) == {"hours", "minutes_per_epoch", "reserve_minutes"},
+                "Invalid time budget fields")
+        require(all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                    for value in budget.values()), "Time budget values must be positive finite numbers")
+        training = len(study["profiles"]) * (SEARCH_EPOCHS + RECOVERY_EPOCHS) * budget["minutes_per_epoch"]
+        require(training + budget["reserve_minutes"] <= budget["hours"] * 60 + 1e-12,
+                "Planned training and overhead reserve exceed the time budget")
     return study
 
 
@@ -108,10 +135,13 @@ def profile_soft_drop(row):
 
 
 def threshold_overrides(row):
-    return [
+    overrides = [
         f"training_arguments.adaptive_lambda.soft_drop={profile_soft_drop(row):.12g}",
         f"training_arguments.adaptive_lambda.hard_drop={row['hard_drop']:.12g}",
     ]
+    if "log_step" in row:
+        overrides.append(f"training_arguments.adaptive_lambda.log_step={row['log_step']}")
+    return overrides
 
 
 def validate_recipe(config, study, row, phase):
@@ -149,7 +179,7 @@ def validate_recipe(config, study, row, phase):
         "alpha_min": 1e-8, "alpha_max": 80.0, "soft_drop": profile_soft_drop(row),
         "hard_drop": row["hard_drop"], "gap_window": 3,
         "update_every_search_epochs": 1, "initial_search_warmup": 10,
-        "reentry_samples": 3, "log_step": "auto",
+        "reentry_samples": 3, "log_step": row.get("log_step", "auto"),
     }
     require(all(adaptive.get(key) == value for key, value in expected.items()),
             "Adaptive-lambda settings differ from the study")
@@ -189,7 +219,7 @@ def validate_curve_configs(study):
             floor = int(PhysicalBudget(model, mask).total())
         step = _resolve_adaptive_lambda_log_step_init(
             OmegaConf.create({"num_epochs": SEARCH_EPOCHS}),
-            OmegaConf.create({"log_step_init": "auto"}),
+            OmegaConf.create({"log_step_init": profile.get("log_step", "auto")}),
             initial_lambda_coef=0.001, warmup_epochs=10, update_every_epochs=1,
         )
         rows.append({
@@ -313,6 +343,17 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
+    if "time_budget" in study:
+        budget = study["time_budget"]
+        planned_epochs = len(rows) * (SEARCH_EPOCHS + RECOVERY_EPOCHS)
+        preflight["time_budget"] = {
+            **budget, "planned_training_epochs": planned_epochs,
+            "estimated_training_minutes": planned_epochs * budget["minutes_per_epoch"],
+            "estimated_total_minutes_with_reserve": (
+                planned_epochs * budget["minutes_per_epoch"] + budget["reserve_minutes"]
+            ),
+            "hard_wallclock_timeout": False,
+        }
     if args.validate_only:
         print(json.dumps(preflight, indent=2), flush=True)
         return preflight

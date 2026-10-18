@@ -1,0 +1,35 @@
+# Three complete 150-epoch models: 450 minutes of training at 1 min/epoch,
+# plus 90 minutes reserved for selection, BN calibration, I/O and frozen test.
+# Wall-clock duration is estimated; complete models are not cut off by timeout.
+protocol: resnet50_cifar10_ls0_night9h_v1
+search_config: experiment/pruning_v3/resnet50_cifar10_ls0_curve7_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_ls0_curve7_recovery
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/resnet50_cifar10_ls0_night9h_v1
+requested_min_parameters: 3700000
+min_keep_ratio: 0.08
+search_selection_last_epochs: 30
+label_smoothing: 0.0
+time_budget:
+  hours: 9
+  minutes_per_epoch: 1
+  reserve_minutes: 90
+profiles:
+  - id: floor_probe_3p7m
+    target_parameters: 3700000
+    soft_drop: 0.05
+    hard_drop: 0.06
+    log_step: auto
+  - id: compact_6m_control
+    target_parameters: 6000000
+    soft_drop: 0.015
+    hard_drop: 0.018
+    log_step: auto
+  - id: compact_6m_half_step
+    target_parameters: 6000000
+    soft_drop: 0.015
+    hard_drop: 0.018
+    log_step: 0.46
+# Planning sizes are labels, not quotas. The last two runs differ only in
+# lambda-update log_step: auto resolves to 0.9210340371976183; 0.46 stays adaptive.
+# Reuse the completed v2 14,848,414-parameter point as the large comparison.

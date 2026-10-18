@@ -1,5 +1,8 @@
 # ResNet-50 / CIFAR-10: seven LS=0 threshold profiles
 
+The [nine-hour overnight queue](resnet50_cifar10_ls0_night9h.md) runs a compact
+profile and a controlled comparison of two lambda-response steps.
+
 The reduced queue uses [three moderate-band runs](resnet50_cifar10_ls0_curve3_moderate.md)
 and retains the completed 14.85M comparison without retraining it.
 
