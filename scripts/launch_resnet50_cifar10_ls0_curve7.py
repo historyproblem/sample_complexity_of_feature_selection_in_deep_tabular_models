@@ -31,17 +31,22 @@ NARROW_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve
 MODERATE_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_curve3_moderate.yaml"
 NIGHT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_night9h.yaml"
 NIGHT_PROTOCOL = "resnet50_cifar10_ls0_night9h_v1"
+BN_SELECTION_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_night9h_bn_selection.yaml"
+BN_SELECTION_PROTOCOL = "resnet50_cifar10_ls0_night9h_bn_selection_v1"
+NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
     "resnet50_cifar10_ls0_curve4_narrow_v1": 4,
     "resnet50_cifar10_ls0_curve3_moderate_v1": 3,
     NIGHT_PROTOCOL: 3,
+    BN_SELECTION_PROTOCOL: 3,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
     "resnet50_cifar10_ls0_curve4_narrow_v1": "test_evaluation_exploratory_curve4_narrow",
     "resnet50_cifar10_ls0_curve3_moderate_v1": "test_evaluation_exploratory_curve3_moderate",
     NIGHT_PROTOCOL: "test_evaluation_exploratory_night9h",
+    BN_SELECTION_PROTOCOL: "test_evaluation_exploratory_night9h_bn_selection",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -49,6 +54,7 @@ FIELDS = (
     "theoretical_parameter_floor", "target_architecturally_reachable",
     "soft_drop", "hard_drop", "resolved_log_step", "min_keep_ratio", "label_smoothing", "split",
     "search_selection_epoch_start", "search_selection_epoch_end",
+    "search_selection_bn_calibration_batches",
     "validation_accuracy", "validation_ce_loss", "quality_feasible",
     "selected_final_epoch", "test_accuracy", "test_ce_loss", "search_dir", "recovery_dir",
 )
@@ -67,9 +73,12 @@ def load_study(path=DEFAULT_CONFIG):
         "label_smoothing", "profiles",
     }
     require(isinstance(study, dict), "Invalid study fields")
-    night = study.get("protocol") == NIGHT_PROTOCOL
+    night = study.get("protocol") in NIGHT_PROTOCOLS
+    bn_selection = study.get("protocol") == BN_SELECTION_PROTOCOL
     if night:
         expected.add("time_budget")
+    if bn_selection:
+        expected.add("search_selection_bn_calibration_batches")
     require(set(study) == expected, "Invalid study fields")
     require(study["protocol"] in PROFILE_COUNTS, "Unexpected protocol")
     explicit_thresholds = study["protocol"] != "resnet50_cifar10_ls0_curve7_v2"
@@ -77,6 +86,10 @@ def load_study(path=DEFAULT_CONFIG):
                 else 0.005)
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
     require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
+    if bn_selection:
+        require(type(study["search_selection_bn_calibration_batches"]) is int
+                and study["search_selection_bn_calibration_batches"] == 200,
+                "The BN-selection study requires 200 train-only batches per candidate")
     require(type(study["search_selection_last_epochs"]) is int
             and study["search_selection_last_epochs"] == 30,
             "Search checkpoint selection must stay inside epochs 31-60")
@@ -154,6 +167,13 @@ def validate_recipe(config, study, row, phase):
     require(config.one_shot.get("search_selection_last_epochs")
             == study["search_selection_last_epochs"],
             "Feasible and fallback search selection must both use epochs 31-60")
+    selection_bn_batches = study.get("search_selection_bn_calibration_batches", 0)
+    require(config.one_shot.get("search_selection_bn_calibration_batches", 0)
+            == selection_bn_batches,
+            "Search checkpoint BN-calibration selection policy changed")
+    if study["protocol"] == BN_SELECTION_PROTOCOL:
+        require("search_selection_bn_calibration_batches" in config.one_shot,
+                "The BN-selection recipe must explicitly declare its selection policy")
     criterion = dict(config.model.criterion)
     require(criterion.pop("label_smoothing", 0) == 0
             and criterion == {"_target_": "torch.nn.CrossEntropyLoss"},
@@ -228,6 +248,9 @@ def validate_curve_configs(study):
             "split": "60/90", "resolved_log_step": step,
             "search_selection_epoch_start": SEARCH_EPOCHS - study["search_selection_last_epochs"] + 1,
             "search_selection_epoch_end": SEARCH_EPOCHS,
+            "search_selection_bn_calibration_batches": study.get(
+                "search_selection_bn_calibration_batches", 0
+            ),
             "theoretical_parameter_floor": floor,
             "target_architecturally_reachable": profile["target_parameters"] >= floor,
         })
@@ -280,6 +303,78 @@ def write_table(path, rows, results, failures, tests):
     temporary.replace(path)
 
 
+def validate_saved_selection_bn(run_dir, study):
+    """Do not label an old pre-BN selection as a calibrated study result."""
+    batches = study.get("search_selection_bn_calibration_batches", 0)
+    if not batches:
+        return
+    selection = epoch_split._read_json(Path(run_dir) / "selection.json")
+    require(selection.get("selection_predictor") == "physical_after_train_bn_calibration",
+            "Saved search selection did not use physical post-BN validation")
+    calibration = selection.get("selection_bn_calibration", {})
+    require(calibration.get("requested_batches") == batches
+            and calibration.get("batches") == batches
+            and calibration.get("seed") == 42
+            and calibration.get("trainable_weights_unchanged") is True,
+            "Saved search selection is missing the required BN200 calibration evidence")
+    validation = selection.get("selection_validation", {})
+    require(validation.get("example_count") == 5000
+            and type(validation.get("correct_count")) is int
+            and abs(validation.get("accuracy", -1) - validation["correct_count"] / 5000) < 1e-12,
+            "Saved post-BN search selection did not evaluate the full validation split")
+    trace = selection.get("trace", {})
+    require(trace.get("selection_predictor") == "physical_after_train_bn_calibration"
+            and trace.get("bn_calibration_batches") == batches,
+            "Saved checkpoint-selection trace has a different BN-calibration policy")
+
+
+def read_search_result(run_dir, study):
+    """Verify the calibrated export without changing legacy artifact readers."""
+    batches = study.get("search_selection_bn_calibration_batches", 0)
+    if not batches:
+        return epoch_split._search_result(run_dir, SEARCH_EPOCHS, RECOVERY_EPOCHS)
+    run_dir = Path(run_dir)
+    state = epoch_split._read_json(run_dir / "one_shot_state.json")
+    selection = epoch_split._read_json(run_dir / "selection.json")
+    diagnostics = epoch_split._read_json(run_dir / "export_only/diagnostics.json")
+    for path in (run_dir / "selected_checkpoint.pt", run_dir / "export_only/deployment.pt",
+                 run_dir / "resolved_config.yaml"):
+        require(path.is_file(), f"Completed search is missing {path}")
+    require(state.get("status") == "search_only_completed"
+            and state.get("search_only") is True and state.get("branches") == {},
+            "Calibrated search-only artifact is not completed or contains recovery branches")
+    require(state.get("protocol") == epoch_split.SEARCH_PROTOCOL
+            and state.get("per_branch_total_allocated") == 150,
+            "Calibrated search protocol or training budget differs")
+    ledger = state.get("shared_search_ledger", {})
+    require(ledger.get("global_training_epoch") == SEARCH_EPOCHS
+            and ledger.get("search_epochs_consumed") == SEARCH_EPOCHS,
+            "Calibrated search ledger is incomplete")
+    require(selection.get("reference_epoch") == SEARCH_EPOCHS,
+            "Calibrated search used the wrong validation reference epoch")
+    calibration = diagnostics.get("bn_calibration", {})
+    require(diagnostics.get("status") == "measured"
+            and diagnostics.get("selection_predictor") == "physical_after_train_bn_calibration"
+            and diagnostics.get("bn_calibration_batches") == batches
+            and calibration.get("requested_batches") == batches
+            and calibration.get("batches") == batches
+            and calibration.get("trainable_weights_unchanged") is True,
+            "Selected physical search export is missing BN200 calibration evidence")
+    validation = diagnostics.get("physical_validation", {})
+    require(validation.get("example_count") == 5000,
+            "Calibrated physical search export did not evaluate the full validation split")
+    validate_saved_selection_bn(run_dir, study)
+    return {
+        "split": "60/90", "run_dir": str(run_dir.resolve()), "status": state["status"],
+        "selected_epoch": int(selection["selected_epoch"]),
+        "selection_policy": selection["policy"],
+        "physical_parameters": int(diagnostics["physical_cost"]["physical_total_parameters"]),
+        "physical_validation": validation,
+        "selection_validation": selection["selection_validation"],
+        "search_selection_bn_calibration_batches": batches,
+    }
+
+
 def run_pair(study, row, reference, output, args):
     from omegaconf import OmegaConf
 
@@ -299,7 +394,7 @@ def run_pair(study, row, reference, output, args):
 
     if not search_dir.exists():
         launch("search", search_dir)
-    search = epoch_split._search_result(search_dir, SEARCH_EPOCHS, RECOVERY_EPOCHS)
+    search = read_search_result(search_dir, study)
     require(row["search_selection_epoch_start"] <= search["selected_epoch"]
             <= row["search_selection_epoch_end"],
             "Saved search checkpoint is outside epochs 31-60")
@@ -314,6 +409,7 @@ def run_pair(study, row, reference, output, args):
         launch("recovery", recovery_dir)
     recovery = epoch_split._recovery_result(recovery_dir, search_dir, SEARCH_EPOCHS, RECOVERY_EPOCHS)
     validate_recipe(OmegaConf.load(recovery_dir / "resolved_config.yaml"), study, row, "recovery")
+    validate_saved_selection_bn(recovery_dir, study)
     if not args.keep_nested_checkpoints:
         epoch_split._prune_pair_checkpoints(search_dir, recovery_dir)
     return {"search": search, "recovery": recovery}
@@ -343,6 +439,21 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
+    if study["protocol"] == BN_SELECTION_PROTOCOL:
+        batches = study["search_selection_bn_calibration_batches"]
+        candidates = study["search_selection_last_epochs"]
+        preflight["search_selection_bn_calibration"] = {
+            "predictor": "physical_after_train_bn_calibration",
+            "candidate_epoch_start": SEARCH_EPOCHS - candidates + 1,
+            "candidate_epoch_end": SEARCH_EPOCHS,
+            "candidates_per_model": candidates,
+            "train_batches_per_candidate": batches,
+            "planned_train_forward_batches_per_model": candidates * batches,
+            "planned_train_forward_batches_for_study": len(rows) * candidates * batches,
+            "optimizer_updates": 0,
+            "calibration_data": "train only; fixed seed and augmentation batches across candidates",
+            "lambda_feedback_mask_changed": False,
+        }
     if "time_budget" in study:
         budget = study["time_budget"]
         planned_epochs = len(rows) * (SEARCH_EPOCHS + RECOVERY_EPOCHS)
@@ -354,6 +465,14 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
             ),
             "hard_wallclock_timeout": False,
         }
+        if study["protocol"] == BN_SELECTION_PROTOCOL:
+            preflight["time_budget"]["candidate_bn_overhead_minutes"] = None
+            preflight["time_budget"]["duration_guaranteed"] = False
+            preflight["time_budget"]["note"] = (
+                "450 training minutes plus reserve is a planning estimate; "
+                "30 x 200 candidate-BN forward batches per model have no measured "
+                "wall-clock estimate, so completion within nine hours is not guaranteed."
+            )
     if args.validate_only:
         print(json.dumps(preflight, indent=2), flush=True)
         return preflight

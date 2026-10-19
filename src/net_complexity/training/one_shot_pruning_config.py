@@ -106,7 +106,8 @@ def validate_config(config):
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
         }
-        optional_fields = {"search_scheduler_eta_min", "search_selection_last_epochs"}
+        optional_fields = {"search_scheduler_eta_min", "search_selection_last_epochs",
+                           "search_selection_bn_calibration_batches"}
         _require(required_fields <= set(one) <= required_fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - required_fields - optional_fields)}, "
                  f"missing={sorted(required_fields - set(one))}")
@@ -131,7 +132,7 @@ def validate_config(config):
             fields.add("search_scheduler_eta_min")
         if protocol in QUALITY_RECOVERY_PROTOCOLS:
             fields.add("reuse_search_required")
-        optional_fields = {"search_selection_last_epochs"}
+        optional_fields = {"search_selection_last_epochs", "search_selection_bn_calibration_batches"}
         _require(fields <= set(one) <= fields | optional_fields,
                  f"one_shot unknown={sorted(set(one) - fields - optional_fields)}, "
                  f"missing={sorted(fields - set(one))}")
@@ -202,6 +203,12 @@ def validate_config(config):
         last_epochs = one["search_selection_last_epochs"]
         _require(type(last_epochs) is int and 1 <= last_epochs <= one["search_epochs"],
                  "search_selection_last_epochs must be an integer in [1, search_epochs]")
+    selection_bn_batches = one.get("search_selection_bn_calibration_batches", 0)
+    _require(type(selection_bn_batches) is int and selection_bn_batches >= 0,
+             "search_selection_bn_calibration_batches must be a non-negative integer")
+    if selection_bn_batches:
+        _require("search_selection_last_epochs" in one,
+                 "BN-calibrated search selection requires explicit search_selection_last_epochs")
     shared = to_v3_config(config)
     total = validate_config_v3(shared)
     _require(one["search_epochs"] + one["final_epochs"] == total, "branch budget differs from shared stage plan")
@@ -242,8 +249,15 @@ def search_selection_bounds(config):
     return end - last_epochs + 1, end
 
 
+def search_selection_bn_batches(config):
+    """Keep candidate calibration separate from the selected branch's recovery pass."""
+    return int(config.one_shot.get("search_selection_bn_calibration_batches", 0))
+
+
 def validate_search_handoff(config, source_config, selected_epoch):
     """Reject an old export whose selection policy or width floor differs."""
+    _require(search_selection_bn_batches(config) == search_selection_bn_batches(source_config),
+             "reused search has a different search_selection_bn_calibration_batches policy")
     if "search_selection_last_epochs" not in config.one_shot:
         return
     _require(source_config.one_shot.get("search_selection_last_epochs")
@@ -385,6 +399,19 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         "iterative_recovery_guard_executed": False,
         "final_test": "separate frozen physical evaluation; never training or selection",
     }
+    selection_bn_batches = search_selection_bn_batches(config)
+    if selection_bn_batches:
+        start, end = search_selection_bounds(config)
+        execution.update(
+            bn_calibration_batches=selection_bn_batches,
+            selected_search_export_bn_calibration_batches=selection_bn_batches,
+            search_checkpoint_selection_predictor="physical_after_train_bn_calibration",
+            search_selection_bn_calibration_batches=selection_bn_batches,
+            search_selection_candidate_count=end - start + 1,
+            search_selection_bn_forward_batches=(end - start + 1) * selection_bn_batches,
+            search_selection_bn_data="train_only; same seed and augmentation stream per candidate",
+            search_selection_bn_updates="BN buffers only; no optimizer or controller updates",
+        )
     if "search_selection_last_epochs" in one:
         start, end = search_selection_bounds(config)
         execution["search_selection_epoch_window"] = {

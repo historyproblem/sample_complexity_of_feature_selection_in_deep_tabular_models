@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/resnet50_cifar10_ls0_curve7_search
+  - _self_
+
+# Recalibrate a disposable physical candidate before each eligible validation.
+# The saved gated search checkpoint and adaptive-lambda feedback stay unchanged.
+one_shot:
+  search_selection_bn_calibration_batches: 200
+
+mlflow:
+  run_name: resnet50_cifar10_ls0_bn_selection_search
+run_history:
+  run_name: resnet50_cifar10_ls0_bn_selection_search

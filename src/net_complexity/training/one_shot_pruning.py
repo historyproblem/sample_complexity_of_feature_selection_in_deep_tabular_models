@@ -34,6 +34,7 @@ from .one_shot_pruning_config import (
     RESUMED_SCHEDULER,
     SEARCH_PROTOCOLS,
     resolved_branch_plan,
+    search_selection_bn_batches,
     search_selection_bounds,
     to_v3_config,
     validate_config,
@@ -101,6 +102,65 @@ def retained_learned_closed_channels(carrier, mask):
         )
         if not opened and index not in disabled.get(name, set())
     ]
+
+
+def evaluate_search_candidate(config, model, checkpoint, path, train_loader,
+                              valid_loader, device, seed):
+    """Score a disposable physical candidate after train-only BN recalibration.
+
+    Raw checkpoint tensors/controller state stay immutable. The same seeded
+    training examples and augmentation stream are replayed for every candidate;
+    validation is evaluated only after calibration, in eval mode.
+    """
+    batches = search_selection_bn_batches(config)
+    if batches and getattr(train_loader, "persistent_workers", False):
+        raise ValueError("Candidate BN calibration requires persistent_workers=False")
+    before = state_hash(model.state_dict())
+    with isolated_diagnostic_rng(train_loader, valid_loader):
+        mask, selector = select_learned_closed(
+            model, {}, float(config.accuracy_guided.eligibility.min_keep_ratio),
+        )
+        calibration = None
+        if batches:
+            candidate = build_structural(to_v3_config(config), model, mask).cpu()
+            if sum(p.numel() for p in candidate.parameters()) != selector["params_after"]:
+                raise AssertionError("Candidate physical size differs from selector cost")
+            if gates(candidate):
+                raise AssertionError("BN selection candidate must be physical and ungated")
+            parameters_before = state_hash(dict(candidate.named_parameters()))
+            calibration = {
+                "requested_batches": batches, "seed": int(seed), "data_split": "train",
+                "model_state_hash_before": state_hash(candidate.state_dict()),
+            }
+            calibrate_bn(candidate, train_loader, device, batches, int(seed), accounting=calibration)
+            if state_hash(dict(candidate.named_parameters())) != parameters_before:
+                raise AssertionError("Candidate BN calibration changed trainable weights")
+            calibration.update(
+                trainable_weights_unchanged=True,
+                model_state_hash_after=state_hash(candidate.state_dict()),
+            )
+        else:
+            candidate = materialize_physical_survivor_carrier(model, mask)
+        metrics = evaluate_deployment(candidate, valid_loader, device)
+        candidate.cpu()
+    if state_hash(model.state_dict()) != before:
+        raise AssertionError("Candidate scoring changed the raw search checkpoint")
+    record = {
+        "epoch": int(checkpoint["epoch"]), "path": str(path),
+        "accuracy": float(metrics["accuracy"]), "ce_loss": float(metrics["ce_loss"]),
+        "raw_gated_validation": {
+            "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
+            "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
+        },
+        "selection_predictor": ("physical_after_train_bn_calibration" if batches
+                                else "dependency_safe_all_physical_survivors_open"),
+        "selection_validation": metrics,
+        "retained_learned_closed_channels": retained_learned_closed_channels(model, mask),
+        "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector,
+    }
+    if calibration is not None:
+        record["selection_bn_calibration"] = calibration
+    return record
 
 
 def physical_architecture_signature(model):
@@ -425,30 +485,22 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     training_seed=seed,
                 )
                 candidates = []
+                start, end = search_selection_bounds(config)
+                paths = [path for path in paths if start <= int(path.stem.removeprefix("epoch_")) <= end]
+                selection_bn_batches = search_selection_bn_batches(config)
                 with phase_progress(
                     "selection",
-                    f"checking {len(paths)} search checkpoints by dependency-safe validation and physical size",
+                    f"checking {len(paths)} search checkpoints in epochs {start}-{end}; "
+                    f"train-only BN batches per candidate={selection_bn_batches}",
                 ):
                     for index, path in enumerate(paths, 1):
                         model, checkpoint = load_model(path, carrier)
-                        mask, selector = select_learned_closed(model, {}, float(cfg.accuracy_guided.eligibility.min_keep_ratio))
-                        materialized = materialize_physical_survivor_carrier(model, mask)
-                        with isolated_diagnostic_rng(data.valid_dataloader):
-                            materialized_validation = evaluate_deployment(
-                                materialized, data.valid_dataloader, device
-                            )
-                        materialized.cpu()
-                        retained_closed = retained_learned_closed_channels(model, mask)
-                        candidates.append({"epoch": int(checkpoint["epoch"]), "path": str(path),
-                            "accuracy": float(materialized_validation["accuracy"]),
-                            "ce_loss": float(materialized_validation["ce_loss"]),
-                            "raw_gated_validation": {
-                                "accuracy": float(checkpoint["metrics"]["valid_accuracy"]),
-                                "ce_loss": float(checkpoint["metrics"]["valid_ce_loss"]),
-                            },
-                            "selection_predictor": "dependency_safe_all_physical_survivors_open",
-                            "retained_learned_closed_channels": retained_closed,
-                            "physical_cost": selector["params_after"], "pruning_mask": mask, "selector": selector})
+                        if not start <= int(checkpoint["epoch"]) <= end:
+                            raise ValueError("Checkpoint epoch differs from allowed filename window")
+                        candidates.append(evaluate_search_candidate(
+                            config, model, checkpoint, path, data.train_dataloader,
+                            data.valid_dataloader, device, seed,
+                        ))
                         if index % 10 == 0 or index == len(paths):
                             progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
                 selected, selection_trace = select_search_checkpoint_records(
@@ -458,6 +510,18 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     float(cfg.training_arguments.adaptive_lambda.hard_drop),
                 )
                 selection_trace["reference_epoch"] = search_epochs
+                if selection_bn_batches:
+                    selection_trace.update(
+                        selection_predictor="physical_after_train_bn_calibration",
+                        bn_calibration_batches=selection_bn_batches,
+                        bn_calibration_data="train_only",
+                    )
+                    state["selection_diagnostic_compute"] = {
+                        "candidates": len(candidates), "optimizer_updates": 0, "training_epochs": 0,
+                        "bn_batches": sum(c["selection_bn_calibration"]["batches"] for c in candidates),
+                        "bn_forward_examples": sum(c["selection_bn_calibration"]["forward_examples"] for c in candidates),
+                        "bn_wall_seconds": sum(c["selection_bn_calibration"]["wall_seconds"] for c in candidates),
+                    }
                 if selection_trace["no_feasible_search"] and not selection_trace["fallback_used"]:
                     state.update(status="no_feasible_search", selection=selection_trace)
                     write_json(output_root / "selection.json", selection_trace)
@@ -483,6 +547,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     raise FileNotFoundError("Reusable search is incomplete; missing: " + ", ".join(missing))
                 source_state = json.loads(source_state_path.read_text())
                 source_selection = json.loads(source_selection_path.read_text())
+                source_config = OmegaConf.load(source_root / "resolved_config.yaml")
+                if search_selection_bn_batches(config) != search_selection_bn_batches(source_config):
+                    raise ValueError("Reusable search has a different search_selection_bn_calibration_batches policy")
+                if search_selection_bn_batches(config) and source_selection.get("selection_predictor") != "physical_after_train_bn_calibration":
+                    raise ValueError("Reusable search lacks post-BN candidate selection evidence")
                 source_status = source_state.get("status")
                 if source_status not in {"search_only_completed", "no_feasible_search"}:
                     raise ValueError(
@@ -544,12 +613,19 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                         "pruning_mask": source_mask,
                         "selector": source_diagnostics["selector"],
                     }
+                    if search_selection_bn_batches(config):
+                        metrics = source_selection["selection_validation"]
+                        selected.update(
+                            accuracy=float(metrics["accuracy"]), ce_loss=float(metrics["ce_loss"]),
+                            selection_validation=deepcopy(metrics),
+                            selection_predictor=source_selection["selection_predictor"],
+                            selection_bn_calibration=deepcopy(source_selection["selection_bn_calibration"]),
+                        )
                     selection_trace = deepcopy(source_selection["trace"])
                     source_ledger = source_selection.get("search_ledger_consumed")
                     if not isinstance(source_ledger, dict):
                         raise ValueError("Reusable selection has no consumed search ledger")
-                if "search_selection_last_epochs" in config.one_shot:
-                    source_config = OmegaConf.load(source_root / "resolved_config.yaml")
+                if "search_selection_last_epochs" in config.one_shot or search_selection_bn_batches(config):
                     validate_search_handoff(config, source_config, selected["epoch"])
                 source_payload = torch.load(source_checkpoint_path, map_location="cpu", weights_only=True)
                 if int(source_payload.get("epoch", -1)) != int(selected["epoch"]):
@@ -603,7 +679,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             }
             retained_closed = retained_learned_closed_channels(selected_carrier, mask)
             selection_trace["selection_predictor"] = (
-                "dependency_safe_all_physical_survivors_open"
+                selected.get("selection_predictor", "dependency_safe_all_physical_survivors_open")
             )
             selected_hash = file_hash(selected["path"])
             identity = {"selected_checkpoint_id": f"shared_search:epoch_{selected['epoch']:04d}:{selected_hash[:16]}",
@@ -612,11 +688,16 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             selection = {**identity, "pruning_mask": mask, "selected_epoch": selected["epoch"],
                 "quality_threshold": selection_trace["quality_threshold"], "reference_epoch": search_epochs,
                 "policy": selection_trace["policy"], "trace": selection_trace,
-                "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                "selection_predictor": selection_trace["selection_predictor"],
                 "raw_gated_validation": raw_gated_validation,
                 "dependency_safe_validation": dependency_safe_validation,
                 "retained_learned_closed_channels": retained_closed,
                 "search_ledger_consumed": deepcopy(search_ledger)}
+            if search_selection_bn_batches(config):
+                selection.update(
+                    selection_validation=deepcopy(selected["selection_validation"]),
+                    selection_bn_calibration=deepcopy(selected["selection_bn_calibration"]),
+                )
             if reuse_search_from is not None:
                 selection["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())
             _atomic_copy(selected["path"], output_root / "selected_checkpoint.pt")
@@ -642,7 +723,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 )
             report = {**identity, "pruning_mask": mask, "architecture_hash": initialization["architecture_hash"],
                 "status": "measured", "training_epochs": 0, "bn_calibration_batches": 0,
-                "selection_predictor": "dependency_safe_all_physical_survivors_open",
+                "selection_predictor": selection_trace["selection_predictor"],
+                "diagnostic_predictor": "dependency_safe_all_physical_survivors_open_before_bn",
                 "raw_gated_validation": raw_gated_validation,
                 "dependency_safe_validation": comparison["carry_carrier"],
                 "gated_validation": comparison["carry_carrier"],
@@ -710,16 +792,21 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     key: value.detach().cpu().clone()
                     for key, value in model.named_parameters()
                 }
-                calibration = {"requested_batches": calibration_requested,
+                branch_calibration_requested = (max(search_selection_bn_batches(config), calibration_requested)
+                    if name == branch_plan[0]["id"] and search_selection_bn_batches(config)
+                    else calibration_requested)
+                calibration = {"requested_batches": branch_calibration_requested,
                     "batches": 0, "forward_examples": 0, "wall_seconds": 0.0}
-                if calibration_requested:
-                    with phase_progress(name, f"recalibrating BatchNorm for up to {calibration_requested} train batches"):
+                if branch_calibration_requested:
+                    if search_selection_bn_batches(config) and getattr(data.train_dataloader, "persistent_workers", False):
+                        raise ValueError("Candidate BN calibration requires persistent_workers=False")
+                    with phase_progress(name, f"recalibrating BatchNorm for up to {branch_calibration_requested} train batches"):
                         with isolated_diagnostic_rng(data.train_dataloader):
                             calibrate_bn(
                                 model,
                                 data.train_dataloader,
                                 device,
-                                calibration_requested,
+                                branch_calibration_requested,
                                 int(branch_spec["training_seed"]),
                                 accounting=calibration,
                             )
