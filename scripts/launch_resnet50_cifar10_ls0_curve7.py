@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -37,7 +38,12 @@ KEEP001_TARGET4P5M_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar
 KEEP001_TARGET14M_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_keep001_target14m.yaml"
 KEEP001_TARGET4P5M_PROTOCOL = "resnet50_cifar10_ls0_keep001_target4p5m_v1"
 KEEP001_TARGET14M_PROTOCOL = "resnet50_cifar10_ls0_keep001_target14m_v1"
-KEEP001_PROTOCOLS = {KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL}
+QUALITY_GRID_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_keep001_quarterpp_grid8.yaml"
+QUALITY_GRID_PROTOCOL = "resnet50_cifar10_ls0_keep001_quarterpp_grid8_v1"
+QUALITY_GRID_REFERENCE_HASH = "47b56d77615d01e9780f7765d10d144ad1f3d6db5897d777687661f4a6f23a76"
+KEEP001_PROTOCOLS = {
+    KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL, QUALITY_GRID_PROTOCOL,
+}
 BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, *KEEP001_PROTOCOLS}
 NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
@@ -48,6 +54,7 @@ PROFILE_COUNTS = {
     BN_SELECTION_PROTOCOL: 3,
     KEEP001_TARGET4P5M_PROTOCOL: 1,
     KEEP001_TARGET14M_PROTOCOL: 1,
+    QUALITY_GRID_PROTOCOL: 8,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -57,12 +64,15 @@ TEST_DIRECTORIES = {
     BN_SELECTION_PROTOCOL: "test_evaluation_exploratory_night9h_bn_selection",
     KEEP001_TARGET4P5M_PROTOCOL: "test_evaluation_exploratory_keep001_target4p5m",
     KEEP001_TARGET14M_PROTOCOL: "test_evaluation_exploratory_keep001_target14m",
+    QUALITY_GRID_PROTOCOL: "test_evaluation_exploratory_keep001_quarterpp_grid8",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
     "id", "status", "error", "target_parameters", "physical_parameters",
     "theoretical_parameter_floor", "target_architecturally_reachable",
     "soft_drop", "hard_drop", "resolved_log_step", "min_keep_ratio", "label_smoothing", "split",
+    "reference_final_validation_accuracy", "required_final_validation_accuracy",
+    "soft_final_validation_accuracy",
     "search_selection_epoch_start", "search_selection_epoch_end",
     "search_selection_bn_calibration_batches",
     "validation_accuracy", "validation_ce_loss", "quality_feasible",
@@ -83,6 +93,10 @@ def load_study(path=DEFAULT_CONFIG):
         "label_smoothing", "profiles",
     }
     require(isinstance(study, dict), "Invalid study fields")
+    quality_grid = study.get("protocol") == QUALITY_GRID_PROTOCOL
+    if quality_grid:
+        expected.remove("requested_min_parameters")
+        expected.update({"reference_final_validation_accuracy", "expected_reference_history_sha256"})
     night = study.get("protocol") in NIGHT_PROTOCOLS
     bn_selection = study.get("protocol") in BN_SELECTION_PROTOCOLS
     if night:
@@ -110,7 +124,9 @@ def load_study(path=DEFAULT_CONFIG):
             "Unexpected number of independent models")
     identifiers = set()
     for row in study["profiles"]:
-        fields = {"id", "target_parameters", "hard_drop"}
+        fields = {"id", "hard_drop"}
+        if not quality_grid:
+            fields.add("target_parameters")
         if explicit_thresholds:
             fields.add("soft_drop")
         if night:
@@ -121,8 +137,9 @@ def load_study(path=DEFAULT_CONFIG):
                 "Profile ID must be a simple directory name")
         require(identifier not in identifiers, "Duplicate profile ID")
         identifiers.add(identifier)
-        require(type(row["target_parameters"]) is int and row["target_parameters"] > 0,
-                "Planning size must be a positive integer")
+        if not quality_grid:
+            require(type(row["target_parameters"]) is int and row["target_parameters"] > 0,
+                    "Planning size must be a positive integer")
         require(type(row["hard_drop"]) in (int, float)
                 and math.isfinite(row["hard_drop"]) and 0 < row["hard_drop"] < 1,
                 "Invalid hard_drop")
@@ -136,7 +153,20 @@ def load_study(path=DEFAULT_CONFIG):
             step = row["log_step"]
             require(step == "auto" or (type(step) in (int, float)
                     and math.isfinite(step) and step > 0), "Invalid profile log_step")
-    if explicit_thresholds:
+    if quality_grid:
+        require(study["reference_final_validation_accuracy"] == 0.9414,
+                "Accuracy bands require the 94.14% final validation reference")
+        require(study["expected_reference_history_sha256"] == QUALITY_GRID_REFERENCE_HASH,
+                "Accuracy bands require the original dense validation history")
+        for index, row in enumerate(study["profiles"], 1):
+            soft, hard = Decimal(str(row["soft_drop"])), Decimal(str(row["hard_drop"]))
+            require(hard - soft == Decimal("0.0025"),
+                    "Accuracy bands must be exactly 0.25 percentage points wide")
+            require(hard == Decimal("0.0025") * index,
+                    "Run the eight adjacent quarter-point bands strictest first")
+        require(study["output"] == f"outputs/runs/{QUALITY_GRID_PROTOCOL}",
+                "The accuracy grid must use its own output directory")
+    elif explicit_thresholds:
         targets = [row["target_parameters"] for row in study["profiles"]]
         ordered = sorted(targets) if night else sorted(set(targets))
         require(targets == ordered, "Profiles must run smallest first")
@@ -254,7 +284,7 @@ def validate_curve_configs(study):
             OmegaConf.create({"log_step_init": profile.get("log_step", "auto")}),
             initial_lambda_coef=0.001, warmup_epochs=10, update_every_epochs=1,
         )
-        rows.append({
+        row = {
             **profile, "soft_drop": profile_soft_drop(profile),
             "min_keep_ratio": study["min_keep_ratio"], "label_smoothing": 0.0,
             "split": "60/90", "resolved_log_step": step,
@@ -264,8 +294,22 @@ def validate_curve_configs(study):
                 "search_selection_bn_calibration_batches", 0
             ),
             "theoretical_parameter_floor": floor,
-            "target_architecturally_reachable": profile["target_parameters"] >= floor,
-        })
+            "target_architecturally_reachable": (
+                profile["target_parameters"] >= floor if "target_parameters" in profile else None
+            ),
+        }
+        if study["protocol"] == QUALITY_GRID_PROTOCOL:
+            reference = Decimal(str(study["reference_final_validation_accuracy"]))
+            row.update({
+                "reference_final_validation_accuracy": float(reference),
+                "required_final_validation_accuracy": float(
+                    reference - Decimal(str(profile["hard_drop"]))
+                ),
+                "soft_final_validation_accuracy": float(
+                    reference - Decimal(str(profile["soft_drop"]))
+                ),
+            })
+        rows.append(row)
     return rows
 
 
@@ -283,6 +327,14 @@ def validate_reference(study, reference):
         if inputs is not None:
             require(current["sha256"] == inputs["sha256"], "Phases use different reference inputs")
         inputs = current
+    if study["protocol"] == QUALITY_GRID_PROTOCOL:
+        from net_complexity.training.pruning_audit import load_adaptive_reference
+
+        require(inputs["sha256"]["history_path"] == study["expected_reference_history_sha256"],
+                "Dense reference history differs from the accuracy-grid reference")
+        curve = load_adaptive_reference(inputs["paths"]["history_path"], 150)
+        require(curve[150] == study["reference_final_validation_accuracy"],
+                "Final dense validation accuracy differs from the accuracy-grid reference")
     # Only metadata + the shared zero-epoch initializer are required. Trained
     # dense checkpoints may already have been removed by the user's cleanup.
     return {"root": str(reference), "sha256": inputs["sha256"],
@@ -444,10 +496,13 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
     floor = rows[0]["theoretical_parameter_floor"]
     preflight = {
         "protocol": study["protocol"], "profiles": rows,
-        "requested_min_parameters": study["requested_min_parameters"],
+        "requested_min_parameters": study.get("requested_min_parameters"),
         "theoretical_parameter_floor": floor,
-        "requested_min_architecturally_reachable": study["requested_min_parameters"] >= floor,
+        "requested_min_architecturally_reachable": (
+            study["requested_min_parameters"] >= floor if "requested_min_parameters" in study else None
+        ),
         "total_training_epochs_per_model": 150,
+        "total_training_epochs_for_study": len(rows) * 150,
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
@@ -495,7 +550,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
     preflight["environment"] = epoch_split._environment_preflight(args.min_free_gib)
     preflight["reference"] = reference_info
     print(json.dumps(preflight, indent=2), flush=True)
-    if not preflight["requested_min_architecturally_reachable"]:
+    if preflight["requested_min_architecturally_reachable"] is False:
         print(f"[ls0-curve] Requested minimum {study['requested_min_parameters']:,} is below "
               f"the {floor:,} architecture floor.", flush=True)
     if args.preflight_only:
