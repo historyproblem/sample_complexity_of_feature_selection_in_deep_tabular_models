@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/resnet50_cifar10_ls0_bn_selection_recovery
+  - _self_
+
+# Recovery must reuse a search with the same floor and post-BN selection policy.
+accuracy_guided:
+  eligibility:
+    min_keep_ratio: 0.001
+
+mlflow:
+  run_name: resnet50_cifar10_ls0_bn_selection_keep001_recovery
+run_history:
+  run_name: resnet50_cifar10_ls0_bn_selection_keep001_recovery

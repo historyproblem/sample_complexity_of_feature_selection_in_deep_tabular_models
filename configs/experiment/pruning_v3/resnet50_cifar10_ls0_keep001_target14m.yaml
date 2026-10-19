@@ -1,0 +1,18 @@
+# Planning size only, not a guaranteed 14M budget. These thresholds previously
+# yielded 14.85M with floor 0.08, but 4.66M with the old floor/pre-BN selection.
+# Restoring floor 0.001 plus post-BN selection requires measuring the new size.
+protocol: resnet50_cifar10_ls0_keep001_target14m_v1
+search_config: experiment/pruning_v3/resnet50_cifar10_ls0_bn_selection_keep001_search
+recovery_config: experiment/pruning_v3/resnet50_cifar10_ls0_bn_selection_keep001_recovery
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/resnet50_cifar10_ls0_keep001_target14m_v1
+requested_min_parameters: 14000000
+min_keep_ratio: 0.001
+search_selection_last_epochs: 30
+search_selection_bn_calibration_batches: 200
+label_smoothing: 0.0
+profiles:
+  - id: target14m
+    target_parameters: 14000000
+    soft_drop: 0.00025
+    hard_drop: 0.0005

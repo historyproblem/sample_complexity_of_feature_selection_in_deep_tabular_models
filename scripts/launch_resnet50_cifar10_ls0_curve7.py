@@ -33,6 +33,12 @@ NIGHT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_night9
 NIGHT_PROTOCOL = "resnet50_cifar10_ls0_night9h_v1"
 BN_SELECTION_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_night9h_bn_selection.yaml"
 BN_SELECTION_PROTOCOL = "resnet50_cifar10_ls0_night9h_bn_selection_v1"
+KEEP001_TARGET4P5M_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_keep001_target4p5m.yaml"
+KEEP001_TARGET14M_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_keep001_target14m.yaml"
+KEEP001_TARGET4P5M_PROTOCOL = "resnet50_cifar10_ls0_keep001_target4p5m_v1"
+KEEP001_TARGET14M_PROTOCOL = "resnet50_cifar10_ls0_keep001_target14m_v1"
+KEEP001_PROTOCOLS = {KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL}
+BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, *KEEP001_PROTOCOLS}
 NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
@@ -40,6 +46,8 @@ PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve3_moderate_v1": 3,
     NIGHT_PROTOCOL: 3,
     BN_SELECTION_PROTOCOL: 3,
+    KEEP001_TARGET4P5M_PROTOCOL: 1,
+    KEEP001_TARGET14M_PROTOCOL: 1,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -47,6 +55,8 @@ TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve3_moderate_v1": "test_evaluation_exploratory_curve3_moderate",
     NIGHT_PROTOCOL: "test_evaluation_exploratory_night9h",
     BN_SELECTION_PROTOCOL: "test_evaluation_exploratory_night9h_bn_selection",
+    KEEP001_TARGET4P5M_PROTOCOL: "test_evaluation_exploratory_keep001_target4p5m",
+    KEEP001_TARGET14M_PROTOCOL: "test_evaluation_exploratory_keep001_target14m",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -74,7 +84,7 @@ def load_study(path=DEFAULT_CONFIG):
     }
     require(isinstance(study, dict), "Invalid study fields")
     night = study.get("protocol") in NIGHT_PROTOCOLS
-    bn_selection = study.get("protocol") == BN_SELECTION_PROTOCOL
+    bn_selection = study.get("protocol") in BN_SELECTION_PROTOCOLS
     if night:
         expected.add("time_budget")
     if bn_selection:
@@ -85,7 +95,9 @@ def load_study(path=DEFAULT_CONFIG):
     max_band = (0.01 if night or study["protocol"] == "resnet50_cifar10_ls0_curve3_moderate_v1"
                 else 0.005)
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
-    require(study["min_keep_ratio"] == 0.08, "The restored common keep floor must stay 0.08")
+    keep_floor = 0.001 if study["protocol"] in KEEP001_PROTOCOLS else 0.08
+    require(study["min_keep_ratio"] == keep_floor,
+            f"This study's keep floor must stay {keep_floor:g}")
     if bn_selection:
         require(type(study["search_selection_bn_calibration_batches"]) is int
                 and study["search_selection_bn_calibration_batches"] == 200,
@@ -171,7 +183,7 @@ def validate_recipe(config, study, row, phase):
     require(config.one_shot.get("search_selection_bn_calibration_batches", 0)
             == selection_bn_batches,
             "Search checkpoint BN-calibration selection policy changed")
-    if study["protocol"] == BN_SELECTION_PROTOCOL:
+    if study["protocol"] in BN_SELECTION_PROTOCOLS:
         require("search_selection_bn_calibration_batches" in config.one_shot,
                 "The BN-selection recipe must explicitly declare its selection policy")
     criterion = dict(config.model.criterion)
@@ -439,7 +451,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
-    if study["protocol"] == BN_SELECTION_PROTOCOL:
+    if study["protocol"] in BN_SELECTION_PROTOCOLS:
         batches = study["search_selection_bn_calibration_batches"]
         candidates = study["search_selection_last_epochs"]
         preflight["search_selection_bn_calibration"] = {
@@ -465,7 +477,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
             ),
             "hard_wallclock_timeout": False,
         }
-        if study["protocol"] == BN_SELECTION_PROTOCOL:
+        if study["protocol"] in BN_SELECTION_PROTOCOLS:
             preflight["time_budget"]["candidate_bn_overhead_minutes"] = None
             preflight["time_budget"]["duration_guaranteed"] = False
             preflight["time_budget"]["note"] = (
