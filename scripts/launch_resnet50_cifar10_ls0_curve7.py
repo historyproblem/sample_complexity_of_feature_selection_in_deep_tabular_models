@@ -41,10 +41,14 @@ KEEP001_TARGET14M_PROTOCOL = "resnet50_cifar10_ls0_keep001_target14m_v1"
 QUALITY_GRID_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_keep001_quarterpp_grid8.yaml"
 QUALITY_GRID_PROTOCOL = "resnet50_cifar10_ls0_keep001_quarterpp_grid8_v1"
 QUALITY_GRID_REFERENCE_HASH = "47b56d77615d01e9780f7765d10d144ad1f3d6db5897d777687661f4a6f23a76"
+FULL150_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_full150.yaml"
+FULL150_PROTOCOL = "resnet50_cifar10_ls0_full150_v1"
+FULL150_INITIALIZER_HASH = "82e7232c8832ab6db93d4f551e6a5eb509a5a92089fc820620e05dd80b9b9422"
+PINNED_REFERENCE_PROTOCOLS = {QUALITY_GRID_PROTOCOL, FULL150_PROTOCOL}
 KEEP001_PROTOCOLS = {
     KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL, QUALITY_GRID_PROTOCOL,
 }
-BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, *KEEP001_PROTOCOLS}
+BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, FULL150_PROTOCOL, *KEEP001_PROTOCOLS}
 NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
@@ -55,6 +59,7 @@ PROFILE_COUNTS = {
     KEEP001_TARGET4P5M_PROTOCOL: 1,
     KEEP001_TARGET14M_PROTOCOL: 1,
     QUALITY_GRID_PROTOCOL: 8,
+    FULL150_PROTOCOL: 1,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -65,6 +70,7 @@ TEST_DIRECTORIES = {
     KEEP001_TARGET4P5M_PROTOCOL: "test_evaluation_exploratory_keep001_target4p5m",
     KEEP001_TARGET14M_PROTOCOL: "test_evaluation_exploratory_keep001_target14m",
     QUALITY_GRID_PROTOCOL: "test_evaluation_exploratory_keep001_quarterpp_grid8",
+    FULL150_PROTOCOL: "test_evaluation_exploratory_full150",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -94,9 +100,13 @@ def load_study(path=DEFAULT_CONFIG):
     }
     require(isinstance(study, dict), "Invalid study fields")
     quality_grid = study.get("protocol") == QUALITY_GRID_PROTOCOL
-    if quality_grid:
+    pinned_reference = study.get("protocol") in PINNED_REFERENCE_PROTOCOLS
+    full150 = study.get("protocol") == FULL150_PROTOCOL
+    if pinned_reference:
         expected.remove("requested_min_parameters")
         expected.update({"reference_final_validation_accuracy", "expected_reference_history_sha256"})
+    if full150:
+        expected.add("expected_initializer_sha256")
     night = study.get("protocol") in NIGHT_PROTOCOLS
     bn_selection = study.get("protocol") in BN_SELECTION_PROTOCOLS
     if night:
@@ -125,7 +135,7 @@ def load_study(path=DEFAULT_CONFIG):
     identifiers = set()
     for row in study["profiles"]:
         fields = {"id", "hard_drop"}
-        if not quality_grid:
+        if not pinned_reference:
             fields.add("target_parameters")
         if explicit_thresholds:
             fields.add("soft_drop")
@@ -137,7 +147,7 @@ def load_study(path=DEFAULT_CONFIG):
                 "Profile ID must be a simple directory name")
         require(identifier not in identifiers, "Duplicate profile ID")
         identifiers.add(identifier)
-        if not quality_grid:
+        if not pinned_reference:
             require(type(row["target_parameters"]) is int and row["target_parameters"] > 0,
                     "Planning size must be a positive integer")
         require(type(row["hard_drop"]) in (int, float)
@@ -153,11 +163,17 @@ def load_study(path=DEFAULT_CONFIG):
             step = row["log_step"]
             require(step == "auto" or (type(step) in (int, float)
                     and math.isfinite(step) and step > 0), "Invalid profile log_step")
-    if quality_grid:
+    if pinned_reference:
         require(study["reference_final_validation_accuracy"] == 0.9414,
                 "Accuracy bands require the 94.14% final validation reference")
         require(study["expected_reference_history_sha256"] == QUALITY_GRID_REFERENCE_HASH,
                 "Accuracy bands require the original dense validation history")
+    if full150:
+        require(study["expected_initializer_sha256"] == FULL150_INITIALIZER_HASH,
+                "Full150 requires the original diagnostic zero-epoch initializer")
+        require(study["output"] == f"outputs/runs/{FULL150_PROTOCOL}",
+                "The full run must use its own output directory")
+    elif quality_grid:
         for index, row in enumerate(study["profiles"], 1):
             soft, hard = Decimal(str(row["soft_drop"])), Decimal(str(row["hard_drop"]))
             require(hard - soft == Decimal("0.0025"),
@@ -298,7 +314,7 @@ def validate_curve_configs(study):
                 profile["target_parameters"] >= floor if "target_parameters" in profile else None
             ),
         }
-        if study["protocol"] == QUALITY_GRID_PROTOCOL:
+        if study["protocol"] in PINNED_REFERENCE_PROTOCOLS:
             reference = Decimal(str(study["reference_final_validation_accuracy"]))
             row.update({
                 "reference_final_validation_accuracy": float(reference),
@@ -327,7 +343,7 @@ def validate_reference(study, reference):
         if inputs is not None:
             require(current["sha256"] == inputs["sha256"], "Phases use different reference inputs")
         inputs = current
-    if study["protocol"] == QUALITY_GRID_PROTOCOL:
+    if study["protocol"] in PINNED_REFERENCE_PROTOCOLS:
         from net_complexity.training.pruning_audit import load_adaptive_reference
 
         require(inputs["sha256"]["history_path"] == study["expected_reference_history_sha256"],
@@ -335,6 +351,9 @@ def validate_reference(study, reference):
         curve = load_adaptive_reference(inputs["paths"]["history_path"], 150)
         require(curve[150] == study["reference_final_validation_accuracy"],
                 "Final dense validation accuracy differs from the accuracy-grid reference")
+    if study["protocol"] == FULL150_PROTOCOL:
+        require(inputs["sha256"]["initializer_path"] == study["expected_initializer_sha256"],
+                "Zero-epoch initializer differs from the full-run diagnostic reference")
     # Only metadata + the shared zero-epoch initializer are required. Trained
     # dense checkpoints may already have been removed by the user's cleanup.
     return {"root": str(reference), "sha256": inputs["sha256"],
