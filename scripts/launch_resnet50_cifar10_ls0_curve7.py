@@ -44,11 +44,14 @@ QUALITY_GRID_REFERENCE_HASH = "47b56d77615d01e9780f7765d10d144ad1f3d6db5897d7776
 FULL150_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_full150.yaml"
 FULL150_PROTOCOL = "resnet50_cifar10_ls0_full150_v1"
 FULL150_INITIALIZER_HASH = "82e7232c8832ab6db93d4f551e6a5eb509a5a92089fc820620e05dd80b9b9422"
-PINNED_REFERENCE_PROTOCOLS = {QUALITY_GRID_PROTOCOL, FULL150_PROTOCOL}
+EXTRA3_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_extra3.yaml"
+EXTRA3_PROTOCOL = "resnet50_cifar10_ls0_extra3_v1"
+PINNED_INITIALIZER_PROTOCOLS = {FULL150_PROTOCOL, EXTRA3_PROTOCOL}
+PINNED_REFERENCE_PROTOCOLS = {QUALITY_GRID_PROTOCOL, *PINNED_INITIALIZER_PROTOCOLS}
 KEEP001_PROTOCOLS = {
     KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL, QUALITY_GRID_PROTOCOL,
 }
-BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, FULL150_PROTOCOL, *KEEP001_PROTOCOLS}
+BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, *PINNED_INITIALIZER_PROTOCOLS, *KEEP001_PROTOCOLS}
 NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
@@ -60,6 +63,7 @@ PROFILE_COUNTS = {
     KEEP001_TARGET14M_PROTOCOL: 1,
     QUALITY_GRID_PROTOCOL: 8,
     FULL150_PROTOCOL: 1,
+    EXTRA3_PROTOCOL: 3,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -71,6 +75,7 @@ TEST_DIRECTORIES = {
     KEEP001_TARGET14M_PROTOCOL: "test_evaluation_exploratory_keep001_target14m",
     QUALITY_GRID_PROTOCOL: "test_evaluation_exploratory_keep001_quarterpp_grid8",
     FULL150_PROTOCOL: "test_evaluation_exploratory_full150",
+    EXTRA3_PROTOCOL: "test_evaluation_exploratory_extra3",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -101,11 +106,11 @@ def load_study(path=DEFAULT_CONFIG):
     require(isinstance(study, dict), "Invalid study fields")
     quality_grid = study.get("protocol") == QUALITY_GRID_PROTOCOL
     pinned_reference = study.get("protocol") in PINNED_REFERENCE_PROTOCOLS
-    full150 = study.get("protocol") == FULL150_PROTOCOL
+    pinned_initializer = study.get("protocol") in PINNED_INITIALIZER_PROTOCOLS
     if pinned_reference:
         expected.remove("requested_min_parameters")
         expected.update({"reference_final_validation_accuracy", "expected_reference_history_sha256"})
-    if full150:
+    if pinned_initializer:
         expected.add("expected_initializer_sha256")
     night = study.get("protocol") in NIGHT_PROTOCOLS
     bn_selection = study.get("protocol") in BN_SELECTION_PROTOCOLS
@@ -168,11 +173,18 @@ def load_study(path=DEFAULT_CONFIG):
                 "Accuracy bands require the 94.14% final validation reference")
         require(study["expected_reference_history_sha256"] == QUALITY_GRID_REFERENCE_HASH,
                 "Accuracy bands require the original dense validation history")
-    if full150:
+    if pinned_initializer:
         require(study["expected_initializer_sha256"] == FULL150_INITIALIZER_HASH,
-                "Full150 requires the original diagnostic zero-epoch initializer")
-        require(study["output"] == f"outputs/runs/{FULL150_PROTOCOL}",
+                "This study requires the original diagnostic zero-epoch initializer")
+        require(study["output"] == f"outputs/runs/{study['protocol']}",
                 "The full run must use its own output directory")
+        if study["protocol"] == EXTRA3_PROTOCOL:
+            reference = Decimal(str(study["reference_final_validation_accuracy"]))
+            bands = (("0.924", "0.9265"), ("0.929", "0.9315"), ("0.935", "0.9375"))
+            for row, (lower, upper) in zip(study["profiles"], bands):
+                soft, hard = Decimal(str(row["soft_drop"])), Decimal(str(row["hard_drop"]))
+                require((reference - hard, reference - soft) == (Decimal(lower), Decimal(upper)),
+                        "Extra3 must preserve the three requested validation bands and their order")
     elif quality_grid:
         for index, row in enumerate(study["profiles"], 1):
             soft, hard = Decimal(str(row["soft_drop"])), Decimal(str(row["hard_drop"]))
@@ -351,7 +363,7 @@ def validate_reference(study, reference):
         curve = load_adaptive_reference(inputs["paths"]["history_path"], 150)
         require(curve[150] == study["reference_final_validation_accuracy"],
                 "Final dense validation accuracy differs from the accuracy-grid reference")
-    if study["protocol"] == FULL150_PROTOCOL:
+    if study["protocol"] in PINNED_INITIALIZER_PROTOCOLS:
         require(inputs["sha256"]["initializer_path"] == study["expected_initializer_sha256"],
                 "Zero-epoch initializer differs from the full-run diagnostic reference")
     # Only metadata + the shared zero-epoch initializer are required. Trained
