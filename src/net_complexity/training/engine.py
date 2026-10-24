@@ -1643,7 +1643,8 @@ def train_epoch(model,
                 progress_context: ProgressContext | None = None,
                 gradient_norm_logger: GradientNormLogger | None = None,
                 training_ledger: dict[str, Any] | None = None,
-                epoch_measurements: dict[str, Any] | None = None) -> dict[str, float]:
+                epoch_measurements: dict[str, Any] | None = None,
+                diagnostic_observer=None) -> dict[str, float]:
     """Train for one epoch. Returns the epoch-average per-block gradient L2 norms."""
     model.train()
 
@@ -1655,8 +1656,14 @@ def train_epoch(model,
     for batch_index, (X, y) in enumerate(dataloaders.train_dataloader):
         from .interruption import check_stop
         check_stop(epoch=epoch, batches=batch_index)
+        if diagnostic_observer is not None:
+            diagnostic_observer.on_batch_input(
+                epoch, batch_index, X, y, dataloaders.train_dataloader,
+            )
         X, y = X.to(device), y.to(device)
         output = model(X, y)
+        if diagnostic_observer is not None:
+            diagnostic_observer.on_forward(epoch, batch_index, output)
         if training_ledger is not None:
             training_ledger["consumed_training_examples"] += int(y.shape[0])
         training_examples += int(y.shape[0])
@@ -1680,6 +1687,8 @@ def train_epoch(model,
             regularization_term = output.loss - output.ce_loss
             gradient_norm_logger.collect_autograd("regularization", regularization_term)
         output.loss.backward()
+        if diagnostic_observer is not None:
+            diagnostic_observer.on_backward(epoch, batch_index, model)
 
         for key, value in _compute_block_gradient_norms(model).items():
             if not math.isfinite(value):
@@ -1690,6 +1699,8 @@ def train_epoch(model,
         if collect_gradient_norms:
             gradient_norm_logger.collect_total()
         optimizer.step()
+        if diagnostic_observer is not None:
+            diagnostic_observer.on_optimizer_step(epoch, batch_index, model)
         if training_ledger is not None:
             training_ledger["optimizer_updates"] += 1
         if scheduler_state is not None and scheduler_state.interval == "batch":
@@ -1724,12 +1735,18 @@ def train(model: nn.Module,
           training_ledger: dict[str, Any] | None = None,
           adaptive_rebase: Mapping[str, Any] | None = None,
           runtime_initialized_callback: Callable | None = None,
-          exact_resume_checkpoint: Path | None = None) -> dict[str, Any]:
+          exact_resume_checkpoint: Path | None = None,
+          stop_after_epoch: int | None = None,
+          diagnostic_observer=None) -> dict[str, Any]:
 
     model.to(device)
     last_train_metrics: dict[str, float] = {}
     last_valid_metrics: dict[str, float] = {}
     total_epochs = int(training_arguments.num_epochs)
+    if stop_after_epoch is not None and (
+        type(stop_after_epoch) is not int or not 1 <= stop_after_epoch <= total_epochs
+    ):
+        raise ValueError("stop_after_epoch must be an integer inside the unchanged training horizon")
     early_stopping = _build_early_stopping(training_arguments, run_history)
     lambda_warmup = _build_lambda_warmup(training_arguments)
     gate_mode_schedule = _build_gate_mode_schedule(training_arguments)
@@ -1757,6 +1774,13 @@ def train(model: nn.Module,
     stage_metadata = OmegaConf.to_container(
         getattr(training_arguments, "accuracy_guided_stage", OmegaConf.create({})), resolve=True)
     epoch_events_enabled = bool(stage_metadata) or isinstance(adaptive_lambda, AccuracyOnlyLambdaController)
+    if stop_after_epoch is not None and stop_after_epoch < total_epochs:
+        if run_history is None or not epoch_events_enabled:
+            raise ValueError("Operational pause requires persisted complete epoch-event checkpoints")
+        if any(state is not None for state in (early_stopping, lambda_warmup,
+                gate_mode_schedule, batchnorm_recalibration, collapse_guard)):
+            raise ValueError("Operational pause cannot resume legacy auxiliary schedules or guards")
+    operational_pause = False
 
     def _apply_adaptive_lambda(target_model: nn.Module, lambda_coef: float) -> None:
         _set_model_lambda_coef(target_model, lambda_coef, bypass_gumbel=False)
@@ -1812,6 +1836,8 @@ def train(model: nn.Module,
         if run_history is not None:
             run_history.restore_epoch_selection(checkpoint, Path(exact_resume_checkpoint))
         completed_epochs = epoch_num - 1
+    if stop_after_epoch is not None and stop_after_epoch < epoch_num:
+        raise ValueError("stop_after_epoch is before the next unconsumed epoch")
     if runtime_initialized_callback is not None:
         runtime_initialized_callback(model, adaptive_lambda)
     while epoch_num <= total_epochs:
@@ -1855,6 +1881,7 @@ def train(model: nn.Module,
             gradient_norm_logger=gradient_norm_logger,
             training_ledger=training_ledger,
             epoch_measurements=epoch_measurements,
+            diagnostic_observer=diagnostic_observer,
         )
         training_ledger["global_training_epoch"] += 1
         if adaptive_lambda is not None:
@@ -2132,10 +2159,48 @@ def train(model: nn.Module,
         metrics.train_metrics.reset()
         metrics.valid_metrics.reset()
         completed_epochs = epoch_num
+        if diagnostic_observer is not None:
+            diagnostic_observer.on_epoch_end(
+                epoch_num, model, train_metrics, valid_metrics,
+                adaptive_lambda, training_ledger,
+            )
+
+        if stop_after_epoch == epoch_num and epoch_num < total_epochs:
+            operational_pause = True
+            break
 
         if should_stop:
             break
         epoch_num += 1
+
+    if operational_pause:
+        checkpoint_path = run_history.checkpoints_dir / f"epoch_{completed_epochs:04d}.pt"
+        if not checkpoint_path.is_file():
+            raise RuntimeError("Operational pause has no complete epoch checkpoint")
+        pause_info = {
+            "status": "operational_pause", "operational_stop": True,
+            "stop_after_epoch": completed_epochs, "next_epoch": completed_epochs + 1,
+            "configured_num_epochs": total_epochs, "pause_checkpoint": str(checkpoint_path),
+        }
+        run_history.save_summary(
+            final_train_metrics=last_train_metrics,
+            final_valid_metrics=last_valid_metrics, test_metrics={}, stop_info=pause_info,
+        )
+        return {
+            **pause_info,
+            "last_train_metrics": last_train_metrics,
+            "last_valid_metrics": last_valid_metrics,
+            "test_metrics": {}, "test_evaluation_disabled": True,
+            **({"adaptive_lambda": adaptive_lambda.summary_state(),
+                "adaptive_lambda_state": adaptive_lambda.state_dict()}
+               if adaptive_lambda is not None else {}),
+            "training_ledger": deepcopy(training_ledger),
+            "num_epochs_executed": completed_epochs,
+            "full_train_time_sec": sum(
+                float(row.get("epoch_time_sec", 0.0) or 0.0)
+                for row in run_history.history_records
+            ),
+        }
 
     final_epoch = completed_epochs or total_epochs
     if batchnorm_recalibration is not None:
@@ -2421,6 +2486,8 @@ def run_training(
     adaptive_rebase: Mapping[str, Any] | None = None,
     runtime_initialized_callback: Callable | None = None,
     exact_resume_checkpoint: Path | None = None,
+    stop_after_epoch: int | None = None,
+    diagnostic_observer=None,
 ) -> dict[str, Any]:
     if ((optimizer_initializer is not None or scheduler_initializer is not None)
             and exact_resume_checkpoint is not None):
@@ -2620,6 +2687,8 @@ def run_training(
             adaptive_rebase=adaptive_rebase,
             runtime_initialized_callback=runtime_initialized_callback,
             exact_resume_checkpoint=exact_resume_checkpoint,
+            stop_after_epoch=stop_after_epoch,
+            diagnostic_observer=diagnostic_observer,
         )
     except TrainingInterrupted as exc:
         run_history.save_checkpoint(

@@ -269,10 +269,54 @@ def _atomic_copy(source, destination):
     temporary.replace(destination)
 
 
-def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search_from=None):
+def _paused_search(config, source_root, provenance, search_epochs):
+    """Validate an immutable epoch-boundary prefix before creating a new run."""
+    source_root = Path(source_root).expanduser().resolve()
+    saved = json.loads((source_root / "one_shot_state.json").read_text())
+    saved_config = OmegaConf.load(source_root / "resolved_config.yaml")
+    if OmegaConf.to_container(saved_config, resolve=True) != OmegaConf.to_container(config, resolve=True):
+        raise ValueError("Paused search configuration differs from the requested configuration")
+    if (saved.get("status") != "search_paused" or saved.get("test_evaluated") is not False
+            or saved.get("selection") is not None or saved.get("export_only") is not None
+            or saved.get("branches")):
+        raise ValueError("Resume requires a paused search before selection, export, recovery and test")
+    original = saved.get("provenance", {})
+    for key in ("code", "inputs", "seed", "split_indices_hash", "normalization",
+                "resolved_config_sha256", "torch_version", "device"):
+        if original.get(key) != provenance.get(key):
+            raise ValueError(f"Paused search {key} provenance differs")
+    ledger = saved["shared_search_ledger"]
+    boundary = ledger["global_training_epoch"]
+    if (type(boundary) is not int or not 0 < boundary < search_epochs
+            or ledger["search_epochs_consumed"] != boundary):
+        raise ValueError("Paused search has an inconsistent consumed epoch budget")
+    stage = saved["stages"]["shared_search"]
+    path = Path(stage["resume_checkpoint"]).resolve()
+    if source_root not in path.parents or not path.is_file():
+        raise ValueError("Paused search checkpoint is missing or outside the source run")
+    if file_hash(path) != stage["resume_checkpoint_sha256"]:
+        raise ValueError("Paused search checkpoint hash differs")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    if (checkpoint.get("epoch") != boundary or checkpoint.get("consumed_ledger") != ledger
+            or checkpoint.get("epoch_event", {}).get("provenance", {}).get("stage") != stage["stage_metadata"]):
+        raise ValueError("Paused checkpoint epoch, ledger or stage provenance differs")
+    if stage["global_epoch_offset"] != 0 or stage["epochs_allocated"] != search_epochs:
+        raise ValueError("Paused search changed the original search horizon")
+    for epoch in range(1, boundary + 1):
+        if not (path.parent / f"epoch_{epoch:04d}.pt").is_file():
+            raise ValueError(f"Paused search is missing preserved epoch {epoch}")
+    return saved, path, checkpoint["model_state_hash"]
+
+
+def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search_from=None,
+                         stop_after_search_epoch=None, search_diagnostics=False,
+                         resume_search_from=None):
     """Execute one shared search/export and, unless requested otherwise, compact branches."""
     if search_only and reuse_search_from is not None:
         raise ValueError("search_only and reuse_search_from are mutually exclusive")
+    if reuse_search_from is not None and (resume_search_from is not None or search_diagnostics
+                                         or stop_after_search_epoch is not None):
+        raise ValueError("Completed-search reuse cannot stop, trace or resume search training")
     total = validate_config(config)
     with phase_progress("one-shot", "validating reference inputs"):
         inputs = validate_inputs(config)
@@ -280,6 +324,10 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
     protocol = str(config.one_shot.protocol)
     branch_plan = resolved_branch_plan(config)
     search_epochs, final_epochs = int(config.one_shot.search_epochs), int(config.one_shot.final_epochs)
+    if stop_after_search_epoch is not None and (
+            not search_only or type(stop_after_search_epoch) is not int
+            or not 1 <= stop_after_search_epoch < search_epochs):
+        raise ValueError("stop_after_search_epoch requires search_only and an epoch before the full search horizon")
     reference = load_adaptive_reference(cfg.accuracy_guided.reference.history_path, total)
     output_root = Path(output_root).resolve()
     if output_root.exists():
@@ -307,8 +355,6 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
     if reference_state.get("split_indices_hash") != split_hash:
         raise ValueError("Actual train/validation split differs from the dense reference.")
     image_shape = tuple(sample[0].shape[1:])
-    output_root.mkdir(parents=True)
-    OmegaConf.save(config, output_root / "resolved_config.yaml", resolve=True)
     provenance = {"code": code_provenance(), "inputs": inputs, "seed": seed,
         "split_indices_hash": split_hash, "normalization": normalization,
         "resolved_config_sha256": hashlib.sha256(OmegaConf.to_yaml(config, resolve=True).encode()).hexdigest(),
@@ -318,21 +364,41 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
         provenance["reused_search_from"] = str(Path(reuse_search_from).expanduser().resolve())
     search_ledger = dict(global_training_epoch=0, search_epochs_consumed=0,
                          optimizer_updates=0, consumed_training_examples=0)
+    resumed_ledger = deepcopy(search_ledger)
+    resumed_state, resume_checkpoint, resumed_model_hash = None, None, None
+    if resume_search_from is not None:
+        resumed_state, resume_checkpoint, resumed_model_hash = _paused_search(
+            config, resume_search_from, provenance, search_epochs,
+        )
+        resumed_ledger.update(resumed_state["shared_search_ledger"])
+        if (stop_after_search_epoch is not None
+                and stop_after_search_epoch <= resumed_ledger["global_training_epoch"]):
+            raise ValueError("Operational stop must follow the already consumed prefix")
+        search_ledger.update(resumed_ledger)
+        provenance["resumed_search_from"] = str(Path(resume_search_from).expanduser().resolve())
+    output_root.mkdir(parents=True)
+    OmegaConf.save(config, output_root / "resolved_config.yaml", resolve=True)
     state = {"protocol": protocol, "status": "running", "search_only": bool(search_only),
         "test_evaluated": False,
         "provenance": provenance, "per_branch_total_allocated": total,
         "shared_search_ledger": search_ledger, "stages": {}, "selection": None,
         "export_only": None, "branches": {}, "compute_ledger": {}}
+    if resumed_state is not None:
+        state["resumed_search"] = {"source": provenance["resumed_search_from"],
+            "source_checkpoint": str(resume_checkpoint),
+            "training_epochs_previously_consumed": resumed_ledger["global_training_epoch"],
+            "original_stage_metadata_preserved": True}
     started = time.perf_counter()
 
     def persist():
         finals = {name: max(0, record["ledger"]["global_training_epoch"] - search_epochs)
                   for name, record in state["branches"].items()}
         reused_search_epochs = (search_ledger["global_training_epoch"]
-                                if reuse_search_from is not None else 0)
+                                if reuse_search_from is not None else resumed_ledger["global_training_epoch"])
         executed_search_epochs = search_ledger["global_training_epoch"] - reused_search_epochs
-        executed_search_updates = search_ledger["optimizer_updates"] if reuse_search_from is None else 0
-        executed_search_examples = (search_ledger["consumed_training_examples"]
+        executed_search_updates = (search_ledger["optimizer_updates"] - resumed_ledger["optimizer_updates"]
+                                   if reuse_search_from is None else 0)
+        executed_search_examples = (search_ledger["consumed_training_examples"] - resumed_ledger["consumed_training_examples"]
                                     if reuse_search_from is None else 0)
         state["compute_ledger"] = {"shared_search_epochs": search_ledger["global_training_epoch"],
             "reused_search_epochs": reused_search_epochs,
@@ -378,7 +444,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
         if training_seed is not None:
             OmegaConf.update(stage_cfg, "seed", int(training_seed), merge=False)
             OmegaConf.update(stage_cfg, "dataloaders.loader_seed", int(training_seed), merge=False)
-        offset = ledger["global_training_epoch"]
+        resuming = not structural and resumed_state is not None
+        offset = 0 if resuming else ledger["global_training_epoch"]
         stage_cfg.training_arguments.global_epoch_offset = offset
         stage_cfg.model.lambda_coef = 0.0 if structural else cfg.model.lambda_coef
         stage_cfg.training_arguments.adaptive_lambda.enabled = not structural
@@ -389,6 +456,9 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             "end_global_epoch": offset + epochs, "provenance": provenance,
             "selection_identity": identity, "held_controller_state": held_state,
             "original_gate_normalization_metadata": normalization}, force_add=True)
+        if resuming:
+            OmegaConf.update(stage_cfg, "training_arguments.accuracy_guided_stage",
+                resumed_state["stages"][name]["stage_metadata"], merge=False)
         stage_cfg.mlflow.run_name = stage_cfg.run_history.run_name = name
         _configure_run_history(stage_cfg, output_root / name / "training")
         source_state = {key: value.detach().cpu().clone() for key, value in source.state_dict().items()}
@@ -402,14 +472,21 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             "scheduler_state_initialization": scheduler_state_policy,
             "scheduler_horizon_epochs": int(stage_cfg.scheduler.T_max),
             "initialization_state_hash": initial_hash, "training_initializer_verified": False,
+            "stage_metadata": OmegaConf.to_container(
+                stage_cfg.training_arguments.accuracy_guided_stage, resolve=True),
             "epoch_events": []}
+        if resuming:
+            record["epoch_events"] = deepcopy(resumed_state["stages"][name]["epoch_events"])
+            record["resumed_state_hash"] = resumed_model_hash
+            record["resumed_from_checkpoint"] = str(resume_checkpoint)
         state["stages"][name] = record
 
         def initialize(model):
             model.load_state_dict(source_state, strict=True)
 
         def initialized(model, controller):
-            if state_hash(model.state_dict()) != initial_hash:
+            expected_hash = resumed_model_hash if resuming else initial_hash
+            if state_hash(model.state_dict()) != expected_hash:
                 raise AssertionError("Final apply_initial_state changed the intended branch weights/BN state.")
             if structural and (gates(model) or model.lambda_coef != 0 or controller is not None):
                 raise AssertionError("Physical final training has gates, gate penalty, or live controller.")
@@ -441,17 +518,31 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             kwargs["scheduler_initializer"] = initialize_scheduler
         if not structural:
             kwargs.update(adaptive_epoch_offset=0, adaptive_reference_by_epoch=reference)
+            if stop_after_search_epoch is not None:
+                kwargs["stop_after_epoch"] = stop_after_search_epoch
+            if resuming:
+                kwargs["exact_resume_checkpoint"] = resume_checkpoint
+            if search_diagnostics:
+                from .search_reproducibility import SearchReproducibilityTrace
+                kwargs["diagnostic_observer"] = SearchReproducibilityTrace(output_root / "search_diagnostics")
         with phase_progress(name, f"training {epochs} epochs on {device}; state={output_root / 'one_shot_state.json'}",
                             ledger=ledger, total_epochs=epochs):
             result = run_training(stage_cfg, model_initializer=initialize, epoch_end_callback=epoch_end, **kwargs)
         if result.get("test_metrics") or not result.get("test_evaluation_disabled"):
             raise AssertionError("One-shot training accessed test data.")
-        if result["num_epochs_executed"] != epochs or ledger["global_training_epoch"] != offset + epochs:
+        paused = bool(result.get("operational_stop"))
+        expected_epochs = stop_after_search_epoch if paused else epochs
+        if result["num_epochs_executed"] != expected_epochs or ledger["global_training_epoch"] != offset + expected_epochs:
             raise RuntimeError("Incomplete training stage; consumed budget cannot be fabricated.")
-        record.update(run_dir=result["run_dir"], status="completed")
+        record.update(run_dir=result["run_dir"], status="paused" if paused else "completed",
+                      epochs_completed=expected_epochs)
         paths = sorted((Path(result["run_dir"]) / "checkpoints").glob("epoch_*.pt"))
-        if len(paths) != epochs:
+        if len(paths) != expected_epochs:
             raise ValueError("Missing complete epoch candidates for validation-only selection.")
+        if paused:
+            boundary = Path(result["pause_checkpoint"])
+            record.update(resume_checkpoint=str(boundary),
+                          resume_checkpoint_sha256=file_hash(boundary))
         return paths, record
 
     def load_model(path, source):
@@ -472,7 +563,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 search_scheduler_eta_min = float(
                     getattr(config.one_shot, "search_scheduler_eta_min", cfg.scheduler.eta_min)
                 )
-                paths, _ = train_stage(
+                paths, search_record = train_stage(
                     "shared_search",
                     carrier,
                     {},
@@ -484,6 +575,13 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     scheduler_state_policy="new_search_cosine",
                     training_seed=seed,
                 )
+                if search_record["status"] == "paused":
+                    state.update(status="search_paused", next_search_epoch=stop_after_search_epoch + 1,
+                        operational_stop_after_search_epoch=stop_after_search_epoch)
+                    persist()
+                    progress_message("shared_search", f"paused after epoch {stop_after_search_epoch}; "
+                        f"original search horizon={search_epochs}; no selection, export, recovery or test")
+                    return state
                 candidates = []
                 start, end = search_selection_bounds(config)
                 paths = [path for path in paths if start <= int(path.stem.removeprefix("epoch_")) <= end]

@@ -110,6 +110,12 @@ def main(argv=None):
         metavar="PATH",
         help="Reuse a completed search-only run and execute only its configured physical recovery branches",
     )
+    parser.add_argument("--stop-after-search-epoch", type=int, metavar="EPOCH",
+                        help="With --search-only, pause at a complete epoch boundary without changing the configured horizon")
+    parser.add_argument("--search-diagnostics", action="store_true",
+                        help="Record passive input/RNG/forward/gradient/update traces; preserve backend flags")
+    parser.add_argument("--resume-search", type=Path, metavar="PATH",
+                        help="Continue a paused search into a fresh --output with identical config and full optimizer/controller/RNG state")
     parser.add_argument(
         "--skip-test",
         action="store_true",
@@ -124,7 +130,14 @@ def main(argv=None):
         parser.error("--output is for one-shot results; --prepare-reference PATH creates only the reference")
     if args.search_only and args.reuse_search is not None:
         parser.error("--search-only and --reuse-search are mutually exclusive")
+    if args.stop_after_search_epoch is not None and not args.search_only:
+        parser.error("--stop-after-search-epoch requires --search-only")
+    if args.reuse_search is not None and (
+            args.resume_search is not None or args.search_diagnostics or args.stop_after_search_epoch is not None):
+        parser.error("--reuse-search cannot stop, trace or resume search training")
     new_reference = args.from_scratch or args.prepare_reference is not None
+    if new_reference and (args.resume_search is not None or args.stop_after_search_epoch is not None):
+        parser.error("Paused-search diagnostics/continuation require an existing dense reference")
     if new_reference and args.reuse_search is not None:
         parser.error("--reuse-search requires an existing --dense-source; it cannot create a new reference")
     reference_output = ((args.prepare_reference if args.prepare_reference is not None
@@ -132,6 +145,9 @@ def main(argv=None):
                         if new_reference else None)
     config = compose_config(args.config_name, args.override,
                             dense_source=reference_output if new_reference else args.dense_source)
+    if (args.stop_after_search_epoch is not None
+            and not 1 <= args.stop_after_search_epoch < int(config.one_shot.search_epochs)):
+        parser.error("--stop-after-search-epoch must precede the unchanged full search horizon")
     if bool(getattr(config.one_shot, "reuse_search_required", False)) and args.reuse_search is None:
         parser.error(
             f"{args.config_name} requires --reuse-search PATH; "
@@ -170,10 +186,37 @@ def main(argv=None):
                 "recovery_training_epochs_this_command": branches * final_epochs,
                 "total_unique_training_epochs_this_command": branches * final_epochs,
             })
+        if args.stop_after_search_epoch is not None or args.resume_search is not None:
+            consumed = 0
+            if args.resume_search is not None:
+                source_state = json.loads((args.resume_search / "one_shot_state.json").read_text())
+                if source_state.get("status") != "search_paused":
+                    parser.error("--resume-search requires a search_paused source")
+                consumed = source_state["shared_search_ledger"]["global_training_epoch"]
+            search_end = args.stop_after_search_epoch or int(config.one_shot.search_epochs)
+            if search_end <= consumed:
+                parser.error("Operational stop must follow the already consumed prefix")
+            recovery = (0 if args.search_only else
+                        int(config.one_shot.final_epochs) * len(report["execution_policy"]["branch_plan"]))
+            report["mode"] = "search_prefix" if args.stop_after_search_epoch is not None else "resume_paused_search"
+            report["budget"].update({
+                "search_training_epochs_previously_consumed": consumed,
+                "search_training_epochs_this_command": search_end - consumed,
+                "recovery_training_epochs_this_command": recovery,
+                "pruning_training_epochs_this_command": search_end - consumed + recovery,
+                "total_unique_training_epochs_this_command": search_end - consumed + recovery,
+            })
         requested_execution = {
             "search_only": bool(args.search_only),
-            "stops_after": "physical_export" if args.search_only else "configured_recovery",
+            "stops_after": ("complete_search_epoch" if args.stop_after_search_epoch is not None else
+                            "physical_export" if args.search_only else "configured_recovery"),
         }
+        if args.stop_after_search_epoch is not None:
+            requested_execution["stop_after_search_epoch"] = args.stop_after_search_epoch
+        if args.resume_search is not None:
+            requested_execution["resume_search"] = str(args.resume_search.expanduser().resolve())
+        if args.search_diagnostics:
+            requested_execution["search_diagnostics"] = True
         if args.reuse_search is not None:
             requested_execution["reuse_search"] = str(args.reuse_search.expanduser().resolve())
         report["requested_execution"] = requested_execution
@@ -207,12 +250,18 @@ def main(argv=None):
     # Preview/preflight cannot import or accidentally invoke the training engine.
     with phase_progress("runtime", "loading one-shot training code"):
         from net_complexity.training.one_shot_pruning import run_one_shot_pruning
+    execution = {}
     if args.reuse_search is not None:
-        result = run_one_shot_pruning(config, output, reuse_search_from=args.reuse_search)
-    elif args.search_only:
-        result = run_one_shot_pruning(config, output, search_only=True)
-    else:
-        result = run_one_shot_pruning(config, output)
+        execution["reuse_search_from"] = args.reuse_search
+    if args.search_only:
+        execution["search_only"] = True
+    if args.stop_after_search_epoch is not None:
+        execution["stop_after_search_epoch"] = args.stop_after_search_epoch
+    if args.search_diagnostics:
+        execution["search_diagnostics"] = True
+    if args.resume_search is not None:
+        execution["resume_search_from"] = args.resume_search
+    result = run_one_shot_pruning(config, output, **execution)
     clean_clone_state = None
     if args.from_scratch:
         from net_complexity.training.pruning_measurement import write_json

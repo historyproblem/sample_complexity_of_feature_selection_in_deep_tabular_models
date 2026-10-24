@@ -1,0 +1,13 @@
+protocol: resnet50_cifar10_repro20_v1
+search_config: experiment/pruning_v3/resnet50_cifar10_ls0_bn_selection_search
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/resnet50_cifar10_repro20_v1
+repeats: 2
+stop_after_search_epoch: 20
+search_epochs: 60
+recovery_epochs: 90
+soft_drop: 0.00025
+hard_drop: 0.0005
+min_keep_ratio: 0.08
+expected_reference_history_sha256: 47b56d77615d01e9780f7765d10d144ad1f3d6db5897d777687661f4a6f23a76
+expected_initializer_sha256: 82e7232c8832ab6db93d4f551e6a5eb509a5a92089fc820620e05dd80b9b9422

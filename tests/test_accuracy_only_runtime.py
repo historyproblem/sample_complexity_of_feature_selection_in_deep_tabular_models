@@ -130,7 +130,8 @@ def make_run(tmp_path, model, ledger, *, resume=None, initialize_callback=None):
         "batchnorm_recalibration": {"enabled": False},
         "accuracy_guided_stage": {"id": "S0", "config_hash": "config", "reference_hash": "reference"},
         "adaptive_lambda": {"enabled": True, "control_mode": "accuracy_only",
-            "initial_search_warmup": 0, "gap_window": 1, "update_every_search_epochs": 1}},
+            "initial_search_warmup": 0, "gap_window": 1, "update_every_search_epochs": 1,
+            "log_step": math.log(2)}},
         "run_history": {"root_dir": str(tmp_path), "run_name": "actual", "monitor": "valid_accuracy", "mode": "max"}})
     data = TensorDataset(torch.arange(10, dtype=torch.float32).reshape(5, 2)/10,
                          torch.tensor([0, 1, 0, 1, 0]))
