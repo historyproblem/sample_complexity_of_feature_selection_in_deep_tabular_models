@@ -59,6 +59,25 @@ def test_validate_only_never_checks_inputs_or_launches_children(tmp_path, monkey
     assert not output.exists()
 
 
+def test_fresh_clone_error_explains_original_input_transfer_before_gpu_or_training(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Missing reference must stop before GPU preflight or training")
+
+    monkeypatch.setattr(launcher.epoch_split, "_run", forbidden)
+    monkeypatch.setattr(launcher.epoch_split, "_environment_preflight", forbidden)
+    output = tmp_path / "new_run"
+    with pytest.raises(FileNotFoundError) as error:
+        launcher.main(["--reference-output", str(tmp_path / "missing_reference"),
+                       "--output", str(output)])
+    message = str(error.value)
+    for expected in ("global_history.csv", "pilot_state.json", "resolved_config.yaml",
+                     "shared_random_seed42.pt", "resnet50_repro20_inputs.tar.gz",
+                     "--reference-output PATH"):
+        assert expected in message
+    assert "--from-scratch" not in message and "--dense-source" not in message
+    assert not output.exists()
+
+
 def write_prefix(output, *, diverged=False):
     run_dir = output / "shared_search/training/fixture"
     run_dir.mkdir(parents=True)

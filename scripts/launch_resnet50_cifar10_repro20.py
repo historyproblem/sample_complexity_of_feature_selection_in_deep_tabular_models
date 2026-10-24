@@ -96,7 +96,21 @@ def validate_reference(study, reference):
     config = schema.compose_config(
         study["search_config"], curve.threshold_overrides(study), dense_source=reference,
     )
-    inputs = schema.validate_inputs(config)
+    try:
+        inputs = schema.validate_inputs(config)
+    except FileNotFoundError:
+        missing = {key: path for key, path in schema.dense_source_paths(reference).items()
+                   if not Path(path).is_file()}
+        if not missing:
+            raise
+        details = "\n".join(f"  {key}: {path}" for key, path in missing.items())
+        raise FileNotFoundError(
+            "Historical repro20 inputs are missing; git clone does not include run artifacts:\n"
+            + details + "\nRestore the four original files from resnet50_repro20_inputs.tar.gz "
+            "or pass --reference-output PATH to the existing matching reference. "
+            "This diagnostic requires the pinned historical inputs; a newly trained reference "
+            "cannot replace them. See docs/experiments/resnet50_cifar10_repro20.md."
+        ) from None
     require(inputs["status"] == "ready", "Existing reference inputs are not ready")
     for key, expected in (
         ("history_path", study["expected_reference_history_sha256"]),
