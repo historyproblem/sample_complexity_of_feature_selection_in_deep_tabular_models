@@ -49,11 +49,15 @@ EXTRA3_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_extra
 EXTRA3_PROTOCOL = "resnet50_cifar10_ls0_extra3_v1"
 PREBN_REPRO_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_prebn_repro4.yaml"
 PREBN_REPRO_PROTOCOL = "resnet50_cifar10_ls0_prebn_repro4_v1"
+PREBN_REPEAT_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_prebn_repeat8.yaml"
+PREBN_REPEAT_PROTOCOL = "resnet50_cifar10_ls0_prebn_repeat8_v1"
+PREBN_PROTOCOLS = {PREBN_REPRO_PROTOCOL, PREBN_REPEAT_PROTOCOL}
+PREBN_REPEAT_IDS = tuple(f"large_15m_keep001_repeat_{index:02d}" for index in range(1, 9))
 PREBN_REPRO_POINTS = {
     "compact_5m": (5_000_000, 0.015, 0.03),
     "large_15m": (15_000_000, 0.00025, 0.0005),
 }
-PINNED_INITIALIZER_PROTOCOLS = {FULL150_PROTOCOL, EXTRA3_PROTOCOL, PREBN_REPRO_PROTOCOL}
+PINNED_INITIALIZER_PROTOCOLS = {FULL150_PROTOCOL, EXTRA3_PROTOCOL, *PREBN_PROTOCOLS}
 PINNED_REFERENCE_PROTOCOLS = {QUALITY_GRID_PROTOCOL, *PINNED_INITIALIZER_PROTOCOLS}
 KEEP001_PROTOCOLS = {
     KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL, QUALITY_GRID_PROTOCOL,
@@ -74,6 +78,7 @@ PROFILE_COUNTS = {
     FULL150_PROTOCOL: 1,
     EXTRA3_PROTOCOL: 3,
     PREBN_REPRO_PROTOCOL: 4,
+    PREBN_REPEAT_PROTOCOL: 8,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -87,6 +92,7 @@ TEST_DIRECTORIES = {
     FULL150_PROTOCOL: "test_evaluation_exploratory_full150",
     EXTRA3_PROTOCOL: "test_evaluation_exploratory_extra3",
     PREBN_REPRO_PROTOCOL: "test_evaluation_exploratory_prebn_repro4",
+    PREBN_REPEAT_PROTOCOL: "test_evaluation_exploratory_prebn_repeat8",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
@@ -117,7 +123,8 @@ def load_study(path=DEFAULT_CONFIG):
     }
     require(isinstance(study, dict), "Invalid study fields")
     quality_grid = study.get("protocol") == QUALITY_GRID_PROTOCOL
-    prebn_repro = study.get("protocol") == PREBN_REPRO_PROTOCOL
+    prebn_repro = study.get("protocol") in PREBN_PROTOCOLS
+    prebn_repeat = study.get("protocol") == PREBN_REPEAT_PROTOCOL
     pinned_reference = study.get("protocol") in PINNED_REFERENCE_PROTOCOLS
     pinned_initializer = study.get("protocol") in PINNED_INITIALIZER_PROTOCOLS
     if pinned_reference:
@@ -139,7 +146,7 @@ def load_study(path=DEFAULT_CONFIG):
     if prebn_repro:
         max_band = 0.015
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
-    keep_floor = 0.001 if study["protocol"] in KEEP001_PROTOCOLS else 0.08
+    keep_floor = 0.001 if study["protocol"] in KEEP001_PROTOCOLS or prebn_repeat else 0.08
     require(study["min_keep_ratio"] == keep_floor,
             f"This study's keep floor must stay {keep_floor:g}")
     if bn_selection:
@@ -196,9 +203,20 @@ def load_study(path=DEFAULT_CONFIG):
             require(step == "auto" or (type(step) in (int, float)
                     and math.isfinite(step) and step > 0), "Invalid profile log_step")
     if prebn_repro:
-        require({(row["point_id"], row["min_keep_ratio"]) for row in study["profiles"]}
-                == {(point, floor) for point in PREBN_REPRO_POINTS for floor in (0.001, 0.08)},
-                "Reproduction requires both floors for each of the two historical points")
+        if prebn_repeat:
+            require(tuple(row["id"] for row in study["profiles"]) == PREBN_REPEAT_IDS,
+                    "Repeat study requires eight distinct, ordered repeat IDs 01-08")
+            require(all(row["point_id"] == "large_15m" and row["min_keep_ratio"] == 0.001
+                        for row in study["profiles"]),
+                    "Every repeat must preserve the large_15m_keep001 recipe")
+            for phase in ("search", "recovery"):
+                require(study[f"{phase}_config"]
+                        == f"experiment/pruning_v3/resnet50_cifar10_ls0_prebn_repro4_{phase}",
+                        "Repeats must reuse the original pre-BN phase configs")
+        else:
+            require({(row["point_id"], row["min_keep_ratio"]) for row in study["profiles"]}
+                    == {(point, floor) for point in PREBN_REPRO_POINTS for floor in (0.001, 0.08)},
+                    "Reproduction requires both floors for each of the two historical points")
         for row in study["profiles"]:
             require((row["target_parameters"], row["soft_drop"], row["hard_drop"])
                     == PREBN_REPRO_POINTS[row["point_id"]],
@@ -266,7 +284,7 @@ def threshold_overrides(row):
 
 def profile_policy(study, row):
     """Keep the selected channel floor consistent through search, recovery and resume."""
-    if study["protocol"] == PREBN_REPRO_PROTOCOL:
+    if study["protocol"] in PREBN_PROTOCOLS:
         return {**study, "min_keep_ratio": row["min_keep_ratio"]}
     return study
 
@@ -286,7 +304,7 @@ def validate_recipe(config, study, row, phase):
     require(config.one_shot.get("search_selection_bn_calibration_batches", 0)
             == selection_bn_batches,
             "Search checkpoint BN-calibration selection policy changed")
-    if study["protocol"] in BN_SELECTION_PROTOCOLS or study["protocol"] == PREBN_REPRO_PROTOCOL:
+    if study["protocol"] in BN_SELECTION_PROTOCOLS or study["protocol"] in PREBN_PROTOCOLS:
         require("search_selection_bn_calibration_batches" in config.one_shot,
                 "The recipe must explicitly declare its candidate BN selection policy")
     criterion = dict(config.model.criterion)
@@ -375,7 +393,7 @@ def validate_curve_configs(study):
                 profile["target_parameters"] >= floor if "target_parameters" in profile else None
             ),
         }
-        if study["protocol"] == PREBN_REPRO_PROTOCOL:
+        if study["protocol"] in PREBN_PROTOCOLS:
             row.update(fallback_epoch_start=31, fallback_epoch_end=60)
         if study["protocol"] in PINNED_REFERENCE_PROTOCOLS:
             reference = Decimal(str(study["reference_final_validation_accuracy"]))
@@ -453,7 +471,7 @@ def validate_saved_selection_bn(run_dir, study):
     """Reject saved selections produced with a different candidate-scoring policy."""
     batches = study.get("search_selection_bn_calibration_batches", 0)
     if not batches:
-        if study["protocol"] == PREBN_REPRO_PROTOCOL:
+        if study["protocol"] in PREBN_PROTOCOLS:
             selection = epoch_split._read_json(Path(run_dir) / "selection.json")
             trace = selection.get("trace", {})
             predictor = "dependency_safe_all_physical_survivors_open"
@@ -614,7 +632,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
-    if study["protocol"] == PREBN_REPRO_PROTOCOL:
+    if study["protocol"] in PREBN_PROTOCOLS:
         preflight.update(
             theoretical_parameter_floors={
                 str(row["min_keep_ratio"]): row["theoretical_parameter_floor"] for row in rows
@@ -628,6 +646,12 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
             recovery_bn_calibration_batches=200,
             ordinary_training_bn_updates=True,
         )
+    if study["protocol"] == PREBN_REPEAT_PROTOCOL:
+        preflight["repeats"] = {
+            "count": 8, "seed": 42, "initializer": "same pinned zero-epoch weights",
+            "fresh_search_per_repeat": True, "shared_search_across_repeats": False,
+            "scope": "same-config, same-seed reproducibility; not a multi-seed estimate",
+        }
     if study["protocol"] in BN_SELECTION_PROTOCOLS:
         batches = study["search_selection_bn_calibration_batches"]
         candidates = study["search_selection_last_epochs"]

@@ -23,6 +23,12 @@
   recovery imports the surviving weights before its train-only BN200 pass.
   Ordinary training BN remains enabled. Sizes near 5M/15M are planning labels,
   not constraints or guarantees. Do not introduce the proposed +1% size rule.
+- The user-authorized prebn_repeat8 study (2026-10-27) runs the exact
+  prebn_repro4/large_15m_keep001 recipe eight times, each with a fresh 60-epoch
+  search and 90-epoch recovery. Keep seed42 and the pinned initializer for every
+  repeat; do not vary seeds or reuse another repeat's search. Selection remains
+  pre-BN on epochs 31-60, floor0.001 and soft/hard0.00025/0.0005. This measures
+  reproducibility at one seed, not variation across seeds.
 - Adaptive lambda is a core requirement. Do not disable it or replace it with
   fixed-lambda experiments without explicit user approval. The historical fixed
   pilot remains only for reproduction, not the default next experiment.
