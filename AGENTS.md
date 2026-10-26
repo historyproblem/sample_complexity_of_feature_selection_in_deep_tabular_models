@@ -15,6 +15,14 @@
   threshold (which stays 0.5). For the 60-epoch search, both feasible and fallback
   selection use only epochs 31-60. New follow-ups score each physical candidate
   after 200 train-only BN batches; recovery must preserve this selection policy.
+- The user-authorized prebn_repro4 study (2026-10-26) restores pre-BN selection
+  on epochs 31-60: minimum physical size among feasible candidates, or best
+  validation in that window if none is feasible. It crosses the historical
+  soft/hard pairs 0.00025/0.0005 and 0.015/0.03 with floors 0.001/0.08.
+  Extra BN calibration is zero throughout search, including selected export;
+  recovery imports the surviving weights before its train-only BN200 pass.
+  Ordinary training BN remains enabled. Sizes near 5M/15M are planning labels,
+  not constraints or guarantees. Do not introduce the proposed +1% size rule.
 - Adaptive lambda is a core requirement. Do not disable it or replace it with
   fixed-lambda experiments without explicit user approval. The historical fixed
   pilot remains only for reproduction, not the default next experiment.

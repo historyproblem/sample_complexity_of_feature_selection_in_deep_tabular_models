@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/resnet50_cifar10_ls0_curve7_recovery
+  - _self_
+
+# Import the selected surviving weights, then calibrate physical BN using train
+# batches before the first recovery optimizer step. Do not reselect checkpoints.
+accuracy_guided:
+  guard:
+    train_bn_calibration_batches: 200
+
+one_shot:
+  search_selection_last_epochs: 30
+  search_selection_bn_calibration_batches: 0
+
+mlflow:
+  run_name: resnet50_cifar10_ls0_prebn_repro4_recovery
+run_history:
+  run_name: resnet50_cifar10_ls0_prebn_repro4_recovery

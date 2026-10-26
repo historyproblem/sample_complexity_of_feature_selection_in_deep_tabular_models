@@ -1,7 +1,8 @@
 """Run independent LS=0 ResNet50/CIFAR10 adaptive-lambda 60/90 pairs.
 
 Profiles vary validation-accuracy tolerances and, in the overnight study, the
-adaptive controller's log step. Planning sizes never enter checkpoint selection.
+adaptive controller's log step. The pre-BN reproduction crosses two historical
+tolerance pairs with two channel floors. Planning sizes never enter selection.
 The complete validation table is locked
 before any frozen official-test inference. A failed profile is recorded without
 losing the other profiles' results or silently restarting partial training.
@@ -46,12 +47,20 @@ FULL150_PROTOCOL = "resnet50_cifar10_ls0_full150_v1"
 FULL150_INITIALIZER_HASH = "82e7232c8832ab6db93d4f551e6a5eb509a5a92089fc820620e05dd80b9b9422"
 EXTRA3_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_extra3.yaml"
 EXTRA3_PROTOCOL = "resnet50_cifar10_ls0_extra3_v1"
-PINNED_INITIALIZER_PROTOCOLS = {FULL150_PROTOCOL, EXTRA3_PROTOCOL}
+PREBN_REPRO_CONFIG = ROOT / "configs/experiment/pruning_v3/resnet50_cifar10_ls0_prebn_repro4.yaml"
+PREBN_REPRO_PROTOCOL = "resnet50_cifar10_ls0_prebn_repro4_v1"
+PREBN_REPRO_POINTS = {
+    "compact_5m": (5_000_000, 0.015, 0.03),
+    "large_15m": (15_000_000, 0.00025, 0.0005),
+}
+PINNED_INITIALIZER_PROTOCOLS = {FULL150_PROTOCOL, EXTRA3_PROTOCOL, PREBN_REPRO_PROTOCOL}
 PINNED_REFERENCE_PROTOCOLS = {QUALITY_GRID_PROTOCOL, *PINNED_INITIALIZER_PROTOCOLS}
 KEEP001_PROTOCOLS = {
     KEEP001_TARGET4P5M_PROTOCOL, KEEP001_TARGET14M_PROTOCOL, QUALITY_GRID_PROTOCOL,
 }
-BN_SELECTION_PROTOCOLS = {BN_SELECTION_PROTOCOL, *PINNED_INITIALIZER_PROTOCOLS, *KEEP001_PROTOCOLS}
+BN_SELECTION_PROTOCOLS = {
+    BN_SELECTION_PROTOCOL, FULL150_PROTOCOL, EXTRA3_PROTOCOL, *KEEP001_PROTOCOLS,
+}
 NIGHT_PROTOCOLS = {NIGHT_PROTOCOL, BN_SELECTION_PROTOCOL}
 PROFILE_COUNTS = {
     "resnet50_cifar10_ls0_curve7_v2": 7,
@@ -64,6 +73,7 @@ PROFILE_COUNTS = {
     QUALITY_GRID_PROTOCOL: 8,
     FULL150_PROTOCOL: 1,
     EXTRA3_PROTOCOL: 3,
+    PREBN_REPRO_PROTOCOL: 4,
 }
 TEST_DIRECTORIES = {
     "resnet50_cifar10_ls0_curve7_v2": "test_evaluation_exploratory_curve7",
@@ -76,15 +86,17 @@ TEST_DIRECTORIES = {
     QUALITY_GRID_PROTOCOL: "test_evaluation_exploratory_keep001_quarterpp_grid8",
     FULL150_PROTOCOL: "test_evaluation_exploratory_full150",
     EXTRA3_PROTOCOL: "test_evaluation_exploratory_extra3",
+    PREBN_REPRO_PROTOCOL: "test_evaluation_exploratory_prebn_repro4",
 }
 SEARCH_EPOCHS, RECOVERY_EPOCHS = 60, 90
 FIELDS = (
-    "id", "status", "error", "target_parameters", "physical_parameters",
+    "id", "point_id", "status", "error", "target_parameters", "physical_parameters",
     "theoretical_parameter_floor", "target_architecturally_reachable",
     "soft_drop", "hard_drop", "resolved_log_step", "min_keep_ratio", "label_smoothing", "split",
     "reference_final_validation_accuracy", "required_final_validation_accuracy",
     "soft_final_validation_accuracy",
     "search_selection_epoch_start", "search_selection_epoch_end",
+    "fallback_epoch_start", "fallback_epoch_end",
     "search_selection_bn_calibration_batches",
     "validation_accuracy", "validation_ce_loss", "quality_feasible",
     "selected_final_epoch", "test_accuracy", "test_ce_loss", "search_dir", "recovery_dir",
@@ -105,6 +117,7 @@ def load_study(path=DEFAULT_CONFIG):
     }
     require(isinstance(study, dict), "Invalid study fields")
     quality_grid = study.get("protocol") == QUALITY_GRID_PROTOCOL
+    prebn_repro = study.get("protocol") == PREBN_REPRO_PROTOCOL
     pinned_reference = study.get("protocol") in PINNED_REFERENCE_PROTOCOLS
     pinned_initializer = study.get("protocol") in PINNED_INITIALIZER_PROTOCOLS
     if pinned_reference:
@@ -116,13 +129,15 @@ def load_study(path=DEFAULT_CONFIG):
     bn_selection = study.get("protocol") in BN_SELECTION_PROTOCOLS
     if night:
         expected.add("time_budget")
-    if bn_selection:
+    if bn_selection or prebn_repro:
         expected.add("search_selection_bn_calibration_batches")
     require(set(study) == expected, "Invalid study fields")
     require(study["protocol"] in PROFILE_COUNTS, "Unexpected protocol")
     explicit_thresholds = study["protocol"] != "resnet50_cifar10_ls0_curve7_v2"
     max_band = (0.01 if night or study["protocol"] == "resnet50_cifar10_ls0_curve3_moderate_v1"
                 else 0.005)
+    if prebn_repro:
+        max_band = 0.015
     require(study["label_smoothing"] == 0, "label_smoothing must stay zero")
     keep_floor = 0.001 if study["protocol"] in KEEP001_PROTOCOLS else 0.08
     require(study["min_keep_ratio"] == keep_floor,
@@ -131,6 +146,10 @@ def load_study(path=DEFAULT_CONFIG):
         require(type(study["search_selection_bn_calibration_batches"]) is int
                 and study["search_selection_bn_calibration_batches"] == 200,
                 "The BN-selection study requires 200 train-only batches per candidate")
+    if prebn_repro:
+        require(type(study["search_selection_bn_calibration_batches"]) is int
+                and study["search_selection_bn_calibration_batches"] == 0,
+                "Historical reproduction requires candidate BN calibration to stay off")
     require(type(study["search_selection_last_epochs"]) is int
             and study["search_selection_last_epochs"] == 30,
             "Search checkpoint selection must stay inside epochs 31-60")
@@ -140,8 +159,10 @@ def load_study(path=DEFAULT_CONFIG):
     identifiers = set()
     for row in study["profiles"]:
         fields = {"id", "hard_drop"}
-        if not pinned_reference:
+        if not pinned_reference or prebn_repro:
             fields.add("target_parameters")
+        if prebn_repro:
+            fields.update({"point_id", "min_keep_ratio"})
         if explicit_thresholds:
             fields.add("soft_drop")
         if night:
@@ -152,9 +173,15 @@ def load_study(path=DEFAULT_CONFIG):
                 "Profile ID must be a simple directory name")
         require(identifier not in identifiers, "Duplicate profile ID")
         identifiers.add(identifier)
-        if not pinned_reference:
+        if not pinned_reference or prebn_repro:
             require(type(row["target_parameters"]) is int and row["target_parameters"] > 0,
                     "Planning size must be a positive integer")
+        if prebn_repro:
+            require(isinstance(row["point_id"], str) and row["point_id"] in PREBN_REPRO_POINTS,
+                    "Unknown historical reproduction point")
+            require(type(row["min_keep_ratio"]) in (int, float)
+                    and row["min_keep_ratio"] in (0.001, 0.08),
+                    "Historical reproduction requires channel floors 0.001 and 0.08")
         require(type(row["hard_drop"]) in (int, float)
                 and math.isfinite(row["hard_drop"]) and 0 < row["hard_drop"] < 1,
                 "Invalid hard_drop")
@@ -168,6 +195,14 @@ def load_study(path=DEFAULT_CONFIG):
             step = row["log_step"]
             require(step == "auto" or (type(step) in (int, float)
                     and math.isfinite(step) and step > 0), "Invalid profile log_step")
+    if prebn_repro:
+        require({(row["point_id"], row["min_keep_ratio"]) for row in study["profiles"]}
+                == {(point, floor) for point in PREBN_REPRO_POINTS for floor in (0.001, 0.08)},
+                "Reproduction requires both floors for each of the two historical points")
+        for row in study["profiles"]:
+            require((row["target_parameters"], row["soft_drop"], row["hard_drop"])
+                    == PREBN_REPRO_POINTS[row["point_id"]],
+                    "Historical reproduction thresholds and planning sizes must stay fixed")
     if pinned_reference:
         require(study["reference_final_validation_accuracy"] == 0.9414,
                 "Accuracy bands require the 94.14% final validation reference")
@@ -224,13 +259,23 @@ def threshold_overrides(row):
     ]
     if "log_step" in row:
         overrides.append(f"training_arguments.adaptive_lambda.log_step={row['log_step']}")
+    if "point_id" in row:
+        overrides.append(f"accuracy_guided.eligibility.min_keep_ratio={row['min_keep_ratio']:.12g}")
     return overrides
+
+
+def profile_policy(study, row):
+    """Keep the selected channel floor consistent through search, recovery and resume."""
+    if study["protocol"] == PREBN_REPRO_PROTOCOL:
+        return {**study, "min_keep_ratio": row["min_keep_ratio"]}
+    return study
 
 
 def validate_recipe(config, study, row, phase):
     """Validate both fresh composed configs and saved configs used by resume."""
     from net_complexity.training import one_shot_pruning_config as schema
 
+    study = profile_policy(study, row)
     require(schema.validate_config(config) == 150, "Pair must have a 150-epoch budget")
     require(config.one_shot.search_epochs == 60 and config.one_shot.final_epochs == 90,
             "The common split must stay 60/90")
@@ -241,9 +286,9 @@ def validate_recipe(config, study, row, phase):
     require(config.one_shot.get("search_selection_bn_calibration_batches", 0)
             == selection_bn_batches,
             "Search checkpoint BN-calibration selection policy changed")
-    if study["protocol"] in BN_SELECTION_PROTOCOLS:
+    if study["protocol"] in BN_SELECTION_PROTOCOLS or study["protocol"] == PREBN_REPRO_PROTOCOL:
         require("search_selection_bn_calibration_batches" in config.one_shot,
-                "The BN-selection recipe must explicitly declare its selection policy")
+                "The recipe must explicitly declare its candidate BN selection policy")
     criterion = dict(config.model.criterion)
     require(criterion.pop("label_smoothing", 0) == 0
             and criterion == {"_target_": "torch.nn.CrossEntropyLoss"},
@@ -292,21 +337,25 @@ def validate_curve_configs(study):
     from net_complexity.training.engine import _resolve_adaptive_lambda_log_step_init
     from omegaconf import OmegaConf
 
-    rows, floor = [], None
+    rows, floors, model = [], {}, None
     for profile in study["profiles"]:
+        policy = profile_policy(study, profile)
         configs = {}
         for phase in ("search", "recovery"):
             config = schema.compose_config(study[f"{phase}_config"], threshold_overrides(profile))
             validate_recipe(config, study, profile, phase)
             configs[phase] = config
-        if floor is None:
-            model = instantiate(configs["search"].model)
+        keep_ratio = policy["min_keep_ratio"]
+        if keep_ratio not in floors:
+            if model is None:
+                model = instantiate(configs["search"].model)
             mask = {}
             for name, gate in gates(model).items():
                 width = int(gate.initial_channels)
-                keep = max(1, math.ceil(width * study["min_keep_ratio"]))
+                keep = max(1, math.ceil(width * keep_ratio))
                 mask[name] = list(range(width - keep))
-            floor = int(PhysicalBudget(model, mask).total())
+            floors[keep_ratio] = int(PhysicalBudget(model, mask).total())
+        floor = floors[keep_ratio]
         step = _resolve_adaptive_lambda_log_step_init(
             OmegaConf.create({"num_epochs": SEARCH_EPOCHS}),
             OmegaConf.create({"log_step_init": profile.get("log_step", "auto")}),
@@ -314,7 +363,7 @@ def validate_curve_configs(study):
         )
         row = {
             **profile, "soft_drop": profile_soft_drop(profile),
-            "min_keep_ratio": study["min_keep_ratio"], "label_smoothing": 0.0,
+            "min_keep_ratio": keep_ratio, "label_smoothing": 0.0,
             "split": "60/90", "resolved_log_step": step,
             "search_selection_epoch_start": SEARCH_EPOCHS - study["search_selection_last_epochs"] + 1,
             "search_selection_epoch_end": SEARCH_EPOCHS,
@@ -326,6 +375,8 @@ def validate_curve_configs(study):
                 profile["target_parameters"] >= floor if "target_parameters" in profile else None
             ),
         }
+        if study["protocol"] == PREBN_REPRO_PROTOCOL:
+            row.update(fallback_epoch_start=31, fallback_epoch_end=60)
         if study["protocol"] in PINNED_REFERENCE_PROTOCOLS:
             reference = Decimal(str(study["reference_final_validation_accuracy"]))
             row.update({
@@ -399,9 +450,32 @@ def write_table(path, rows, results, failures, tests):
 
 
 def validate_saved_selection_bn(run_dir, study):
-    """Do not label an old pre-BN selection as a calibrated study result."""
+    """Reject saved selections produced with a different candidate-scoring policy."""
     batches = study.get("search_selection_bn_calibration_batches", 0)
     if not batches:
+        if study["protocol"] == PREBN_REPRO_PROTOCOL:
+            selection = epoch_split._read_json(Path(run_dir) / "selection.json")
+            trace = selection.get("trace", {})
+            predictor = "dependency_safe_all_physical_survivors_open"
+            calibration = selection.get("selection_bn_calibration", {})
+            require(selection.get("selection_predictor") == predictor
+                    and trace.get("selection_predictor") == predictor
+                    and trace.get("bn_calibration_batches", 0) == 0
+                    and calibration.get("requested_batches", 0) == 0
+                    and calibration.get("batches", 0) == 0,
+                    "Saved search selection does not match the pre-BN reproduction policy")
+            require(trace.get("candidate_epoch_start") == 31
+                    and trace.get("candidate_epoch_end") == SEARCH_EPOCHS
+                    and 31 <= selection.get("selected_epoch", -1) <= SEARCH_EPOCHS,
+                    "Saved search selection must use epochs 31-60")
+            expected_policy = ("best_validation_last_epochs_fallback" if trace.get("fallback_used")
+                               else "best_feasible_compact")
+            require(selection.get("policy") == trace.get("policy") == expected_policy,
+                    "Saved search must preserve the historical minimum-size / fallback rule")
+            if trace.get("fallback_used"):
+                require(trace.get("fallback_last_epochs") == 30
+                        and trace.get("fallback_epoch_start") == 31,
+                        "Saved fallback selection must use epochs 31-60")
         return
     selection = epoch_split._read_json(Path(run_dir) / "selection.json")
     require(selection.get("selection_predictor") == "physical_after_train_bn_calibration",
@@ -427,6 +501,7 @@ def read_search_result(run_dir, study):
     """Verify the calibrated export without changing legacy artifact readers."""
     batches = study.get("search_selection_bn_calibration_batches", 0)
     if not batches:
+        validate_saved_selection_bn(run_dir, study)
         return epoch_split._search_result(run_dir, SEARCH_EPOCHS, RECOVERY_EPOCHS)
     run_dir = Path(run_dir)
     state = epoch_split._read_json(run_dir / "one_shot_state.json")
@@ -473,6 +548,7 @@ def read_search_result(run_dir, study):
 def run_pair(study, row, reference, output, args):
     from omegaconf import OmegaConf
 
+    study = profile_policy(study, row)
     search_dir, recovery_dir = output / f"search_{row['id']}", output / f"recovery_{row['id']}"
     require(args.resume_completed or not (search_dir.exists() or recovery_dir.exists()),
             "Existing profile output; use --resume-completed to verify/reuse it")
@@ -524,7 +600,8 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
     args = parser.parse_args(argv)
     study = load_study(args.config)
     rows = validate_curve_configs(study)
-    floor = rows[0]["theoretical_parameter_floor"]
+    floor_values = {row["theoretical_parameter_floor"] for row in rows}
+    floor = next(iter(floor_values)) if len(floor_values) == 1 else None
     preflight = {
         "protocol": study["protocol"], "profiles": rows,
         "requested_min_parameters": study.get("requested_min_parameters"),
@@ -537,6 +614,20 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG):
         "dense_reference_training": "none; reuse immutable metadata and zero-epoch initializer",
         "test_policy": "lock all validation rows before frozen official test; exploratory comparison",
     }
+    if study["protocol"] == PREBN_REPRO_PROTOCOL:
+        preflight.update(
+            theoretical_parameter_floors={
+                str(row["min_keep_ratio"]): row["theoretical_parameter_floor"] for row in rows
+            },
+            target_parameters_role="historical planning labels; never used to select or reject a model",
+            parameter_count_guaranteed=False,
+            search_selection_policy="minimum physical parameters among feasible epochs 31-60",
+            no_feasible_fallback="best validation among epochs 31-60",
+            search_selection_bn_calibration_batches=0,
+            selected_search_export_bn_calibration_batches=0,
+            recovery_bn_calibration_batches=200,
+            ordinary_training_bn_updates=True,
+        )
     if study["protocol"] in BN_SELECTION_PROTOCOLS:
         batches = study["search_selection_bn_calibration_batches"]
         candidates = study["search_selection_last_epochs"]

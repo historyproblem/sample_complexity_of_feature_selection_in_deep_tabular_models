@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/resnet50_cifar10_ls0_curve7_search
+  - _self_
+
+# No extra BN pass during search, candidate scoring or selected search export.
+# Ordinary BatchNorm updates inside training remain unchanged.
+accuracy_guided:
+  guard:
+    train_bn_calibration_batches: 0
+
+one_shot:
+  search_selection_last_epochs: 30
+  search_selection_bn_calibration_batches: 0
+
+mlflow:
+  run_name: resnet50_cifar10_ls0_prebn_repro4_search
+run_history:
+  run_name: resnet50_cifar10_ls0_prebn_repro4_search
