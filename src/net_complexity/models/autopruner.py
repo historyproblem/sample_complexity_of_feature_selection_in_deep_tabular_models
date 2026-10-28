@@ -697,7 +697,14 @@ def load_autopruner_pretrained_backbone(
 ) -> dict[str, Any]:
     """Load matching deployment parameters from a project checkpoint."""
 
-    checkpoint = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=True)
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"AutoPruner pretrained checkpoint not found: {checkpoint_path}. "
+            "Restore the trained baseline or set model.pretrained_checkpoint "
+            "to its existing path."
+        )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     raw_state = (
         checkpoint.get("model_state_dict", checkpoint)
         if isinstance(checkpoint, Mapping)
