@@ -1,0 +1,79 @@
+defaults:
+  - tune_autopruner_resnet50_cifar10_full_150ep
+  - override /optimizer: adamw
+  - _self_
+
+# Reuse the original trained CIFAR-10 baseline and six-ratio 150-epoch grid.
+# The epoch hook sets the effective LR, so keep it linked to the optimizer.
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+    label_smoothing: 0.0
+  pruning_lr: ${optimizer.lr}
+
+optimizer:
+  lr: 0.001
+
+mlflow:
+  run_name: autopruner_resnet50_cifar10_150ep_adamw
+  tags:
+    recipe: autopruner_full_150ep_adamw
+    optimizer: AdamW
+
+tuning:
+  study_name: autopruner_full_resnet50_cifar10_keep_03_09_150ep_adamw
+  points:
+    - model.backbone.target_keep_ratio: 0.3
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_03_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_03_adamw
+      mlflow.tags.target_keep_ratio: "0.3"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "true"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.5
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_05_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_05_adamw
+      mlflow.tags.target_keep_ratio: "0.5"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "true"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.6
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_06_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_06_adamw
+      mlflow.tags.target_keep_ratio: "0.6"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.7
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_07_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_07_adamw
+      mlflow.tags.target_keep_ratio: "0.7"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.8
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_08_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_08_adamw
+      mlflow.tags.target_keep_ratio: "0.8"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
+    - model.backbone.target_keep_ratio: 0.9
+      mlflow.run_name: autopruner_resnet50_cifar10_keep_09_150ep_adamw
+      mlflow.tags.recipe: autopruner_full_150ep_keep_09_adamw
+      mlflow.tags.target_keep_ratio: "0.9"
+      mlflow.tags.training_epochs: "150"
+      mlflow.tags.full_restart: "true"
+      mlflow.tags.author_training_hyperparameters: "false"
+      mlflow.tags.author_reported_keep_ratio: "false"
+      mlflow.tags.repeats_per_ratio: "${tuning.repeats_per_trial}"
