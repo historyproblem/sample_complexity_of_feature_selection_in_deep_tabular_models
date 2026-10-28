@@ -1,0 +1,50 @@
+defaults:
+  - tune_autopruner_mobilenetv2_tinyimagenet200_params_20_25
+  - override /optimizer: adamw
+  - _self_
+
+model:
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+    label_smoothing: 0.0
+  # The AutoPruner epoch hook owns both search and fine-tuning LR schedules.
+  pruning_lr: ${optimizer.lr}
+
+optimizer:
+  lr: 0.001
+
+mlflow:
+  run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_adamw
+  tags:
+    recipe: autopruner_mobilenetv2_tinyimagenet200_params_20_25_adamw
+    variant: mobilenet_adamw_lr001_alpha_auto_lambda_entropy03
+    optimizer: AdamW
+
+tuning:
+  study_name: autopruner_mobilenetv2_tinyimagenet200_params_20_25_adamw
+  points:
+    - model.backbone.target_keep_ratio: 0.1809
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1000052_adamw
+      mlflow.tags.target_keep_ratio: "0.1809"
+      mlflow.tags.target_parameters: "1000000"
+      mlflow.tags.expected_deployment_parameters: "1000052"
+    - model.backbone.target_keep_ratio: 0.3469
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1300045_adamw
+      mlflow.tags.target_keep_ratio: "0.3469"
+      mlflow.tags.target_parameters: "1300000"
+      mlflow.tags.expected_deployment_parameters: "1300045"
+    - model.backbone.target_keep_ratio: 0.5125
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1599096_adamw
+      mlflow.tags.target_keep_ratio: "0.5125"
+      mlflow.tags.target_parameters: "1600000"
+      mlflow.tags.expected_deployment_parameters: "1599096"
+    - model.backbone.target_keep_ratio: 0.6792
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_1900248_adamw
+      mlflow.tags.target_keep_ratio: "0.6792"
+      mlflow.tags.target_parameters: "1900000"
+      mlflow.tags.expected_deployment_parameters: "1900248"
+    - model.backbone.target_keep_ratio: 0.8452
+      mlflow.run_name: autopruner_mobilenetv2_tinyimagenet200_20_25_params_2200241_adamw
+      mlflow.tags.target_keep_ratio: "0.8452"
+      mlflow.tags.target_parameters: "2200000"
+      mlflow.tags.expected_deployment_parameters: "2200241"
