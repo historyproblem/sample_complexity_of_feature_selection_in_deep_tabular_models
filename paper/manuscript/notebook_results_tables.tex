@@ -1,0 +1,92 @@
+% Notebook values: 37 literal rows plus four exact matched-Run-ID rows.
+\begin{table}[t]
+  \caption{Seven one-iteration MobileNetV2 models from the additional
+    notebook. Settings reproduce \texttt{thr}/\texttt{max\_param}
+    in run names; the latter is not the achieved parameter share.}
+  \label{tab:mbv2-one-iteration}
+  \centering
+  \small
+  \begin{tabular}{@{}rrrr@{}}
+    \toprule
+    \texttt{thr} & \texttt{max\_param} & Params (M) & Test (\%) \\
+    \midrule
+    0.99 & 0.6 & 1.262 & 60.7 \\
+    0.99 & 0.5 & 1.436 & 63.5 \\
+    0.99 & 0.4 & 1.624 & 65.7 \\
+    0.95 & 0.4 & 1.745 & 67.3 \\
+    0.95 & 0.3 & 1.813 & 68.4 \\
+    0.95 & 0.2 & 2.013 & 69.5 \\
+    0.95 & 0.1 & 2.235 & 71.1 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table*}[t]
+  \caption{Additional ResNet-50 trajectories. Channels: run-name
+    settings \texttt{thr0.7}, \texttt{thr0.1} and
+    \texttt{param\_fraction\_0.05}; blocks: \texttt{thr0.7}.
+    Cycles retain zero-based source indices. Final denotes the
+    separately recorded final model. Channel accuracies are supplied
+    to 0.1 percentage point; block values retain historical aggregation.
+    Rows are checkpoints, not independent repeats.}
+  \label{tab:resnet-notebook-trajectories}
+  \centering
+  \small
+  \begin{tabular}{@{}lrrrrrr@{}}
+    \toprule
+    & \multicolumn{2}{c}{Channels: \texttt{thr0.7}}
+    & \multicolumn{2}{c}{Channels: \texttt{thr0.1}}
+    & \multicolumn{2}{c}{Channels: fraction 0.05} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+    Cycle & Params (M) & Test (\%) & Params (M) & Test (\%) & Params (M) & Test (\%) \\
+    \midrule
+    0 & 19.680 & 93.8 & 19.673 & 93.2 & 22.427 & 94.0 \\
+    1 & 16.470 & 93.3 & 16.376 & 93.4 & 21.418 & 93.4 \\
+    2 & 13.404 & 93.5 & 13.275 & 93.7 & 20.514 & 93.6 \\
+    3 & 11.845 & 93.3 & 10.856 & 93.3 & 19.746 & 93.2 \\
+    4 & 9.881 & 93.0 & 9.233 & 93.4 & 19.097 & 93.3 \\
+    5 & 8.917 & 92.8 & 8.426 & 92.9 & 18.508 & 93.4 \\
+    6 & 8.214 & 93.0 & 8.141 & 93.3 & 17.846 & 93.4 \\
+    7 & 5.325 & 92.1 & 7.718 & 92.9 & 16.887 & 93.6 \\
+    8 & 3.224 & 88.1 & 7.418 & 92.8 & 16.082 & 93.4 \\
+    Final & 3.220 & 87.8 & 5.787 & 91.4 & 15.475 & 93.2 \\
+    \midrule
+    \multicolumn{7}{l}{\textit{Block pruning:} \texttt{thr0.7}} \\
+    0 & 18.974 & 93.27 & & & & \\
+    1 & 16.384 & 92.81 & & & & \\
+    2 & 15.266 & 92.96 & & & & \\
+    Final & 15.266 & 92.80 & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{table}[t]
+  \caption{Earlier comparison series preserved from the additional
+    notebook, separately from the main benchmark series.
+    MobileNetV2 Stochastic Depth (SD): reported expected active
+    counts; all 2.480M weights remain stored. ResNet-50 DepGraph:
+    reported physical counts and target FLOPs speedups.
+    DepGraph values retain only the precision of the saved notebook
+    display. Their executed protocols are not established here.}
+  \label{tab:notebook-historical-comparators}
+  \centering
+  \small
+  \begin{tabular}{@{}lrr@{}}
+    \toprule
+    Series / setting & Params (M) & Test (\%) \\
+    \midrule
+    \multicolumn{3}{l}{\textit{MobileNetV2 / TinyImageNet-200 (SD)}} \\
+    SD & 1.605 & 64.7 \\
+    SD & 1.700 & 65.3 \\
+    SD & 2.000 & 69.0 \\
+    SD & 2.200 & 70.5 \\
+    SD & 2.480 & 70.9 \\
+    \midrule
+    \multicolumn{3}{l}{\textit{ResNet-50 / CIFAR-10 (DepGraph)}} \\
+    $\times5$ & 4.581 & 92.68 \\
+    $\times2$ & 11.278 & 93.43 \\
+    $\times10$ & 2.247 & 92.07 \\
+    $\times1.5$ & 15.015 & 93.37 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
