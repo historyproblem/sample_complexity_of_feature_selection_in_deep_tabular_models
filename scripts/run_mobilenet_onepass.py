@@ -67,7 +67,7 @@ def build_plan(
         )
         directory = repo_root / "outputs/runs" / config_name / name
         command = [
-            ".venv/bin/python", "src/net_complexity/cli/cyclic_train.py",
+            ".venv/bin/python", "-u", "src/net_complexity/cli/cyclic_train.py",
             "--config-path", str(repo_root / "configs"),
             "--config-name", config_name,
             "training_arguments.adaptive_lambda.baseline_history_dir="

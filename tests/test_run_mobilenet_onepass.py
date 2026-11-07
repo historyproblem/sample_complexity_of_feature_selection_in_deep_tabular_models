@@ -66,6 +66,17 @@ def test_gap_experiments_have_separate_training_outputs():
     assert "soft0.06_hard0.07" in str(new.directory)
 
 
+@pytest.mark.parametrize("config_name", list(MODULE.EXPERIMENTS))
+def test_all_training_children_use_unbuffered_output(config_name):
+    stages = MODULE.build_plan(
+        SCRIPT_PATH.parents[1], list(MODULE.DEFAULT_CAPS), config_name=config_name,
+    )
+    assert len(stages) == len(MODULE.DEFAULT_CAPS)
+    assert all(stage.command[:3] == [
+        ".venv/bin/python", "-u", "src/net_complexity/cli/cyclic_train.py",
+    ] for stage in stages)
+
+
 def test_existing_partial_stage_is_not_restarted(tmp_path):
     stage = MODULE.Stage("onepass", tmp_path / "profile", [], "expected")
     stage.directory.mkdir()
