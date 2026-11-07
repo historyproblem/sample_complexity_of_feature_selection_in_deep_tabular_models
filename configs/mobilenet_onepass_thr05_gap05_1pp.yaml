@@ -2,7 +2,7 @@
 # User selected threshold 0.5 and adaptive-lambda gaps 0.5/1 percentage points.
 # Keeps 30 search + 45 recovery epochs; original reconstruction saved separately.
 # Published with the compatible MobileNet/cyclic-channel implementation.
-# scripts/run_mobilenet_onepass.py prepares and supplies the shared dense reference.
+# scripts/run_mobilenet_onepass.py imports the user-selected archived reference.
 # max_param is an additive removal-cost cap, not a target retained fraction.
 dataloaders:
   _target_: net_complexity.dataloaders.ClassicCVDataloaders
@@ -206,6 +206,10 @@ mlflow:
     recipe: single_pass_thr05_soft05pp_hard1pp_user_20261107
     entropy_regularization: disabled
     source_commit: 6501c07c1bb76407ba4cf9f239c92b40e5ecafaa
+    reference_source_run: 20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200
+    reference_cosine_T_max: 150
+    reference_history_available_epochs: 86
+    reference_used_epochs: 1-30
   enabled: true
 device: cuda:0
 cyclic_channel_pruning:

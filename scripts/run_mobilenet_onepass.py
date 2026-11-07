@@ -1,4 +1,4 @@
-"""Train the shared dense reference and six single-pass MobileNet profiles.
+"""Import the accepted historical reference and train six MobileNet profiles.
 
 Run from the repository root with .venv/bin/python. --dry-run requires only
 the Python standard library and prints the exact commands without training.
@@ -21,6 +21,8 @@ from pathlib import Path
 CONFIG_NAME = "mobilenet_onepass_thr05_gap05_1pp"
 DEFAULT_CAPS = ("0.1", "0.2", "0.3", "0.4", "0.5", "0.6")
 OUTPUT_ROOT = Path("outputs/runs") / CONFIG_NAME
+REFERENCE_DIRECTORY = "imported_dense_reference_20261002"
+EXPECTED_ARCHIVE_SHA256 = "7ada53ae4c56902dcfc48d3625273d66955dd8b9ca7702727d9854d342bf9cfd"
 
 
 @dataclass(frozen=True)
@@ -31,7 +33,9 @@ class Stage:
     fingerprint: str
 
 
-def build_plan(repo_root: Path, caps: list[str]) -> list[Stage]:
+def build_plan(
+    repo_root: Path, caps: list[str], reference_identity: dict | None = None,
+) -> list[Stage]:
     """Build immutable stage identities, including code and config digests."""
     config_path = repo_root / "configs" / f"{CONFIG_NAME}.yaml"
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
@@ -39,18 +43,8 @@ def build_plan(repo_root: Path, caps: list[str]) -> list[Stage]:
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True,
     ).strip()
-    baseline_dir = repo_root / OUTPUT_ROOT / "dense_reference_30ep"
-    baseline_command = [
-        ".venv/bin/python", "src/net_complexity/cli/train.py",
-        "experiment=ablation_mobilenetv2_tinyimagenet200_pretrained/plain_baseline",
-        "++model.criterion.label_smoothing=0",
-        "training_arguments.num_epochs=30", "scheduler.T_max=30",
-        "training_arguments.batchnorm_recalibration.enabled=false",
-        "++training_arguments.evaluate_test=false",
-        "mlflow.run_name=mobilenet_dense_reference_30ep",
-        f"hydra.run.dir={json.dumps(str(baseline_dir))}",
-    ]
-    commands = [("dense_reference", baseline_dir, baseline_command)]
+    baseline_dir = repo_root / OUTPUT_ROOT / REFERENCE_DIRECTORY
+    commands = []
     for cap in caps:
         name = f"mobilenet_onepass_thr0.5_soft0.005_hard0.01_cap{cap}"
         directory = repo_root / OUTPUT_ROOT / name
@@ -70,6 +64,7 @@ def build_plan(repo_root: Path, caps: list[str]) -> list[Stage]:
         identity = json.dumps({
             "kind": kind, "command": command, "config_sha256": config_hash,
             "runner_sha256": runner_hash, "commit": revision,
+            "reference": reference_identity or {"archive_sha256": EXPECTED_ARCHIVE_SHA256},
         }, sort_keys=True)
         result.append(Stage(kind, directory, command, hashlib.sha256(identity.encode()).hexdigest()))
     return result
@@ -81,13 +76,47 @@ def validate_history(path: Path, expected_epochs: int) -> None:
         rows = list(csv.DictReader(handle))
     epochs = [int(float(row["epoch"])) for row in rows]
     if epochs != list(range(1, expected_epochs + 1)):
-        raise RuntimeError(f"Expected exactly epochs1–{expected_epochs} in {path}; refusing reuse")
+        raise RuntimeError(f"Expected exactly epochs 1–{expected_epochs} in {path}; refusing reuse")
     if not all(
         math.isfinite(float(row["valid_accuracy"]))
         and 0 <= float(row["valid_accuracy"]) <= 1
         for row in rows
     ):
         raise RuntimeError(f"Invalid validation accuracy in {path}")
+
+
+def validate_imported_reference(reference_dir: Path, archive_path: Path) -> dict:
+    """Keep the full historical curve and identify its actual training recipe."""
+    provenance_path = reference_dir / "reference_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    archive_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    expected = {
+        "archive_sha256": EXPECTED_ARCHIVE_SHA256,
+        "actual_training_horizon_epochs": 150,
+        "actual_cosine_T_max": 150,
+        "available_history_epochs": 86,
+        "selected_reference_epochs": [1, 30],
+        "training_performed": False,
+    }
+    if archive_hash != EXPECTED_ARCHIVE_SHA256:
+        raise RuntimeError("The supplied archive differs from the historical reference selected by the user")
+    for key, value in expected.items():
+        if provenance.get(key) != value:
+            raise RuntimeError(f"Imported reference has unexpected {key}; refusing automatic baseline training")
+    history_path = reference_dir / "history.csv"
+    validate_history(history_path, 86)
+    history_hash = hashlib.sha256(history_path.read_bytes()).hexdigest()
+    if history_hash != provenance["history_sha256"]:
+        raise RuntimeError("Imported reference history checksum differs")
+    return {
+        "archive_sha256": archive_hash,
+        "history_sha256": history_hash,
+        "provenance_sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
+        "available_history_epochs": 86,
+        "selected_reference_epochs": [1, 30],
+        "actual_training_horizon_epochs": 150,
+        "actual_cosine_T_max": 150,
+    }
 
 
 def validate_existing_stage(stage: Stage) -> bool:
@@ -101,29 +130,21 @@ def validate_existing_stage(stage: Stage) -> bool:
     if receipt.get("fingerprint") != stage.fingerprint:
         raise RuntimeError(f"Existing stage fingerprint differs: {stage.directory}; refusing rerun")
     try:
-        if stage.kind == "dense_reference":
-            summary = json.loads((stage.directory / "summary.json").read_text(encoding="utf-8"))
-            if summary["timing"]["num_epochs_executed"] != 30:
-                raise RuntimeError("Dense reference did not finish exactly30epochs")
-            validate_history(stage.directory / "history.csv", 30)
-            if not (stage.directory / "checkpoints/best.pt").is_file():
-                raise RuntimeError("Dense reference checkpoint missing")
-        else:
-            summary = json.loads((stage.directory / "cyclic_summary.json").read_text(encoding="utf-8"))
-            if summary["num_cycles_completed"] != 1 or summary["training_cost"]["num_epochs_executed"] != 75:
-                raise RuntimeError("Single-pass run did not finish exactly30+45epochs")
-            if len(summary["cycle_results"]) != 1 or len(summary["recovery_results"]) != 1:
-                raise RuntimeError("Unexpected extra search/recovery stages")
-            if summary["cycle_results"][0]["num_epochs_executed"] != 30:
-                raise RuntimeError("Search did not finish exactly30epochs")
-            if summary["recovery_results"][0]["num_epochs_executed"] != 45:
-                raise RuntimeError("Recovery did not finish exactly45epochs")
-            final_dir = Path(summary["final_result"]["run_dir"])
-            validate_history(final_dir / "history.csv", 45)
-            if not (final_dir / "checkpoints/best.pt").is_file():
-                raise RuntimeError("Recovery checkpoint missing")
-            if not summary["final_result"]["test_metrics"]:
-                raise RuntimeError("Recovery has no frozen-checkpoint test results")
+        summary = json.loads((stage.directory / "cyclic_summary.json").read_text(encoding="utf-8"))
+        if summary["num_cycles_completed"] != 1 or summary["training_cost"]["num_epochs_executed"] != 75:
+            raise RuntimeError("Single-pass run did not finish exactly 30+45 epochs")
+        if len(summary["cycle_results"]) != 1 or len(summary["recovery_results"]) != 1:
+            raise RuntimeError("Unexpected extra search/recovery stages")
+        if summary["cycle_results"][0]["num_epochs_executed"] != 30:
+            raise RuntimeError("Search did not finish exactly 30 epochs")
+        if summary["recovery_results"][0]["num_epochs_executed"] != 45:
+            raise RuntimeError("Recovery did not finish exactly 45 epochs")
+        final_dir = Path(summary["final_result"]["run_dir"])
+        validate_history(final_dir / "history.csv", 45)
+        if not (final_dir / "checkpoints/best.pt").is_file():
+            raise RuntimeError("Recovery checkpoint missing")
+        if not summary["final_result"]["test_metrics"]:
+            raise RuntimeError("Recovery has no frozen-checkpoint test results")
     except (OSError, KeyError, ValueError, TypeError, RuntimeError) as exc:
         raise RuntimeError(
             f"Stage is incomplete or invalid: {stage.directory}; refusing to repeat training. {exc}"
@@ -216,22 +237,49 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without importing torch or training")
     parser.add_argument("--caps", nargs="+", choices=DEFAULT_CAPS, default=list(DEFAULT_CAPS))
+    parser.add_argument(
+        "--baseline-archive", type=Path,
+        help="Accepted historical mobilenet_baseline_partial.tar.gz (default: repository root)",
+    )
     args = parser.parse_args(argv)
     if len(set(args.caps)) != len(args.caps):
         parser.error("--caps must not repeat a profile")
     repo_root = Path(__file__).resolve().parents[1]
     if Path.cwd().resolve() != repo_root:
         parser.error("Run from the repository root")
+    archive_path = (args.baseline_archive or repo_root / "mobilenet_baseline_partial.tar.gz").resolve()
+    reference_dir = repo_root / OUTPUT_ROOT / REFERENCE_DIRECTORY
+    import_command = [
+        ".venv/bin/python", "scripts/prepare_mobilenet_reference.py",
+        "--archive", str(archive_path), "--output-dir", str(reference_dir),
+    ]
     try:
-        plan = build_plan(repo_root, args.caps)
         if args.dry_run:
+            plan = build_plan(repo_root, args.caps)
+            print(shlex.join(import_command))
             for stage in plan:
                 print(shlex.join(stage.command))
             return 0
-        preflight(repo_root)
+        if not archive_path.is_file():
+            raise FileNotFoundError(
+                f"Upload the selected baseline archive to {archive_path}, or set --baseline-archive. "
+                "No new dense baseline will be trained."
+            )
         with exclusive_launcher(repo_root):
+            print(shlex.join(import_command), flush=True)
+            subprocess.run(import_command, cwd=repo_root, check=True)
+            reference_identity = validate_imported_reference(reference_dir, archive_path)
+            plan = build_plan(repo_root, args.caps, reference_identity)
+            print(
+                "Reference: imported all 86 history epochs from the historical 150-epoch/cosine150 recipe; "
+                "search uses matching epochs 1–30. No new reference training or weight transfer.",
+                flush=True,
+            )
+            preflight(repo_root)
             completed = {stage.directory: validate_existing_stage(stage) for stage in plan}
             for stage in plan:
+                if validate_imported_reference(reference_dir, archive_path) != reference_identity:
+                    raise RuntimeError("Imported reference changed after planning; refusing to start training")
                 if completed[stage.directory]:
                     print(f"Reuse completed stage: {stage.directory}", flush=True)
                     continue
@@ -241,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
                 subprocess.run(stage.command, cwd=repo_root, check=True)
                 validate_existing_stage(stage)
                 write_receipt(stage, "complete")
-        print("Done: shared reference30epochs; each selected profile30search+45recovery.", flush=True)
+        print("Done: historical reference imported; each selected profile uses 30 search + 45 recovery = 75 new epochs.", flush=True)
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
