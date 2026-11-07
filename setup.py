@@ -17,8 +17,8 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=[
-        "torch==2.10.0",
-        "torchvision==0.25.0",
+        "torch==2.6.0",
+        "torchvision==0.21.0",
         "hydra-core",
         "omegaconf",
         "tqdm",
