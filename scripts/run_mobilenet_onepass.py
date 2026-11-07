@@ -160,6 +160,7 @@ def preflight(repo_root: Path) -> None:
 
     config = OmegaConf.load(repo_root / "configs" / f"{CONFIG_NAME}.yaml")
     expected = {
+        "dataloaders.num_workers": 0,
         "cyclic_channel_pruning.max_cycles": 1,
         "cyclic_channel_pruning.g_prob_threshold": 0.5,
         "cyclic_channel_pruning.gumbel_epochs": 30,
@@ -173,6 +174,7 @@ def preflight(repo_root: Path) -> None:
     for key, value in expected.items():
         if OmegaConf.select(config, key) != value:
             raise RuntimeError(f"Unexpected {key}: expected {value}")
+    print("DataLoader preflight: num_workers=0; loading batches in the main process", flush=True)
     data_root = repo_root / "data/tiny-imagenet-200"
     for relative in ("wnids.txt", "train", "val/images", "val/val_annotations.txt"):
         if not (data_root / relative).exists():
