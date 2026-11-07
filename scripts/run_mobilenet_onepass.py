@@ -1,4 +1,4 @@
-"""Import the accepted historical reference and train six MobileNet profiles.
+"""Import the accepted historical reference and run MobileNet search + recovery.
 
 Run from the repository root with .venv/bin/python. --dry-run requires only
 the Python standard library and prints the exact commands without training.
@@ -26,6 +26,19 @@ EXPECTED_ARCHIVE_SHA256 = "7ada53ae4c56902dcfc48d3625273d66955dd8b9ca7702727d985
 
 
 @dataclass(frozen=True)
+class Experiment:
+    soft_drop: float
+    hard_drop: float
+    default_caps: tuple[str, ...]
+
+
+EXPERIMENTS = {
+    CONFIG_NAME: Experiment(0.005, 0.01, DEFAULT_CAPS),
+    "mobilenet_onepass_thr05_gap6_7pp": Experiment(0.06, 0.07, ("0.1",)),
+}
+
+
+@dataclass(frozen=True)
 class Stage:
     kind: str
     directory: Path
@@ -35,9 +48,11 @@ class Stage:
 
 def build_plan(
     repo_root: Path, caps: list[str], reference_identity: dict | None = None,
+    *, config_name: str = CONFIG_NAME,
 ) -> list[Stage]:
     """Build immutable stage identities, including code and config digests."""
-    config_path = repo_root / "configs" / f"{CONFIG_NAME}.yaml"
+    experiment = EXPERIMENTS[config_name]
+    config_path = repo_root / "configs" / f"{config_name}.yaml"
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
     runner_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     revision = subprocess.check_output(
@@ -46,12 +61,15 @@ def build_plan(
     baseline_dir = repo_root / OUTPUT_ROOT / REFERENCE_DIRECTORY
     commands = []
     for cap in caps:
-        name = f"mobilenet_onepass_thr0.5_soft0.005_hard0.01_cap{cap}"
-        directory = repo_root / OUTPUT_ROOT / name
+        name = (
+            f"mobilenet_onepass_thr0.5_soft{experiment.soft_drop:g}"
+            f"_hard{experiment.hard_drop:g}_cap{cap}"
+        )
+        directory = repo_root / "outputs/runs" / config_name / name
         command = [
             ".venv/bin/python", "src/net_complexity/cli/cyclic_train.py",
             "--config-path", str(repo_root / "configs"),
-            "--config-name", CONFIG_NAME,
+            "--config-name", config_name,
             "training_arguments.adaptive_lambda.baseline_history_dir="
             + json.dumps(str(baseline_dir)),
             f"cyclic_channel_pruning.threshold_max_param_fraction={cap}",
@@ -152,13 +170,14 @@ def validate_existing_stage(stage: Stage) -> bool:
     return True
 
 
-def preflight(repo_root: Path) -> None:
+def preflight(repo_root: Path, *, config_name: str = CONFIG_NAME) -> None:
     """Check the intended config, CUDA wheel compatibility and extracted data."""
     if Path(sys.prefix).resolve() != (repo_root / ".venv").resolve():
         raise RuntimeError("Run this command through the repository .venv/bin/python")
     from omegaconf import OmegaConf
 
-    config = OmegaConf.load(repo_root / "configs" / f"{CONFIG_NAME}.yaml")
+    experiment = EXPERIMENTS[config_name]
+    config = OmegaConf.load(repo_root / "configs" / f"{config_name}.yaml")
     expected = {
         "dataloaders.num_workers": 0,
         "cyclic_channel_pruning.max_cycles": 1,
@@ -166,8 +185,8 @@ def preflight(repo_root: Path) -> None:
         "cyclic_channel_pruning.gumbel_epochs": 30,
         "cyclic_channel_pruning.final_epochs": 45,
         "training_arguments.adaptive_lambda.enabled": True,
-        "training_arguments.adaptive_lambda.soft_drop": 0.005,
-        "training_arguments.adaptive_lambda.hard_drop": 0.01,
+        "training_arguments.adaptive_lambda.soft_drop": experiment.soft_drop,
+        "training_arguments.adaptive_lambda.hard_drop": experiment.hard_drop,
         "model.criterion.label_smoothing": 0,
         "model.backbone.block.gate_internal_width": True,
     }
@@ -218,11 +237,11 @@ def write_receipt(stage: Stage, status: str) -> None:
 
 
 @contextmanager
-def exclusive_launcher(repo_root: Path):
+def exclusive_launcher(repo_root: Path, *, output_root: Path = OUTPUT_ROOT):
     """Prevent simultaneous launchers; OS releases the lock after an exit."""
     import fcntl
 
-    root = repo_root / OUTPUT_ROOT
+    root = repo_root / output_root
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".launcher.lock").open("a+", encoding="utf-8") as handle:
         try:
@@ -238,12 +257,15 @@ def exclusive_launcher(repo_root: Path):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without importing torch or training")
-    parser.add_argument("--caps", nargs="+", choices=DEFAULT_CAPS, default=list(DEFAULT_CAPS))
+    parser.add_argument("--config-name", choices=tuple(EXPERIMENTS), default=CONFIG_NAME)
+    parser.add_argument("--caps", nargs="+", choices=DEFAULT_CAPS)
     parser.add_argument(
         "--baseline-archive", type=Path,
         help="Accepted historical mobilenet_baseline_partial.tar.gz (default: repository root)",
     )
     args = parser.parse_args(argv)
+    if args.caps is None:
+        args.caps = list(EXPERIMENTS[args.config_name].default_caps)
     if len(set(args.caps)) != len(args.caps):
         parser.error("--caps must not repeat a profile")
     repo_root = Path(__file__).resolve().parents[1]
@@ -257,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     try:
         if args.dry_run:
-            plan = build_plan(repo_root, args.caps)
+            plan = build_plan(repo_root, args.caps, config_name=args.config_name)
             print(shlex.join(import_command))
             for stage in plan:
                 print(shlex.join(stage.command))
@@ -267,17 +289,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"Upload the selected baseline archive to {archive_path}, or set --baseline-archive. "
                 "No new dense baseline will be trained."
             )
-        with exclusive_launcher(repo_root):
+        with exclusive_launcher(repo_root, output_root=Path("outputs/runs") / args.config_name):
             print(shlex.join(import_command), flush=True)
             subprocess.run(import_command, cwd=repo_root, check=True)
             reference_identity = validate_imported_reference(reference_dir, archive_path)
-            plan = build_plan(repo_root, args.caps, reference_identity)
+            plan = build_plan(repo_root, args.caps, reference_identity, config_name=args.config_name)
             print(
                 "Reference: imported all 86 history epochs from the historical 150-epoch/cosine150 recipe; "
                 "search uses matching epochs 1–30. No new reference training or weight transfer.",
                 flush=True,
             )
-            preflight(repo_root)
+            preflight(repo_root, config_name=args.config_name)
             completed = {stage.directory: validate_existing_stage(stage) for stage in plan}
             for stage in plan:
                 if validate_imported_reference(reference_dir, archive_path) != reference_identity:

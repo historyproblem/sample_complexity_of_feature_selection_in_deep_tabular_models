@@ -1,0 +1,231 @@
+# New variant of one cycle of the article's iterative MobileNetV2 recipe.
+# User selected threshold 0.5 and wider adaptive-lambda gaps 6/7 percentage points.
+# Keeps 30 search + 45 recovery epochs; original reconstruction saved separately.
+# Published with the compatible MobileNet/cyclic-channel implementation.
+# scripts/run_mobilenet_onepass.py imports the user-selected archived reference.
+# max_param is an additive removal-cost cap, not a target retained fraction.
+dataloaders:
+  _target_: net_complexity.dataloaders.ClassicCVDataloaders
+  path_to_data: ${hydra:runtime.cwd}/data/tiny-imagenet-200
+  batch_size: 128
+  # Load in the main process: the training container has limited /dev/shm.
+  num_workers: 0
+  taskname: tinyimagenet200
+  num_classes: 200
+  image_size: 64
+  train_transform:
+    _target_: torchvision.transforms.Compose
+    transforms:
+    - _target_: torchvision.transforms.RandomResizedCrop
+      size: 224
+      scale:
+      - 0.6
+      - 1.0
+    - _target_: torchvision.transforms.RandomHorizontalFlip
+    - _target_: torchvision.transforms.ToTensor
+    - _target_: torchvision.transforms.Normalize
+      mean:
+      - 0.485
+      - 0.456
+      - 0.406
+      std:
+      - 0.229
+      - 0.224
+      - 0.225
+  eval_transform:
+    _target_: torchvision.transforms.Compose
+    transforms:
+    - _target_: torchvision.transforms.Resize
+      size: 256
+    - _target_: torchvision.transforms.CenterCrop
+      size: 224
+    - _target_: torchvision.transforms.ToTensor
+    - _target_: torchvision.transforms.Normalize
+      mean:
+      - 0.485
+      - 0.456
+      - 0.406
+      std:
+      - 0.229
+      - 0.224
+      - 0.225
+  valid_ratio: 0.1
+  seed: 42
+model:
+  _target_: net_complexity.wrappers.ClassificationFeatureSelectionWrapper
+  backbone:
+    _target_: net_complexity.wrappers.MobileNetV2
+    num_classes: 200
+    in_channels: 3
+    width_mult: 1.0
+    stem_stride: 2
+    dropout: 0.2
+    pretrained_weights: IMAGENET1K_V2
+    block:
+      _target_: net_complexity.wrappers.MaskedGumbelInvertedResidual
+      _partial_: true
+      beta: 1.0
+      force_ones_mask: false
+      deterministic_soft_mask: false
+      deterministic_hard_mask: false
+      train_gate_mode: null
+      eval_gate_mode: null
+      gate_threshold: 0.5
+      gate_internal_width: true
+      temperature: 1.0
+  gumbel_init_mode: auto
+  bypass_on_zero_lambda: true
+  entropy_regularization: disabled
+  entropy_regularization_coef: 0.0
+  criterion:
+    _target_: torch.nn.CrossEntropyLoss
+    label_smoothing: 0.0
+  regularization_loss:
+    _target_: net_complexity.wrappers.get_gumbel_loss
+    _partial_: true
+  lambda_coef: 0.0001
+optimizer:
+  gate_weight_decay_scale: null
+  _target_: torch.optim.AdamW
+  lr: 0.001
+  weight_decay: 0.0005
+  pretrained_lr_scale: 0.1
+training_arguments:
+  num_epochs: 30
+  lambda_warmup:
+    enabled: false
+    start_epoch: 30
+    initial_lambda_coef: 0.0
+    target_lambda_coef: 0.0
+    ramp_epochs: 1
+    bypass_during_warmup: true
+  adaptive_lambda:
+    enabled: true
+    warmup_epochs: 3
+    update_every_epochs: 1
+    acc_window: 3
+    baseline_history_dir: ???
+    lambda_min: 1.0e-08
+    lambda_max: 100.0
+    log_step_init: 0.22314355131420976
+    log_step_min: 0.04879016416943205
+    adaptive_log_step_enabled: true
+    prune_rate_low_per_epoch: 0.02
+    prune_rate_high_per_epoch: 0.07
+    log_step_boost_factor: 2.0
+    log_step_max_boost_level: 2
+    adaptive_log_step_max_epoch: null
+    soft_drop: 0.06
+    hard_drop: 0.07
+    recovery:
+      enabled: false
+      min_epoch: 80
+      drop_min: 0.02
+      drop_max: 0.2
+      patience: 5
+      recovery_slope_window: 5
+      require_slow_recovery: true
+      min_acc_delta_over_window: 0.005
+      use_zero_prob_filter: true
+      zero_prob_window: 10
+      zero_prob_delta_min: 0.02
+      recovery_epochs: 5
+      freeze_lambda_increase: true
+      decay_lambda: false
+      open_bias_start: 0.15
+      open_bias_decay: 0.9
+      p_open_min: 0.02
+      p_open_max: 0.5
+      max_reopen_delta: 0.02
+      target_acc_margin: 0.01
+      cooldown_epochs: 10
+      max_recovery_attempts: 3
+  batchnorm_recalibration:
+    enabled: false
+    num_batches: 200
+    reset_running_stats: true
+    train_gate_mode: deterministic_hard
+    eval_gate_mode: deterministic_hard
+  collapse_guard:
+    enabled: false
+scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 30
+  eta_min: 0.0
+  interval: epoch
+metrics:
+  _target_: net_complexity.meta.Metrics
+  train_metrics:
+  - _target_: net_complexity.metrics.base.MultiLossMetric
+  - _target_: net_complexity.metrics.classification.Accuracy
+  - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+  - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+    sample_size: 1
+  - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+    log_channel_zero_probs: true
+  - _target_: net_complexity.metrics.stg.STGProbMetric
+  - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+  valid_metrics:
+  - _target_: net_complexity.metrics.base.MultiLossMetric
+  - _target_: net_complexity.metrics.classification.Accuracy
+  - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+  - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+    sample_size: 1
+  - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+    log_channel_zero_probs: true
+  - _target_: net_complexity.metrics.stg.STGProbMetric
+  - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+  test_metrics:
+  - _target_: net_complexity.metrics.base.MultiLossMetric
+  - _target_: net_complexity.metrics.classification.Accuracy
+  - _target_: net_complexity.metrics.aig.AIGActivationsMetric
+  - _target_: net_complexity.metrics.aig.AIGFLOPsMetric
+    sample_size: 1
+  - _target_: net_complexity.metrics.gumbel.GumbelProbMetric
+    log_channel_zero_probs: true
+  - _target_: net_complexity.metrics.stg.STGProbMetric
+  - _target_: net_complexity.metrics.complexity.WeightStatisticsMetric
+  - _target_: net_complexity.metrics.complexity.ComputeCostMetric
+run_history:
+  root_dir: outputs/runs/mobilenet_onepass_thr05_gap6_7pp
+  monitor: valid_accuracy
+  mode: max
+  use_hydra_output_dir: true
+  log_gate_history: true
+mlflow:
+  tracking_uri: null
+  experiment_name: mobilenetv2_pretrained_onepass_thr05_widegap6_7pp_20261108
+  run_name: mobilenetv2_tinyimagenet200_onepass_widegap6_7pp_20261108_thr${cyclic_channel_pruning.g_prob_threshold}_soft${training_arguments.adaptive_lambda.soft_drop}_hard${training_arguments.adaptive_lambda.hard_drop}_max_param${cyclic_channel_pruning.threshold_max_param_fraction}
+  log_model: true
+  log_artifacts: true
+  artifacts_dir: ./mlruns
+  tags:
+    project: net_complexity
+    model_type: MobileNetV2_Gumbel
+    method: one_iteration_channels
+    dataset: tinyimagenet200
+    init: ${model.backbone.pretrained_weights}
+    recipe: single_pass_thr05_widegap_soft6pp_hard7pp_user_20261108
+    entropy_regularization: disabled
+    source_commit: 6501c07c1bb76407ba4cf9f239c92b40e5ecafaa
+    reference_source_run: 20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200
+    reference_cosine_T_max: 150
+    reference_history_available_epochs: 86
+    reference_used_epochs: 1-30
+  enabled: true
+device: cuda:0
+cyclic_channel_pruning:
+  enabled: true
+  max_cycles: 1
+  drop_mode: threshold
+  g_prob_threshold: 0.5
+  threshold_max_param_fraction: 0.1
+  gumbel_epochs: 30
+  aig_epochs: 30
+  recovery_epochs: 45
+  final_epochs: 45
+  disable_mlflow_for_cycles: false
+hydra:
+  run:
+    dir: ${run_history.root_dir}/${now:%Y%m%d_%H%M%S}_${mlflow.run_name}
+  output_subdir: .hydra

@@ -39,6 +39,33 @@ def test_dry_run_prints_archive_import_and_six_profiles_without_preflight(monkey
         assert "--config-name mobilenet_onepass_thr05_gap05_1pp" in line
 
 
+def test_wide_gap_dry_run_defaults_to_one_search_and_recovery_profile(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(SCRIPT_PATH.parents[1])
+    archive = tmp_path / "not_uploaded.tar.gz"
+    assert MODULE.main([
+        "--dry-run", "--config-name", "mobilenet_onepass_thr05_gap6_7pp",
+        "--baseline-archive", str(archive),
+    ]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert "scripts/prepare_mobilenet_reference.py" in lines[0]
+    assert "src/net_complexity/cli/cyclic_train.py" in lines[1]
+    assert "--config-name mobilenet_onepass_thr05_gap6_7pp" in lines[1]
+    assert "threshold_max_param_fraction=0.1" in lines[1]
+    assert "soft0.06_hard0.07_cap0.1" in lines[1]
+    assert not any("src/net_complexity/cli/train.py" in line for line in lines)
+
+
+def test_gap_experiments_have_separate_training_outputs():
+    root = SCRIPT_PATH.parents[1]
+    old = MODULE.build_plan(root, ["0.1"])[0]
+    new = MODULE.build_plan(root, ["0.1"], config_name="mobilenet_onepass_thr05_gap6_7pp")[0]
+    assert old.directory != new.directory
+    assert old.fingerprint != new.fingerprint
+    assert "mobilenet_onepass_thr05_gap6_7pp" in str(new.directory)
+    assert "soft0.06_hard0.07" in str(new.directory)
+
+
 def test_existing_partial_stage_is_not_restarted(tmp_path):
     stage = MODULE.Stage("onepass", tmp_path / "profile", [], "expected")
     stage.directory.mkdir()
@@ -86,14 +113,18 @@ def test_imported_reference_keeps_full_history_and_actual_cosine150_recipe(tmp_p
         MODULE.validate_imported_reference(reference, archive_path)
 
 
-def test_missing_archive_stops_before_cuda_or_training(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("config_name", tuple(MODULE.EXPERIMENTS))
+def test_missing_archive_stops_before_cuda_or_training(monkeypatch, capsys, tmp_path, config_name):
     monkeypatch.chdir(SCRIPT_PATH.parents[1])
 
     def fail_preflight(*args):
         pytest.fail("Missing archive must stop before CUDA or any training")
 
     monkeypatch.setattr(MODULE, "preflight", fail_preflight)
-    assert MODULE.main(["--baseline-archive", str(tmp_path / "not_uploaded.tar.gz")]) == 1
+    assert MODULE.main([
+        "--config-name", config_name,
+        "--baseline-archive", str(tmp_path / "not_uploaded.tar.gz"),
+    ]) == 1
     assert "No new dense baseline will be trained" in capsys.readouterr().err
 
 

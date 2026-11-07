@@ -1,4 +1,4 @@
-# MobileNetV2: один проход, threshold 0.5, зазоры λ 0.5/1 п.п.
+# MobileNetV2: однопроходный поиск и обучение архитектуры
 
 Ветка `feature/mobilenet-onepass-thr05-gap05-1pp` основана на `mobilenetv2`
 (`6501c07`) и содержит совместимые модели и каналовый драйвер. Одного конфига
@@ -7,6 +7,41 @@
 Все команды ниже выполняются из корня репозитория
 `sample_complexity_of_feature_selection_in_deep_tabular_models`.
 Каталог загрузки — **`data/` внутри репозитория**, без ведущего `/`.
+
+## Новый конфиг: допуски λ 6/7 п.п.
+
+`configs/mobilenet_onepass_thr05_gap6_7pp.yaml` сохраняет порог каналов 0.5,
+cap 0.1, batch size 128, workers 0, адаптивную λ, entropy 0 и label smoothing 0. Допуски
+заданы как `soft_drop=0.06`, `hard_drop=0.07`: λ увеличивается при отставании
+до 6 п.п., сохраняется между 6 и 7 п.п. и уменьшается при отставании свыше 7 п.п.
+Reference остаётся поэпоховой историей выбранного архива, не постоянным best.
+
+Одна команда выполняет полный новый запуск:
+**30 эпох поиска → выбор и физическое удаление каналов → 45 эпох обучения
+полученной архитектуры → test выбранного по validation checkpoint**.
+Recovery начинается с ImageNet-весов сохранившихся каналов, как прежде.
+Новый search начинает адаптивную λ с 1e-4; старый search не продолжается.
+Всего 75 новых эпох. Новый baseline не обучается.
+
+После обновления ветки из корня репозитория:
+
+```bash
+git pull --ff-only
+mkdir -p outputs/logs
+nohup .venv/bin/python -u scripts/run_mobilenet_onepass.py \
+    --config-name mobilenet_onepass_thr05_gap6_7pp \
+    --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
+    > outputs/logs/mobilenet_onepass_thr05_gap6_7pp.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_thr05_gap6_7pp.log
+```
+
+С этим `--config-name` по умолчанию запускается **один профиль cap 0.1**.
+При необходимости явный список принимается прежним `--caps`.
+Результаты записываются отдельно в `outputs/runs/mobilenet_onepass_thr05_gap6_7pp/`.
+Посмотреть команду полного цикла без обучения можно через `--dry-run`.
+
+Без `--config-name` сохраняется прежняя серия с допусками 0.5/1 п.п. и шестью cap.
+Инструкции подготовки данных и окружения ниже применимы к обоим вариантам.
 
 ## Получить ветку
 
