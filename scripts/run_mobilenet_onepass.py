@@ -29,12 +29,12 @@ EXPECTED_ARCHIVE_SHA256 = "7ada53ae4c56902dcfc48d3625273d66955dd8b9ca7702727d985
 class Experiment:
     soft_drop: float
     hard_drop: float
-    default_caps: tuple[str, ...]
+    default_caps: tuple[str | None, ...]
 
 
 EXPERIMENTS = {
     CONFIG_NAME: Experiment(0.005, 0.01, DEFAULT_CAPS),
-    "mobilenet_onepass_thr05_gap6_7pp": Experiment(0.06, 0.07, ("0.1",)),
+    "mobilenet_onepass_thr05_gap6_7pp": Experiment(0.06, 0.07, (None,)),
 }
 
 
@@ -47,7 +47,7 @@ class Stage:
 
 
 def build_plan(
-    repo_root: Path, caps: list[str], reference_identity: dict | None = None,
+    repo_root: Path, caps: list[str | None], reference_identity: dict | None = None,
     *, config_name: str = CONFIG_NAME,
 ) -> list[Stage]:
     """Build immutable stage identities, including code and config digests."""
@@ -61,9 +61,11 @@ def build_plan(
     baseline_dir = repo_root / OUTPUT_ROOT / REFERENCE_DIRECTORY
     commands = []
     for cap in caps:
+        cap_label = "nocap" if cap is None else f"cap{cap}"
+        cap_value = "null" if cap is None else cap
         name = (
             f"mobilenet_onepass_thr0.5_soft{experiment.soft_drop:g}"
-            f"_hard{experiment.hard_drop:g}_cap{cap}"
+            f"_hard{experiment.hard_drop:g}_{cap_label}"
         )
         directory = repo_root / "outputs/runs" / config_name / name
         command = [
@@ -72,7 +74,7 @@ def build_plan(
             "--config-name", config_name,
             "training_arguments.adaptive_lambda.baseline_history_dir="
             + json.dumps(str(baseline_dir)),
-            f"cyclic_channel_pruning.threshold_max_param_fraction={cap}",
+            f"cyclic_channel_pruning.threshold_max_param_fraction={cap_value}",
             f"mlflow.run_name={name}",
             f"hydra.run.dir={json.dumps(str(directory))}",
         ]
@@ -182,6 +184,9 @@ def preflight(repo_root: Path, *, config_name: str = CONFIG_NAME) -> None:
         "dataloaders.num_workers": 0,
         "cyclic_channel_pruning.max_cycles": 1,
         "cyclic_channel_pruning.g_prob_threshold": 0.5,
+        "cyclic_channel_pruning.threshold_max_param_fraction": (
+            None if experiment.default_caps[0] is None else float(experiment.default_caps[0])
+        ),
         "cyclic_channel_pruning.gumbel_epochs": 30,
         "cyclic_channel_pruning.final_epochs": 45,
         "training_arguments.adaptive_lambda.enabled": True,

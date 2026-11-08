@@ -3,7 +3,7 @@
 # Keeps 30 search + 45 recovery epochs; original reconstruction saved separately.
 # Published with the compatible MobileNet/cyclic-channel implementation.
 # scripts/run_mobilenet_onepass.py imports the user-selected archived reference.
-# max_param is an additive removal-cost cap, not a target retained fraction.
+# No parameter-removal cap: structurally drop every eligible channel below 0.5.
 dataloaders:
   _target_: net_complexity.dataloaders.ClassicCVDataloaders
   path_to_data: ${hydra:runtime.cwd}/data/tiny-imagenet-200
@@ -195,7 +195,7 @@ run_history:
 mlflow:
   tracking_uri: null
   experiment_name: mobilenetv2_pretrained_onepass_thr05_widegap6_7pp_20261108
-  run_name: mobilenetv2_tinyimagenet200_onepass_widegap6_7pp_20261108_thr${cyclic_channel_pruning.g_prob_threshold}_soft${training_arguments.adaptive_lambda.soft_drop}_hard${training_arguments.adaptive_lambda.hard_drop}_max_param${cyclic_channel_pruning.threshold_max_param_fraction}
+  run_name: mobilenetv2_tinyimagenet200_onepass_widegap6_7pp_20261108_thr${cyclic_channel_pruning.g_prob_threshold}_soft${training_arguments.adaptive_lambda.soft_drop}_hard${training_arguments.adaptive_lambda.hard_drop}_nocap
   log_model: true
   log_artifacts: true
   artifacts_dir: ./mlruns
@@ -219,7 +219,7 @@ cyclic_channel_pruning:
   max_cycles: 1
   drop_mode: threshold
   g_prob_threshold: 0.5
-  threshold_max_param_fraction: 0.1
+  threshold_max_param_fraction: null
   gumbel_epochs: 30
   aig_epochs: 30
   recovery_epochs: 45

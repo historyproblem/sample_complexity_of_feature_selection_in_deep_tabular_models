@@ -51,8 +51,8 @@ def test_wide_gap_dry_run_defaults_to_one_search_and_recovery_profile(monkeypatc
     assert "scripts/prepare_mobilenet_reference.py" in lines[0]
     assert "src/net_complexity/cli/cyclic_train.py" in lines[1]
     assert "--config-name mobilenet_onepass_thr05_gap6_7pp" in lines[1]
-    assert "threshold_max_param_fraction=0.1" in lines[1]
-    assert "soft0.06_hard0.07_cap0.1" in lines[1]
+    assert "threshold_max_param_fraction=null" in lines[1]
+    assert "soft0.06_hard0.07_nocap" in lines[1]
     assert not any("src/net_complexity/cli/train.py" in line for line in lines)
 
 
@@ -66,12 +66,24 @@ def test_gap_experiments_have_separate_training_outputs():
     assert "soft0.06_hard0.07" in str(new.directory)
 
 
+def test_uncapped_profile_does_not_reuse_capped_training_outputs():
+    root = SCRIPT_PATH.parents[1]
+    config_name = "mobilenet_onepass_thr05_gap6_7pp"
+    old = MODULE.build_plan(root, ["0.1"], config_name=config_name)[0]
+    uncapped = MODULE.build_plan(root, [None], config_name=config_name)[0]
+    assert uncapped.directory != old.directory
+    assert uncapped.fingerprint != old.fingerprint
+    assert uncapped.directory.name.endswith("_nocap")
+    assert "cyclic_channel_pruning.threshold_max_param_fraction=null" in uncapped.command
+
+
 @pytest.mark.parametrize("config_name", list(MODULE.EXPERIMENTS))
 def test_all_training_children_use_unbuffered_output(config_name):
     stages = MODULE.build_plan(
-        SCRIPT_PATH.parents[1], list(MODULE.DEFAULT_CAPS), config_name=config_name,
+        SCRIPT_PATH.parents[1], list(MODULE.EXPERIMENTS[config_name].default_caps),
+        config_name=config_name,
     )
-    assert len(stages) == len(MODULE.DEFAULT_CAPS)
+    assert len(stages) == len(MODULE.EXPERIMENTS[config_name].default_caps)
     assert all(stage.command[:3] == [
         ".venv/bin/python", "-u", "src/net_complexity/cli/cyclic_train.py",
     ] for stage in stages)

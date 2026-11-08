@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
@@ -32,7 +31,7 @@ def test_wider_gap_config_keeps_the_selected_single_pass_recipe():
     assert adaptive.enabled is True
     assert (adaptive.soft_drop, adaptive.hard_drop) == (0.06, 0.07)
     assert cyclic.g_prob_threshold == 0.5
-    assert cyclic.threshold_max_param_fraction == 0.1
+    assert cyclic.threshold_max_param_fraction is None
     assert cyclic.max_cycles == 1
     assert (cyclic.gumbel_epochs, cyclic.final_epochs) == (30, 45)
     assert cfg.dataloaders.batch_size == 128
@@ -45,6 +44,7 @@ def test_wider_gap_config_keeps_the_selected_single_pass_recipe():
     assert cfg.mlflow.tags.reference_used_epochs == "1-30"
     assert cfg.run_history.root_dir == "outputs/runs/mobilenet_onepass_thr05_gap6_7pp"
     assert "widegap6_7pp_20261108" in cfg.mlflow.run_name
+    assert cfg.mlflow.run_name.endswith("_nocap")
 
 
 @pytest.mark.parametrize(
@@ -95,34 +95,33 @@ def test_single_pass_search_selects_channels_then_runs_only_final_structural_rec
 ):
     cfg = _config()
     calls = []
+    gate = "backbone.features.0.gumbel_layer"
+    eligible_channels = list(range(12))
+    channel_metrics = {
+        f"valid_{gate}.channel_{channel:03d}_zero_prob": 0.9 - 0.01 * channel
+        for channel in eligible_channels
+    }
+    channel_metrics.update({
+        f"valid_{gate}.channel_012_zero_prob": 0.1,
+        f"valid_{gate}.channel_013_zero_prob": 0.5,
+    })
 
     def fake_run_training(stage_cfg, **kwargs):
         assert "model_initializer" not in kwargs
         calls.append(OmegaConf.to_container(stage_cfg, resolve=False))
         return {
             "num_epochs_executed": stage_cfg.training_arguments.num_epochs,
-            "last_valid_metrics": {
-                "valid_backbone.features.0.gumbel_layer.channel_000_zero_prob": 0.9,
-                "valid_backbone.features.0.gumbel_layer.channel_001_zero_prob": 0.1,
-            },
+            "last_valid_metrics": channel_metrics,
         }
 
-    # A small probe exercises the real threshold/cap selection without a model,
-    # ImageNet download, training, inference or BatchNorm updates.
-    probe = SimpleNamespace(
-        backbone=SimpleNamespace(
-            features=[
-                SimpleNamespace(
-                    branch=SimpleNamespace(
-                        project=SimpleNamespace(in_channels=10, bias=None)
-                    )
-                )
-            ]
-        ),
-        parameters=lambda: [SimpleNamespace(numel=lambda: 1000)],
-    )
+    # The real threshold selection must run without constructing a parameter
+    # budget probe, ImageNet download, training or BatchNorm updates.
     monkeypatch.setattr(cyclic_channel_pruning, "run_training", fake_run_training)
-    monkeypatch.setattr(cyclic_channel_pruning, "hydra_instantiate", lambda _: probe)
+
+    def unexpected_budget_probe(_):
+        pytest.fail("uncapped threshold selection must not instantiate a budget probe")
+
+    monkeypatch.setattr(cyclic_channel_pruning, "hydra_instantiate", unexpected_budget_probe)
     result = cyclic_channel_pruning.run_cyclic_channel_pruning_training(cfg, tmp_path)
 
     assert len(calls) == 2
@@ -134,7 +133,7 @@ def test_single_pass_search_selects_channels_then_runs_only_final_structural_rec
     assert recovery["training_arguments"]["num_epochs"] == 45
     assert recovery["scheduler"]["T_max"] == 45
     assert recovery["channel_pruning"]["structural"] is True
-    assert recovery["channel_pruning"]["mask"] == {"backbone.features.0.gumbel_layer": [0]}
+    assert recovery["channel_pruning"]["mask"] == {gate: eligible_channels}
     assert recovery["model"]["lambda_coef"] == 0
     assert recovery["training_arguments"]["adaptive_lambda"]["enabled"] is False
     for stage in calls:

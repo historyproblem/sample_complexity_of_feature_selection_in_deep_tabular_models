@@ -10,8 +10,9 @@
 
 ## Новый конфиг: допуски λ 6/7 п.п.
 
-`configs/mobilenet_onepass_thr05_gap6_7pp.yaml` сохраняет порог каналов 0.5,
-cap 0.1, batch size 128, workers 0, адаптивную λ, entropy 0 и label smoothing 0. Допуски
+`configs/mobilenet_onepass_thr05_gap6_7pp.yaml` использует порог каналов 0.5
+**без лимита cap** (`threshold_max_param_fraction: null`), batch size 128,
+workers 0, адаптивную λ, entropy 0 и label smoothing 0. Допуски
 заданы как `soft_drop=0.06`, `hard_drop=0.07`: λ увеличивается при отставании
 до 6 п.п., сохраняется между 6 и 7 п.п. и уменьшается при отставании свыше 7 п.п.
 Reference остаётся поэпоховой историей выбранного архива, не постоянным best.
@@ -31,13 +32,16 @@ mkdir -p outputs/logs
 nohup .venv/bin/python -u scripts/run_mobilenet_onepass.py \
     --config-name mobilenet_onepass_thr05_gap6_7pp \
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
-    > outputs/logs/mobilenet_onepass_thr05_gap6_7pp.log 2>&1 < /dev/null &
-tail -f outputs/logs/mobilenet_onepass_thr05_gap6_7pp.log
+    > outputs/logs/mobilenet_onepass_thr05_gap6_7pp_nocap.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_thr05_gap6_7pp_nocap.log
 ```
 
-С этим `--config-name` по умолчанию запускается **один профиль cap 0.1**.
-При необходимости явный список принимается прежним `--caps`.
+С этим `--config-name` по умолчанию запускается **один профиль без cap**:
+удаляются каналы с `p_open < 0.5`, с сохранением хотя бы одного канала
+в каждой группе. Launcher передаёт `threshold_max_param_fraction=null`.
 Результаты записываются отдельно в `outputs/runs/mobilenet_onepass_thr05_gap6_7pp/`.
+Имя профиля заканчивается на `_nocap`, поэтому результаты прежнего запуска
+с cap 0.1 сохраняются в своей директории.
 Посмотреть команду полного цикла без обучения можно через `--dry-run`.
 
 Без `--config-name` сохраняется прежняя серия с допусками 0.5/1 п.п. и шестью cap.
