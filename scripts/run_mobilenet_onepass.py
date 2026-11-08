@@ -37,6 +37,7 @@ EXPERIMENTS = {
     CONFIG_NAME: Experiment(0.005, 0.01, DEFAULT_CAPS),
     "mobilenet_onepass_thr05_gap6_7pp": Experiment(0.06, 0.07, (None,)),
     "mobilenet_onepass_thr05_gap7_8pp": Experiment(0.07, 0.08, (None,), auto_step_no_boost=True),
+    "mobilenet_onepass_thr05_gap8_12pp": Experiment(0.08, 0.12, (None,), auto_step_no_boost=True),
 }
 
 

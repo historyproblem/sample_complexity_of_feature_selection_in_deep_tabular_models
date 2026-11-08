@@ -12,7 +12,10 @@ from net_complexity.training.adaptive_lambda import AdaptiveLambdaController
 CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
 
 
-@pytest.fixture(params=[("6_7", 0.06, 0.07), ("7_8", 0.07, 0.08)], ids=["6_7pp", "7_8pp"])
+@pytest.fixture(
+    params=[("6_7", 0.06, 0.07), ("7_8", 0.07, 0.08), ("8_12", 0.08, 0.12)],
+    ids=["6_7pp", "7_8pp", "8_12pp"],
+)
 def recipe(request):
     return request.param
 
@@ -50,14 +53,15 @@ def test_wider_gap_config_keeps_the_selected_single_pass_recipe(recipe):
     assert cfg.mlflow.tags.reference_used_epochs == "1-30"
     assert cfg.run_history.root_dir == f"outputs/runs/mobilenet_onepass_thr05_gap{gap_suffix}pp"
     assert f"widegap{gap_suffix}pp" in cfg.mlflow.experiment_name
-    assert f"widegap{gap_suffix}pp_20261108" in cfg.mlflow.run_name
-    suffix = "_autostep_noboost" if gap_suffix == "7_8" else ""
+    date = "20261109" if gap_suffix == "8_12" else "20261108"
+    assert f"widegap{gap_suffix}pp_{date}" in cfg.mlflow.run_name
+    suffix = "_autostep_noboost" if gap_suffix != "6_7" else ""
     assert cfg.mlflow.run_name.endswith("_nocap" + suffix)
     assert cfg.mlflow.tags.recipe == (
         f"single_pass_thr05_widegap_soft{soft_drop * 100:g}pp"
-        f"_hard{hard_drop * 100:g}pp_user_20261108{suffix}"
+        f"_hard{hard_drop * 100:g}pp_user_{date}{suffix}"
     )
-    if gap_suffix == "7_8":
+    if gap_suffix != "6_7":
         assert adaptive.log_step_init == "auto"
         assert adaptive.adaptive_log_step_enabled is False
 

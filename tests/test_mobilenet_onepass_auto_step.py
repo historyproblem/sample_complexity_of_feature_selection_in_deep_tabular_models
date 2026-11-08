@@ -26,19 +26,24 @@ class MetricState:
 
 
 @pytest.mark.parametrize(
-    ("accuracy", "expected_action", "direction"),
+    ("gap_suffix", "soft_drop", "hard_drop"),
+    [("7_8", 0.07, 0.08), ("8_12", 0.08, 0.12)],
+    ids=["7_8pp", "8_12pp"],
+)
+@pytest.mark.parametrize(
+    ("accuracy_position", "expected_action", "direction"),
     [
-        (0.75, "increase_lambda", 1),
-        (0.725, "hold", 0),
-        (0.70, "decrease_lambda", -1),
+        ("above_soft", "increase_lambda", 1),
+        ("between_gaps", "hold", 0),
+        ("below_hard", "decrease_lambda", -1),
     ],
 )
-def test_seven_eight_recipe_uses_unboosted_auto_step_with_adaptive_lambda(
-    monkeypatch, accuracy, expected_action, direction
+def test_onepass_recipe_uses_unboosted_auto_step_with_adaptive_lambda(
+    monkeypatch, gap_suffix, soft_drop, hard_drop, accuracy_position, expected_action, direction
 ):
     with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
         cfg = compose(
-            config_name="mobilenet_onepass_thr05_gap7_8pp",
+            config_name=f"mobilenet_onepass_thr05_gap{gap_suffix}pp",
             overrides=[
                 "training_arguments.adaptive_lambda.baseline_history_dir="
                 "/test/imported_dense_reference_20261002",
@@ -48,6 +53,7 @@ def test_seven_eight_recipe_uses_unboosted_auto_step_with_adaptive_lambda(
 
     adaptive = cfg.training_arguments.adaptive_lambda
     assert adaptive.enabled is True
+    assert (adaptive.soft_drop, adaptive.hard_drop) == (soft_drop, hard_drop)
     assert adaptive.log_step_init == "auto"
     assert adaptive.adaptive_log_step_enabled is False
     assert cfg.training_arguments.num_epochs == 30
@@ -55,6 +61,11 @@ def test_seven_eight_recipe_uses_unboosted_auto_step_with_adaptive_lambda(
     assert adaptive.update_every_epochs == 1
     assert cfg.model.lambda_coef == pytest.approx(1e-4)
     assert adaptive.lambda_max == 100
+    accuracy = 0.8 - {
+        "above_soft": soft_drop / 2,
+        "between_gaps": (soft_drop + hard_drop) / 2,
+        "below_hard": hard_drop + 0.01,
+    }[accuracy_position]
 
     # Production auto targets lambda=10 by the first third of the search,
     # giving seven updates after warmup. The clamp at 100 is a separate bound.

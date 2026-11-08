@@ -8,6 +8,37 @@
 `sample_complexity_of_feature_selection_in_deep_tabular_models`.
 Каталог загрузки — **`data/` внутри репозитория**, без ведущего `/`.
 
+## Новый запуск: диапазон λ от −12 до −8 п.п.
+
+`configs/mobilenet_onepass_thr05_gap8_12pp.yaml` задаёт `soft_drop=0.08` и
+`hard_drop=0.12`. Для разности средней validation accuracy последних трёх эпох
+и reference соответствующей эпохи действуют правила:
+
+- Разность ≥ −8 п.п.: увеличить λ.
+- Разность от −12 п.п. включительно до −8 п.п. исключительно: оставить λ.
+- Разность < −12 п.п.: уменьшить λ.
+
+Сохраняются `log_step_init: auto`, boost выключен, cap отсутствует, порог
+каналов 0.5. Шаг рассчитывается один раз: `1.64470363785289` в log(λ),
+начальная λ 1e-4, warmup 3. Адаптивное изменение λ по точности включено.
+Один профиль автоматически выполняет 30 эпох поиска, физическое удаление
+каналов и 45 эпох обучения полученной архитектуры, затем test выбранного
+по validation checkpoint. Label smoothing 0 в обеих фазах, ImageNet V2,
+архивный reference, batch 128 и workers 0 сохранены.
+
+```bash
+git pull --ff-only
+mkdir -p outputs/logs
+nohup .venv/bin/python -u scripts/run_mobilenet_onepass.py \
+    --config-name mobilenet_onepass_thr05_gap8_12pp \
+    --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
+    > outputs/logs/mobilenet_onepass_thr05_gap8_12pp_nocap_autostep_noboost.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_thr05_gap8_12pp_nocap_autostep_noboost.log
+```
+
+Результаты отдельные: `outputs/runs/mobilenet_onepass_thr05_gap8_12pp/`.
+Предыдущие конфиги и результаты сохраняются в своих каталогах.
+
 ## Новый запуск: допуски λ 7/8 п.п., без cap
 
 `configs/mobilenet_onepass_thr05_gap7_8pp.yaml` задаёт `soft_drop=0.07`,
