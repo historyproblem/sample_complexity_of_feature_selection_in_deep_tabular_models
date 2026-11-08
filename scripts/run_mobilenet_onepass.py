@@ -30,12 +30,13 @@ class Experiment:
     soft_drop: float
     hard_drop: float
     default_caps: tuple[str | None, ...]
+    auto_step_no_boost: bool = False
 
 
 EXPERIMENTS = {
     CONFIG_NAME: Experiment(0.005, 0.01, DEFAULT_CAPS),
     "mobilenet_onepass_thr05_gap6_7pp": Experiment(0.06, 0.07, (None,)),
-    "mobilenet_onepass_thr05_gap7_8pp": Experiment(0.07, 0.08, (None,)),
+    "mobilenet_onepass_thr05_gap7_8pp": Experiment(0.07, 0.08, (None,), auto_step_no_boost=True),
 }
 
 
@@ -68,6 +69,8 @@ def build_plan(
             f"mobilenet_onepass_thr0.5_soft{experiment.soft_drop:g}"
             f"_hard{experiment.hard_drop:g}_{cap_label}"
         )
+        if experiment.auto_step_no_boost:
+            name += "_autostep_noboost"
         directory = repo_root / "outputs/runs" / config_name / name
         command = [
             ".venv/bin/python", "-u", "src/net_complexity/cli/cyclic_train.py",
@@ -196,6 +199,14 @@ def preflight(repo_root: Path, *, config_name: str = CONFIG_NAME) -> None:
         "model.criterion.label_smoothing": 0,
         "model.backbone.block.gate_internal_width": True,
     }
+    if experiment.auto_step_no_boost:
+        expected.update({
+            "training_arguments.num_epochs": 30,
+            "training_arguments.adaptive_lambda.warmup_epochs": 3,
+            "training_arguments.adaptive_lambda.update_every_epochs": 1,
+            "training_arguments.adaptive_lambda.log_step_init": "auto",
+            "training_arguments.adaptive_lambda.adaptive_log_step_enabled": False,
+        })
     for key, value in expected.items():
         if OmegaConf.select(config, key) != value:
             raise RuntimeError(f"Unexpected {key}: expected {value}")

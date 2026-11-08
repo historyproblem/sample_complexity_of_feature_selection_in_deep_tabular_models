@@ -4,6 +4,7 @@
 # Published with the compatible MobileNet/cyclic-channel implementation.
 # scripts/run_mobilenet_onepass.py imports the user-selected archived reference.
 # No parameter-removal cap: structurally drop every eligible channel below 0.5.
+# Resolve the lambda log-step via auto once; disable closure-rate step boosts.
 dataloaders:
   _target_: net_complexity.dataloaders.ClassicCVDataloaders
   path_to_data: ${hydra:runtime.cwd}/data/tiny-imagenet-200
@@ -107,9 +108,9 @@ training_arguments:
     baseline_history_dir: ???
     lambda_min: 1.0e-08
     lambda_max: 100.0
-    log_step_init: 0.22314355131420976
+    log_step_init: auto
     log_step_min: 0.04879016416943205
-    adaptive_log_step_enabled: true
+    adaptive_log_step_enabled: false
     prune_rate_low_per_epoch: 0.02
     prune_rate_high_per_epoch: 0.07
     log_step_boost_factor: 2.0
@@ -194,8 +195,8 @@ run_history:
   log_gate_history: true
 mlflow:
   tracking_uri: null
-  experiment_name: mobilenetv2_pretrained_onepass_thr05_widegap7_8pp_20261108
-  run_name: mobilenetv2_tinyimagenet200_onepass_widegap7_8pp_20261108_thr${cyclic_channel_pruning.g_prob_threshold}_soft${training_arguments.adaptive_lambda.soft_drop}_hard${training_arguments.adaptive_lambda.hard_drop}_nocap
+  experiment_name: mobilenetv2_pretrained_onepass_thr05_widegap7_8pp_autostep_noboost_20261108
+  run_name: mobilenetv2_tinyimagenet200_onepass_widegap7_8pp_20261108_thr${cyclic_channel_pruning.g_prob_threshold}_soft${training_arguments.adaptive_lambda.soft_drop}_hard${training_arguments.adaptive_lambda.hard_drop}_nocap_autostep_noboost
   log_model: true
   log_artifacts: true
   artifacts_dir: ./mlruns
@@ -205,7 +206,7 @@ mlflow:
     method: one_iteration_channels
     dataset: tinyimagenet200
     init: ${model.backbone.pretrained_weights}
-    recipe: single_pass_thr05_widegap_soft7pp_hard8pp_user_20261108
+    recipe: single_pass_thr05_widegap_soft7pp_hard8pp_user_20261108_autostep_noboost
     entropy_regularization: disabled
     source_commit: 6501c07c1bb76407ba4cf9f239c92b40e5ecafaa
     reference_source_run: 20261002_194727_baseline_pretrained_mobilenetv2_tinyimagenet200

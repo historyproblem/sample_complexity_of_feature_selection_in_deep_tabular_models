@@ -14,8 +14,23 @@
 `hard_drop=0.08`, порог каналов 0.5 и `threshold_max_param_fraction: null`.
 Один профиль автоматически выполняет 30 эпох поиска и 45 эпох обучения
 полученной физической архитектуры, затем test checkpoint, выбранного по validation.
-Начальная λ 1e-4, warmup 3, адаптивный шаг, ImageNet V2, label smoothing 0,
-batch 128 и workers 0 сохранены. Используется прежний архивный reference.
+Начальная λ 1e-4, warmup 3, ImageNet V2, label smoothing 0, batch 128 и workers 0
+сохранены. Используется прежний архивный reference.
+
+По решению пользователя шаг вычисляется **один раз через `log_step_init: auto`**,
+а boost отключён: `adaptive_log_step_enabled: false`. Изменение λ по точности
+остаётся включено (`adaptive_lambda.enabled: true`). Текущая формула проекта:
+
+```text
+N = floor((30 / 3 - 3) / 1) = 7
+log_step = ln(10 / 0.0001) / 7 = 1.64470363785289
+```
+
+Целевая λ для расчёта auto равна 10; это отдельная константа проекта,
+не верхняя граница λ=100. При повышении коэффициент умножается примерно на
+5.179475, при снижении — на 0.193070, при hold не меняется. Шаг в log(λ)
+постоянный, границы λ `[1e-8, 100]` продолжают действовать. На старте поиска
+ожидается строка `Adaptive lambda initialized ... step=1.64470363785`.
 
 ```bash
 git pull --ff-only
@@ -23,11 +38,13 @@ mkdir -p outputs/logs
 nohup .venv/bin/python -u scripts/run_mobilenet_onepass.py \
     --config-name mobilenet_onepass_thr05_gap7_8pp \
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
-    > outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap.log 2>&1 < /dev/null &
-tail -f outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap.log
+    > outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap_autostep_noboost.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap_autostep_noboost.log
 ```
 
 Результаты отдельные: `outputs/runs/mobilenet_onepass_thr05_gap7_8pp/`.
+Имя нового профиля заканчивается на `_nocap_autostep_noboost`, поэтому
+результаты предыдущего 7/8 п.п. запуска с boost не переиспользуются.
 Это новый поиск с новой инициализацией λ, без продолжения прежнего запуска.
 
 В присланном логе прежнего 6/7 п.п. поиска λ снижалась на эпохах 4–16

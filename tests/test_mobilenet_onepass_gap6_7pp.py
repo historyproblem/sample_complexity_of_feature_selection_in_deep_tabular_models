@@ -49,13 +49,17 @@ def test_wider_gap_config_keeps_the_selected_single_pass_recipe(recipe):
     assert cfg.mlflow.tags.reference_history_available_epochs == 86
     assert cfg.mlflow.tags.reference_used_epochs == "1-30"
     assert cfg.run_history.root_dir == f"outputs/runs/mobilenet_onepass_thr05_gap{gap_suffix}pp"
-    assert f"widegap{gap_suffix}pp_20261108" in cfg.mlflow.experiment_name
+    assert f"widegap{gap_suffix}pp" in cfg.mlflow.experiment_name
     assert f"widegap{gap_suffix}pp_20261108" in cfg.mlflow.run_name
-    assert cfg.mlflow.run_name.endswith("_nocap")
+    suffix = "_autostep_noboost" if gap_suffix == "7_8" else ""
+    assert cfg.mlflow.run_name.endswith("_nocap" + suffix)
     assert cfg.mlflow.tags.recipe == (
         f"single_pass_thr05_widegap_soft{soft_drop * 100:g}pp"
-        f"_hard{hard_drop * 100:g}pp_user_20261108"
+        f"_hard{hard_drop * 100:g}pp_user_20261108{suffix}"
     )
+    if gap_suffix == "7_8":
+        assert adaptive.log_step_init == "auto"
+        assert adaptive.adaptive_log_step_enabled is False
 
 
 @pytest.mark.parametrize(
@@ -79,6 +83,9 @@ def test_positive_gap_values_are_absolute_accuracy_drops(recipe, drop_position, 
     adaptive = OmegaConf.to_container(cfg.training_arguments.adaptive_lambda, resolve=True)
     adaptive.pop("enabled")
     adaptive.pop("baseline_history_dir")
+    # This test isolates accuracy thresholds; auto-step resolution is covered
+    # through the training entry point in test_mobilenet_onepass_auto_step.py.
+    adaptive.pop("log_step_init")
     adaptive["recovery_config"] = adaptive.pop("recovery")
     controller = AdaptiveLambdaController(
         initial_lambda_coef=cfg.model.lambda_coef,

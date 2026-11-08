@@ -62,6 +62,8 @@ def test_wide_gap_dry_run_defaults_to_one_search_and_recovery_profile(
     assert f"--config-name {config_name}" in lines[1]
     assert "threshold_max_param_fraction=null" in lines[1]
     assert f"soft{soft}_hard{hard}_nocap" in lines[1]
+    if config_name == "mobilenet_onepass_thr05_gap7_8pp":
+        assert "soft0.07_hard0.08_nocap_autostep_noboost" in lines[1]
     assert not any("src/net_complexity/cli/train.py" in line for line in lines)
 
 
@@ -87,8 +89,17 @@ def test_uncapped_profile_does_not_reuse_capped_training_outputs(config_name):
     uncapped = MODULE.build_plan(root, [None], config_name=config_name)[0]
     assert uncapped.directory != old.directory
     assert uncapped.fingerprint != old.fingerprint
-    assert uncapped.directory.name.endswith("_nocap")
+    suffix = "_autostep_noboost" if MODULE.EXPERIMENTS[config_name].auto_step_no_boost else ""
+    assert uncapped.directory.name.endswith("_nocap" + suffix)
     assert "cyclic_channel_pruning.threshold_max_param_fraction=null" in uncapped.command
+
+
+def test_auto_step_profile_does_not_reuse_previous_boosted_training_directory():
+    config_name = "mobilenet_onepass_thr05_gap7_8pp"
+    stage = MODULE.build_plan(SCRIPT_PATH.parents[1], [None], config_name=config_name)[0]
+    previous_name = "mobilenet_onepass_thr0.5_soft0.07_hard0.08_nocap"
+    assert stage.directory.name == previous_name + "_autostep_noboost"
+    assert stage.directory.name != previous_name
 
 
 @pytest.mark.parametrize("config_name", list(MODULE.EXPERIMENTS))
