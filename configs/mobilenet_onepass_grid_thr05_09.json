@@ -1,0 +1,12 @@
+{
+  "base_config": "mobilenet_onepass_thr05_gap8_12pp",
+  "output_root": "outputs/runs/mobilenet_onepass_grid_thr05_09",
+  "seed": 42,
+  "thresholds": [0.5, 0.9],
+  "lambda_bands": [
+    {"soft_drop": 0.04, "hard_drop": 0.08},
+    {"soft_drop": 0.06, "hard_drop": 0.10},
+    {"soft_drop": 0.08, "hard_drop": 0.12},
+    {"soft_drop": 0.10, "hard_drop": 0.14}
+  ]
+}

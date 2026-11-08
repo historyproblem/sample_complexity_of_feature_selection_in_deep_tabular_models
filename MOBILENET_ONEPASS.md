@@ -8,6 +8,66 @@
 `sample_complexity_of_feature_selection_in_deep_tabular_models`.
 Каталог загрузки — **`data/` внутри репозитория**, без ведущего `/`.
 
+## Сетка из восьми запусков: пороги каналов 0.5 и 0.9
+
+`configs/mobilenet_onepass_grid_thr05_09.json` задаёт два порога физического
+удаления каналов и четыре диапазона разности validation accuracy с reference:
+
+| Диапазон разности, п.п. | soft_drop | hard_drop | Пороги каналов |
+| --- | --- | --- | --- |
+| −8…−4 | 0.04 | 0.08 | 0.5 и 0.9 |
+| −10…−6 | 0.06 | 0.10 | 0.5 и 0.9 |
+| −12…−8 | 0.08 | 0.12 | 0.5 и 0.9 |
+| −14…−10 | 0.10 | 0.14 | 0.5 и 0.9 |
+
+Ширина каждого диапазона — 4 п.п.; меняется допустимое отставание от reference.
+Выбранный пользователем диапазон −12…−8 включён для обоих порогов каналов.
+При разности ≥ `−soft_drop` λ увеличивается, в интервале
+`[−hard_drop, −soft_drop)` сохраняется, ниже `−hard_drop` уменьшается.
+Более широкий допуск отставания позволяет усиливать штраф раньше.
+
+Все восемь профилей используют базовый конфиг `mobilenet_onepass_thr05_gap8_12pp`
+с явными overrides. Сохраняются adaptive λ, `log_step_init: auto`, отключённый
+boost, отсутствие cap, начальная λ 1e-4, warmup 3, label smoothing 0 в обеих
+фазах, ImageNet V2, batch 128 и workers 0. Шаг auto остаётся `1.64470363785289`.
+Общий top-level seed — 42, seed разбиения данных также 42. Это по одному
+запуску на сочетание, без оценки разброса по нескольким seed.
+
+Порог 0.9 применяется **после поиска** для выбора физически удаляемых каналов.
+Внутренний `model.backbone.block.gate_threshold` при обучении остаётся 0.5.
+Для каждой группы сохраняется хотя бы один канал.
+
+Одна команда последовательно выполняет **восемь независимых полных циклов**:
+30 эпох поиска → физическое удаление каналов → 45 эпох обучения архитектуры
+→ test checkpoint, выбранного по validation. Это 75 новых эпох на модель,
+600 новых эпох на всю сетку. Архивный reference импортируется один раз;
+новый baseline не обучается. Поиск повторяется для каждой комбинации.
+
+```bash
+git pull --ff-only
+mkdir -p outputs/logs
+nohup .venv/bin/python -u scripts/run_mobilenet_onepass_grid.py \
+    --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
+    > outputs/logs/mobilenet_onepass_grid_thr05_09.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_grid_thr05_09.log
+```
+
+Проверить все команды до обучения:
+
+```bash
+.venv/bin/python scripts/run_mobilenet_onepass_grid.py --dry-run \
+    --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz
+```
+
+Результаты отдельные: `outputs/runs/mobilenet_onepass_grid_thr05_09/`.
+`grid_plan.json` хранит точные команды и fingerprints восьми профилей.
+После завершения всех профилей `grid_summary.json` собирает их test-метрики
+и пути к подробным `cyclic_summary.json`. Каждая модель сохраняет свои
+истории и checkpoints. Launcher последовательно ждёт завершения каждого
+профиля, останавливается на первой ошибке и проверяет reference перед каждым.
+Совпадающие завершённые профили переиспользуются. Частичные или чужие
+директории блокируют запуск всей сетки до начала нового обучения.
+
 ## Новый запуск: диапазон λ от −12 до −8 п.п.
 
 `configs/mobilenet_onepass_thr05_gap8_12pp.yaml` задаёт `soft_drop=0.08` и
