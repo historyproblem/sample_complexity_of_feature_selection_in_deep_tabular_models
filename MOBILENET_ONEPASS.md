@@ -8,6 +8,36 @@
 `sample_complexity_of_feature_selection_in_deep_tabular_models`.
 Каталог загрузки — **`data/` внутри репозитория**, без ведущего `/`.
 
+## Новый запуск: допуски λ 7/8 п.п., без cap
+
+`configs/mobilenet_onepass_thr05_gap7_8pp.yaml` задаёт `soft_drop=0.07`,
+`hard_drop=0.08`, порог каналов 0.5 и `threshold_max_param_fraction: null`.
+Один профиль автоматически выполняет 30 эпох поиска и 45 эпох обучения
+полученной физической архитектуры, затем test checkpoint, выбранного по validation.
+Начальная λ 1e-4, warmup 3, адаптивный шаг, ImageNet V2, label smoothing 0,
+batch 128 и workers 0 сохранены. Используется прежний архивный reference.
+
+```bash
+git pull --ff-only
+mkdir -p outputs/logs
+nohup .venv/bin/python -u scripts/run_mobilenet_onepass.py \
+    --config-name mobilenet_onepass_thr05_gap7_8pp \
+    --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
+    > outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_thr05_gap7_8pp_nocap.log
+```
+
+Результаты отдельные: `outputs/runs/mobilenet_onepass_thr05_gap7_8pp/`.
+Это новый поиск с новой инициализацией λ, без продолжения прежнего запуска.
+
+В присланном логе прежнего 6/7 п.п. поиска λ снижалась на эпохах 4–16
+(13 раз), не менялась на 17-й, росла на 18–30-й (13 раз); первые три эпохи — warmup.
+Снижение умножало λ на 0.8, рост с 19-й эпохи — примерно на 2.4414 из-за boost.
+Коэффициент 0.385186 после эпохи 30 уже не использовался в обучении этой модели.
+На той же записанной кривой validation переход к 7/8 п.п. сдвинул бы начало роста
+с 18-й на 17-ю эпоху. Это условный пересчёт по прежним округлённым метрикам,
+а не прогноз нового обучения или обещание заметного сжатия.
+
 ## Новый конфиг: допуски λ 6/7 п.п.
 
 `configs/mobilenet_onepass_thr05_gap6_7pp.yaml` использует порог каналов 0.5
@@ -45,7 +75,7 @@ tail -f outputs/logs/mobilenet_onepass_thr05_gap6_7pp_nocap.log
 Посмотреть команду полного цикла без обучения можно через `--dry-run`.
 
 Без `--config-name` сохраняется прежняя серия с допусками 0.5/1 п.п. и шестью cap.
-Инструкции подготовки данных и окружения ниже применимы к обоим вариантам.
+Инструкции подготовки данных и окружения ниже применимы ко всем вариантам.
 
 Launcher передаёт `-u` также дочернему процессу обучения, чтобы строки Python
 не задерживались в буфере при записи в файл. Это действует для новых процессов;

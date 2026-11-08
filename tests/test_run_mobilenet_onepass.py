@@ -39,36 +39,50 @@ def test_dry_run_prints_archive_import_and_six_profiles_without_preflight(monkey
         assert "--config-name mobilenet_onepass_thr05_gap05_1pp" in line
 
 
-def test_wide_gap_dry_run_defaults_to_one_search_and_recovery_profile(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize(
+    ("config_name", "soft", "hard"),
+    [
+        ("mobilenet_onepass_thr05_gap6_7pp", "0.06", "0.07"),
+        ("mobilenet_onepass_thr05_gap7_8pp", "0.07", "0.08"),
+    ],
+)
+def test_wide_gap_dry_run_defaults_to_one_search_and_recovery_profile(
+    monkeypatch, capsys, tmp_path, config_name, soft, hard,
+):
     monkeypatch.chdir(SCRIPT_PATH.parents[1])
     archive = tmp_path / "not_uploaded.tar.gz"
     assert MODULE.main([
-        "--dry-run", "--config-name", "mobilenet_onepass_thr05_gap6_7pp",
+        "--dry-run", "--config-name", config_name,
         "--baseline-archive", str(archive),
     ]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 2
     assert "scripts/prepare_mobilenet_reference.py" in lines[0]
     assert "src/net_complexity/cli/cyclic_train.py" in lines[1]
-    assert "--config-name mobilenet_onepass_thr05_gap6_7pp" in lines[1]
+    assert f"--config-name {config_name}" in lines[1]
     assert "threshold_max_param_fraction=null" in lines[1]
-    assert "soft0.06_hard0.07_nocap" in lines[1]
+    assert f"soft{soft}_hard{hard}_nocap" in lines[1]
     assert not any("src/net_complexity/cli/train.py" in line for line in lines)
 
 
 def test_gap_experiments_have_separate_training_outputs():
     root = SCRIPT_PATH.parents[1]
-    old = MODULE.build_plan(root, ["0.1"])[0]
-    new = MODULE.build_plan(root, ["0.1"], config_name="mobilenet_onepass_thr05_gap6_7pp")[0]
-    assert old.directory != new.directory
-    assert old.fingerprint != new.fingerprint
-    assert "mobilenet_onepass_thr05_gap6_7pp" in str(new.directory)
-    assert "soft0.06_hard0.07" in str(new.directory)
+    stages = [
+        MODULE.build_plan(root, list(experiment.default_caps), config_name=config_name)[0]
+        for config_name, experiment in MODULE.EXPERIMENTS.items()
+    ]
+    assert len({stage.directory for stage in stages}) == len(stages)
+    assert len({stage.fingerprint for stage in stages}) == len(stages)
+    for stage, (config_name, experiment) in zip(stages, MODULE.EXPERIMENTS.items()):
+        assert config_name in str(stage.directory)
+        assert f"soft{experiment.soft_drop:g}_hard{experiment.hard_drop:g}" in str(stage.directory)
 
 
-def test_uncapped_profile_does_not_reuse_capped_training_outputs():
+@pytest.mark.parametrize("config_name", [
+    "mobilenet_onepass_thr05_gap6_7pp", "mobilenet_onepass_thr05_gap7_8pp",
+])
+def test_uncapped_profile_does_not_reuse_capped_training_outputs(config_name):
     root = SCRIPT_PATH.parents[1]
-    config_name = "mobilenet_onepass_thr05_gap6_7pp"
     old = MODULE.build_plan(root, ["0.1"], config_name=config_name)[0]
     uncapped = MODULE.build_plan(root, [None], config_name=config_name)[0]
     assert uncapped.directory != old.directory

@@ -12,10 +12,15 @@ from net_complexity.training.adaptive_lambda import AdaptiveLambdaController
 CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
 
 
-def _config():
+@pytest.fixture(params=[("6_7", 0.06, 0.07), ("7_8", 0.07, 0.08)], ids=["6_7pp", "7_8pp"])
+def recipe(request):
+    return request.param
+
+
+def _config(gap_suffix):
     with initialize_config_dir(config_dir=str(CONFIGS_DIR), version_base=None):
         return compose(
-            config_name="mobilenet_onepass_thr05_gap6_7pp",
+            config_name=f"mobilenet_onepass_thr05_gap{gap_suffix}pp",
             overrides=[
                 "training_arguments.adaptive_lambda.baseline_history_dir="
                 "/test/imported_dense_reference_20261002"
@@ -23,13 +28,14 @@ def _config():
         )
 
 
-def test_wider_gap_config_keeps_the_selected_single_pass_recipe():
-    cfg = _config()
+def test_wider_gap_config_keeps_the_selected_single_pass_recipe(recipe):
+    gap_suffix, soft_drop, hard_drop = recipe
+    cfg = _config(gap_suffix)
     adaptive = cfg.training_arguments.adaptive_lambda
     cyclic = cfg.cyclic_channel_pruning
 
     assert adaptive.enabled is True
-    assert (adaptive.soft_drop, adaptive.hard_drop) == (0.06, 0.07)
+    assert (adaptive.soft_drop, adaptive.hard_drop) == (soft_drop, hard_drop)
     assert cyclic.g_prob_threshold == 0.5
     assert cyclic.threshold_max_param_fraction is None
     assert cyclic.max_cycles == 1
@@ -42,22 +48,34 @@ def test_wider_gap_config_keeps_the_selected_single_pass_recipe():
     assert cfg.model.backbone.pretrained_weights == "IMAGENET1K_V2"
     assert cfg.mlflow.tags.reference_history_available_epochs == 86
     assert cfg.mlflow.tags.reference_used_epochs == "1-30"
-    assert cfg.run_history.root_dir == "outputs/runs/mobilenet_onepass_thr05_gap6_7pp"
-    assert "widegap6_7pp_20261108" in cfg.mlflow.run_name
+    assert cfg.run_history.root_dir == f"outputs/runs/mobilenet_onepass_thr05_gap{gap_suffix}pp"
+    assert f"widegap{gap_suffix}pp_20261108" in cfg.mlflow.experiment_name
+    assert f"widegap{gap_suffix}pp_20261108" in cfg.mlflow.run_name
     assert cfg.mlflow.run_name.endswith("_nocap")
+    assert cfg.mlflow.tags.recipe == (
+        f"single_pass_thr05_widegap_soft{soft_drop * 100:g}pp"
+        f"_hard{hard_drop * 100:g}pp_user_20261108"
+    )
 
 
 @pytest.mark.parametrize(
-    ("accuracy_drop", "expected_action"),
+    ("drop_position", "expected_action"),
     [
-        (0.055, "increase_lambda"),
-        (0.065, "hold"),
-        (0.07, "hold"),
-        (0.075, "decrease_lambda"),
+        ("below_soft", "increase_lambda"),
+        ("between_gaps", "hold"),
+        ("at_hard", "hold"),
+        ("above_hard", "decrease_lambda"),
     ],
 )
-def test_positive_gap_values_are_absolute_accuracy_drops(accuracy_drop, expected_action):
-    cfg = _config()
+def test_positive_gap_values_are_absolute_accuracy_drops(recipe, drop_position, expected_action):
+    gap_suffix, soft_drop, hard_drop = recipe
+    cfg = _config(gap_suffix)
+    accuracy_drop = {
+        "below_soft": soft_drop - 0.005,
+        "between_gaps": (soft_drop + hard_drop) / 2,
+        "at_hard": hard_drop,
+        "above_hard": hard_drop + 0.005,
+    }[drop_position]
     adaptive = OmegaConf.to_container(cfg.training_arguments.adaptive_lambda, resolve=True)
     adaptive.pop("enabled")
     adaptive.pop("baseline_history_dir")
@@ -86,14 +104,14 @@ def test_positive_gap_values_are_absolute_accuracy_drops(accuracy_drop, expected
             assert result.action == "warmup"
 
     assert result.action == expected_action
-    assert result.metrics["min_allowed_acc"] == pytest.approx(0.74)
-    assert result.metrics["hard_min_allowed_acc"] == pytest.approx(0.73)
+    assert result.metrics["min_allowed_acc"] == pytest.approx(0.8 - soft_drop)
+    assert result.metrics["hard_min_allowed_acc"] == pytest.approx(0.8 - hard_drop)
 
 
 def test_single_pass_search_selects_channels_then_runs_only_final_structural_recovery(
-    monkeypatch, tmp_path
+    recipe, monkeypatch, tmp_path
 ):
-    cfg = _config()
+    cfg = _config(recipe[0])
     calls = []
     gate = "backbone.features.0.gumbel_layer"
     eligible_channels = list(range(12))
