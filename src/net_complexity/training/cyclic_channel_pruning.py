@@ -45,6 +45,11 @@ Each cycle re-uses the existing ``channel_pruning`` mechanism end to end:
     level in the trajectory gets a clean accuracy/compute reading. The last
     recovery pass uses ``final_epochs`` (falling back to ``recovery_epochs``).
 
+With ``search_only=true`` and ``max_cycles=1``, the search and channel selection
+run once without recovery. The output contains a channel mask and gate-free
+structural architecture counts, without exporting initialized weights as a
+trained model. Architecture counting runs on CPU without pretrained loading.
+
 With ``weight_handoff.enabled=true``, each structural recovery is initialized
 by slicing the current gated checkpoint. Its fine-tuned surviving Conv/BN
 tensors are then scattered into the full-width, permanently masked carrier of
@@ -56,6 +61,7 @@ Config section (``cyclic_channel_pruning``)::
     cyclic_channel_pruning:
       enabled: true
       max_cycles: 10
+      search_only: false           # true requires max_cycles=1 and skips recovery
       stop_on_convergence: true    # false to exhaust a fixed epoch budget
 
       drop_mode: threshold          # "threshold" (default) or "param_budget"
@@ -640,18 +646,80 @@ def _next_search_initializer(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _save_search_only_architecture(
+    config: DictConfig,
+    disabled_channels: dict[str, list[int]],
+    output_root: Path,
+) -> dict[str, Any]:
+    """Count a compact architecture without exporting initialized model weights."""
+    from net_complexity.models.channel_pruning import build_structurally_pruned_model_from_config
+    from net_complexity.models.feature_selection import (
+        get_AIG_modules,
+        get_gumbel_modules,
+        get_stg_modules,
+    )
+
+    architecture_cfg = deepcopy(config)
+    OmegaConf.update(architecture_cfg, "model.backbone.pretrained_weights", None, force_add=True)
+    OmegaConf.update(architecture_cfg, "model.lambda_coef", 0.0, force_add=True)
+    counts = []
+    with torch.random.fork_rng(devices=[]):
+        for mask in ({}, disabled_channels):
+            _set_disabled_channels_structural(architecture_cfg, mask)
+            with torch.device("cpu"):
+                model = build_structurally_pruned_model_from_config(
+                    architecture_cfg, architecture_cfg.channel_pruning
+                )
+            if get_gumbel_modules(model) or get_AIG_modules(model) or get_stg_modules(model):
+                raise ValueError("Search-only architecture counting requires a gate-free structural model.")
+            counts.append(sum(parameter.numel() for parameter in model.parameters()))
+            del model
+
+    dense_total_params, total_params = counts
+    output_root = output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    mask_file = output_root / "channel_mask.json"
+    architecture_file = output_root / "architecture.json"
+    architecture = {
+        "total_params": total_params,
+        "dense_total_params": dense_total_params,
+        "removed_params": dense_total_params - total_params,
+        "removed_fraction": (dense_total_params - total_params) / dense_total_params,
+        "channels_removed": sum(len(channels) for channels in disabled_channels.values()),
+        "mask_file": str(mask_file),
+        "architecture_file": str(architecture_file),
+        "channel_mask": disabled_channels,
+        "structural": True,
+        "trained": False,
+        "gate_free": True,
+        "purpose": "architecture_counts_only",
+        "weights_exported": False,
+    }
+    mask_file.write_text(json.dumps(disabled_channels, indent=2) + "\n", encoding="utf-8")
+    architecture_file.write_text(json.dumps(architecture, indent=2) + "\n", encoding="utf-8")
+    return architecture
+
+
 def run_cyclic_channel_pruning_training(
     config: DictConfig,
     output_root: Path,
     progress_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run cyclic channel-dropping followed by per-cycle recovery passes.
+    """Run channel search and optional per-cycle structural recovery passes.
 
     Returns a dict with the same shape as ``cyclic_aig.run_cyclic_aig_training``:
     ``num_cycles_completed``, ``final_disabled_channels``, ``cycle_results``,
     ``recovery_results``, ``final_result``, ``training_cost``.
     """
     cyclic_cfg = config.cyclic_channel_pruning
+    search_only = bool(getattr(cyclic_cfg, "search_only", False))
+    if search_only:
+        if int(cyclic_cfg.max_cycles) != 1:
+            raise ValueError("cyclic_channel_pruning.search_only requires max_cycles=1.")
+        if bool(getattr(cyclic_cfg, "audit_protocol", False)):
+            raise ValueError("cyclic_channel_pruning.search_only does not support audit_protocol.")
+        if _weight_handoff_config(config) is not None:
+            raise ValueError("cyclic_channel_pruning.search_only does not support weight_handoff.")
     if bool(getattr(cyclic_cfg, "audit_protocol", False)):
         from .pruning_audit import run_fixed_pruning_pilot
         return run_fixed_pruning_pilot(config, output_root)
@@ -684,6 +752,7 @@ def run_cyclic_channel_pruning_training(
     initial_checkpoint = _resolve_initial_checkpoint(config)
     previous_search_checkpoint: Path | None = None
     previous_recovery_checkpoint: Path | None = None
+    architecture: dict[str, Any] | None = None
 
     _banner = "=" * 60
 
@@ -760,7 +829,9 @@ def run_cyclic_channel_pruning_training(
         converged = num_new == 0
         if converged:
             convergence_action = (
-                "stopping after recovery"
+                "saving architecture counts without recovery"
+                if search_only
+                else "stopping after recovery"
                 if stop_on_convergence
                 else "continuing to exhaust the fixed cycle budget"
             )
@@ -771,6 +842,10 @@ def run_cyclic_channel_pruning_training(
         else:
             print(f"Cycle {cycle + 1} | dropping {num_new} channel(s) across {len(new_drop)} block(s).")
             disabled_channels = _merge_disabled_channels(disabled_channels, new_drop)
+
+        if search_only:
+            architecture = _save_search_only_architecture(config, disabled_channels, output_root)
+            break
 
         is_final_recovery = (
             converged and stop_on_convergence
@@ -806,16 +881,19 @@ def run_cyclic_channel_pruning_training(
         if converged and stop_on_convergence:
             break
 
-    final_result = recovery_results[-1]
+    final_result = recovery_results[-1] if recovery_results else None
 
     print(f"\n{_banner}")
     total_disabled = sum(len(v) for v in disabled_channels.values())
-    print(f"Final Training | {total_disabled} channel(s) permanently disabled")
+    if search_only:
+        print(f"Search complete | {total_disabled} channel(s) selected | architecture counts only")
+    else:
+        print(f"Final Training | {total_disabled} channel(s) permanently disabled")
     print(_banner)
 
     cycle_train_time_sec = sum(float(r.get("full_train_time_sec", 0.0)) for r in cycle_results)
     recovery_train_time_sec = sum(float(r.get("full_train_time_sec", 0.0)) for r in recovery_results)
-    final_retrain_time_sec = float(final_result.get("full_train_time_sec", 0.0))
+    final_retrain_time_sec = float(final_result.get("full_train_time_sec", 0.0)) if final_result else 0.0
     full_train_time_sec = cycle_train_time_sec + recovery_train_time_sec
     num_epochs_executed = sum(
         int(r.get("num_epochs_executed", 0)) for r in (*cycle_results, *recovery_results)
@@ -833,6 +911,7 @@ def run_cyclic_channel_pruning_training(
     )
 
     cyclic_result = {
+        "search_only": search_only,
         "num_cycles_completed": len(cycle_results),
         "stop_on_convergence": stop_on_convergence,
         "final_disabled_channels": disabled_channels,
@@ -846,7 +925,9 @@ def run_cyclic_channel_pruning_training(
             "surviving_weights_transferred": handoff_enabled,
             "optimizer_state_transferred": False,
             "post_prune_training": (
-                "fine_tune_surviving_weights"
+                "none_architecture_counts_only"
+                if search_only
+                else "fine_tune_surviving_weights"
                 if handoff_enabled
                 else "fresh_initialization"
             ),
@@ -866,9 +947,11 @@ def run_cyclic_channel_pruning_training(
             "baseline_included_in_full_train_time": False,
         },
     }
+    if architecture is not None:
+        cyclic_result["architecture"] = architecture
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "cyclic_summary.json").write_text(
-        json.dumps(cyclic_result, indent=2, ensure_ascii=False, default=str),
+        json.dumps(cyclic_result, indent=2, ensure_ascii=False, default=str) + "\n",
         encoding="utf-8",
     )
     return cyclic_result

@@ -42,6 +42,11 @@ def test_grid_plan_has_exact_cross_product_and_eight_distinct_outputs():
             float(overrides["training_arguments.adaptive_lambda.hard_drop"]),
         ))
         assert overrides["cyclic_channel_pruning.threshold_max_param_fraction"] == "null"
+        assert overrides["++cyclic_channel_pruning.search_only"] == "true"
+        assert overrides["cyclic_channel_pruning.final_epochs"] == "0"
+        assert overrides["cyclic_channel_pruning.recovery_epochs"] == "0"
+        assert stage.kind == "search_only"
+        assert stage.directory.name.endswith("_search_only")
         assert overrides.get("++seed", overrides.get("+seed")) == "42"
         assert not any(
             argument.startswith("model.backbone.block.gate_threshold=")
@@ -137,24 +142,55 @@ def launch_context(monkeypatch, tmp_path):
 
 
 def _write_completed_training(directory):
-    final = directory / "final/synthetic_run"
-    (final / "checkpoints").mkdir(parents=True)
-    (final / "checkpoints/best.pt").write_bytes(b"checkpoint")
-    with (final / "history.csv").open("w", newline="", encoding="utf-8") as handle:
+    search = directory / "cycle_0/synthetic_run"
+    (search / "checkpoints").mkdir(parents=True)
+    (search / "checkpoints/best.pt").write_bytes(b"best checkpoint")
+    (search / "checkpoints/last.pt").write_bytes(b"last checkpoint")
+    with (search / "history.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["epoch", "valid_accuracy"])
         writer.writeheader()
-        writer.writerows({"epoch": epoch, "valid_accuracy": 0.7} for epoch in range(1, 46))
+        writer.writerows({"epoch": epoch, "valid_accuracy": 0.7} for epoch in range(1, 31))
+    mask = {"backbone.features.3.mid_gumbel_layer": [0]}
+    mask_path = directory / "channel_mask.json"
+    architecture_path = directory / "architecture.json"
+    mask_path.write_text(json.dumps(mask), encoding="utf-8")
+    architecture = {
+        "total_params": 2480011,
+        "dense_total_params": 2480072,
+        "removed_params": 61,
+        "removed_fraction": 61 / 2480072,
+        "channels_removed": 1,
+        "mask_file": str(mask_path),
+        "architecture_file": str(architecture_path),
+        "structural": True,
+        "trained": False,
+        "gate_free": True,
+    }
+    architecture_path.write_text(json.dumps({
+        **architecture,
+        "purpose": "architecture_counts_only",
+        "weights_exported": False,
+        "channel_mask": mask,
+        "geometry": [{"name": "backbone.features.3.branch.depthwise", "in_channels": 143}],
+    }), encoding="utf-8")
     summary = {
+        "search_only": True,
         "num_cycles_completed": 1,
-        "training_cost": {"num_epochs_executed": 75},
-        "cycle_results": [{"num_epochs_executed": 30}],
-        "recovery_results": [{"num_epochs_executed": 45}],
-        "final_result": {"run_dir": str(final), "test_metrics": {"test_accuracy": 0.71}},
+        "training_cost": {"num_epochs_executed": 30},
+        "cycle_results": [{
+            "num_epochs_executed": 30,
+            "run_dir": str(search),
+            "last_valid_metrics": {"valid_accuracy": 0.7},
+        }],
+        "recovery_results": [],
+        "final_result": None,
+        "final_disabled_channels": mask,
+        "architecture": architecture,
     }
     (directory / "cyclic_summary.json").write_text(json.dumps(summary), encoding="utf-8")
 
 
-def test_grid_executes_eight_full_profiles_sequentially(monkeypatch, launch_context):
+def test_grid_executes_eight_search_only_profiles_sequentially(monkeypatch, launch_context):
     root, archive, identity, plan, reference_checks = launch_context
     training_commands = []
     all_commands = []
@@ -167,7 +203,7 @@ def test_grid_executes_eight_full_profiles_sequentially(monkeypatch, launch_cont
             directory = Path(json.loads(_overrides(command)["hydra.run.dir"]))
             assert directory == plan[len(training_commands)].directory
             for previous in plan[:len(training_commands)]:
-                assert MODULE.single.validate_existing_stage(previous)
+                assert MODULE.validate_existing_stage(previous)
                 receipt = json.loads((previous.directory / "launcher_receipt.json").read_text())
                 assert receipt["status"] == "complete"
             training_commands.append(command)
@@ -180,17 +216,62 @@ def test_grid_executes_eight_full_profiles_sequentially(monkeypatch, launch_cont
     assert training_commands == [stage.command for stage in plan]
     assert len(reference_checks) >= 9
     for stage in plan:
-        assert MODULE.single.validate_existing_stage(stage)
+        assert MODULE.validate_existing_stage(stage)
     summary = json.loads((root / MODULE.load_grid(root)["output_root"] / "grid_summary.json").read_text())
-    assert summary["total_new_epochs"] == 600
+    assert summary["total_new_epochs"] == 240
     assert len(summary["profiles"]) == 8
-    assert all(profile["test_metrics"]["test_accuracy"] == 0.71 for profile in summary["profiles"])
+    assert all("test_metrics" not in profile for profile in summary["profiles"])
+    assert all(profile["num_epochs_executed"] == 30 for profile in summary["profiles"])
+    assert all(profile["last_search_validation_accuracy"] == 0.7 for profile in summary["profiles"])
+    assert all(profile["architecture"]["total_params"] == 2480011 for profile in summary["profiles"])
+    assert all(profile["architecture"]["removed_params"] == 61 for profile in summary["profiles"])
 
     # The second invocation may re-check/import metadata, but must not train
     # any of the eight completed, matching profiles again.
     assert MODULE.main(["--baseline-archive", str(archive)]) == 0
     assert len(all_commands) == 10
     assert len(training_commands) == 8
+
+
+@pytest.mark.parametrize("corruption", [
+    "missing_mask", "missing_architecture", "missing_last_checkpoint",
+    "inconsistent_parameter_counts", "mismatched_mask", "recovery_present", "old_epoch_budget",
+])
+def test_search_completion_requires_real_search_and_matching_architecture_artifacts(
+    launch_context, corruption,
+):
+    root, archive, identity, plan, reference_checks = launch_context
+    stage = plan[0]
+    stage.directory.mkdir(parents=True)
+    MODULE.single.write_receipt(stage, "complete")
+    _write_completed_training(stage.directory)
+    assert MODULE.validate_existing_stage(stage)
+    summary_path = stage.directory / "cyclic_summary.json"
+    summary = json.loads(summary_path.read_text())
+    architecture_path = Path(summary["architecture"]["architecture_file"])
+    mask_path = Path(summary["architecture"]["mask_file"])
+    if corruption == "missing_mask":
+        mask_path.unlink()
+    elif corruption == "missing_architecture":
+        architecture_path.unlink()
+    elif corruption == "missing_last_checkpoint":
+        (Path(summary["cycle_results"][0]["run_dir"]) / "checkpoints/last.pt").unlink()
+    elif corruption == "inconsistent_parameter_counts":
+        summary["architecture"]["removed_params"] += 1
+        stored = json.loads(architecture_path.read_text())
+        stored["removed_params"] = summary["architecture"]["removed_params"]
+        architecture_path.write_text(json.dumps(stored), encoding="utf-8")
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    elif corruption == "mismatched_mask":
+        mask_path.write_text(json.dumps({"backbone.features.3.mid_gumbel_layer": [0, 1]}))
+    elif corruption == "recovery_present":
+        summary["recovery_results"] = [{"num_epochs_executed": 45}]
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    else:
+        summary["training_cost"]["num_epochs_executed"] = 75
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        MODULE.validate_existing_stage(stage)
 
 
 def test_last_partial_profile_blocks_training_of_every_profile(monkeypatch, launch_context, capsys):
@@ -208,7 +289,7 @@ def test_last_partial_profile_blocks_training_of_every_profile(monkeypatch, laun
     monkeypatch.setattr(MODULE.subprocess, "run", run_child)
     assert MODULE.main(["--baseline-archive", str(archive)]) == 1
     assert training_commands == []
-    assert "refusing to repeat training" in capsys.readouterr().err
+    assert "refusing" in capsys.readouterr().err
     assert not plan[0].directory.exists()
 
 
@@ -228,7 +309,7 @@ def test_grid_stops_at_first_failed_profile(monkeypatch, launch_context):
     monkeypatch.setattr(MODULE.subprocess, "run", run_child)
     assert MODULE.main(["--baseline-archive", str(archive)]) == 1
     assert training_commands == [stage.command for stage in plan[:3]]
-    assert all(MODULE.single.validate_existing_stage(stage) for stage in plan[:2])
+    assert all(MODULE.validate_existing_stage(stage) for stage in plan[:2])
     assert (plan[2].directory / "launcher_receipt.json").is_file()
     assert not any(stage.directory.exists() for stage in plan[3:])
 

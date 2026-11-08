@@ -8,9 +8,9 @@
 `sample_complexity_of_feature_selection_in_deep_tabular_models`.
 Каталог загрузки — **`data/` внутри репозитория**, без ведущего `/`.
 
-## Сетка из восьми запусков: пороги каналов 0.5 и 0.9
+## Сетка из восьми поисков без последующего обучения архитектуры
 
-`configs/mobilenet_onepass_grid_thr05_09.json` задаёт два порога физического
+`configs/mobilenet_onepass_grid_thr05_09_search_only.json` задаёт два порога физического
 удаления каналов и четыре диапазона разности validation accuracy с reference:
 
 | Диапазон разности, п.п. | soft_drop | hard_drop | Пороги каналов |
@@ -28,8 +28,8 @@
 
 Все восемь профилей используют базовый конфиг `mobilenet_onepass_thr05_gap8_12pp`
 с явными overrides. Сохраняются adaptive λ, `log_step_init: auto`, отключённый
-boost, отсутствие cap, начальная λ 1e-4, warmup 3, label smoothing 0 в обеих
-фазах, ImageNet V2, batch 128 и workers 0. Шаг auto остаётся `1.64470363785289`.
+boost, отсутствие cap, начальная λ 1e-4, warmup 3, label smoothing 0,
+ImageNet V2, batch 128 и workers 0. Шаг auto остаётся `1.64470363785289`.
 Общий top-level seed — 42, seed разбиения данных также 42. Это по одному
 запуску на сочетание, без оценки разброса по нескольким seed.
 
@@ -37,19 +37,28 @@ boost, отсутствие cap, начальная λ 1e-4, warmup 3, label smo
 Внутренний `model.backbone.block.gate_threshold` при обучении остаётся 0.5.
 Для каждой группы сохраняется хотя бы один канал.
 
-Одна команда последовательно выполняет **восемь независимых полных циклов**:
-30 эпох поиска → физическое удаление каналов → 45 эпох обучения архитектуры
-→ test checkpoint, выбранного по validation. Это 75 новых эпох на модель,
-600 новых эпох на всю сетку. Архивный reference импортируется один раз;
+По решению пользователя **фаза 45 эпох отключена**. Launcher явно передаёт
+`cyclic_channel_pruning.search_only=true`, `recovery_epochs=0` и `final_epochs=0`.
+Драйвер после отбора каналов завершает профиль без вызова recovery.
+Одна команда последовательно выполняет **восемь независимых поисков по 30 эпох**,
+240 новых эпох на всю сетку. Архивный reference импортируется один раз;
 новый baseline не обучается. Поиск повторяется для каждой комбинации.
+
+После поиска сохраняются `channel_mask.json`, `architecture.json` и
+`cyclic_summary.json`. Размер физической архитектуры считается созданием
+реальной структурной модели на CPU, с выключенной загрузкой pretrained-весов,
+без обучения и проходов по данным. `architecture.json` содержит число каналов,
+число физических параметров и долю их сокращения; эта структура ещё не обучена.
+Checkpoint-файлы `best.pt` и `last.pt` в каталоге поиска относятся к модели
+с гейтами. Отдельный обученный checkpoint компактной модели здесь не создаётся.
 
 ```bash
 git pull --ff-only
 mkdir -p outputs/logs
 nohup .venv/bin/python -u scripts/run_mobilenet_onepass_grid.py \
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
-    > outputs/logs/mobilenet_onepass_grid_thr05_09.log 2>&1 < /dev/null &
-tail -f outputs/logs/mobilenet_onepass_grid_thr05_09.log
+    > outputs/logs/mobilenet_onepass_grid_thr05_09_search_only.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_grid_thr05_09_search_only.log
 ```
 
 Проверить все команды до обучения:
@@ -59,14 +68,20 @@ tail -f outputs/logs/mobilenet_onepass_grid_thr05_09.log
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz
 ```
 
-Результаты отдельные: `outputs/runs/mobilenet_onepass_grid_thr05_09/`.
+Результаты отдельные: `outputs/runs/mobilenet_onepass_grid_thr05_09_search_only/`.
 `grid_plan.json` хранит точные команды и fingerprints восьми профилей.
-После завершения всех профилей `grid_summary.json` собирает их test-метрики
-и пути к подробным `cyclic_summary.json`. Каждая модель сохраняет свои
+После завершения всех профилей `grid_summary.json` собирает размеры архитектур,
+validation accuracy поиска и пути к подробным `cyclic_summary.json`.
+Это результаты поиска, а не итоговые test-метрики обученных компактных моделей.
+Каждая модель сохраняет свои
 истории и checkpoints. Launcher последовательно ждёт завершения каждого
 профиля, останавливается на первой ошибке и проверяет reference перед каждым.
 Совпадающие завершённые профили переиспользуются. Частичные или чужие
-директории блокируют запуск всей сетки до начала нового обучения.
+директории блокируют запуск всей сетки до начала нового обучения. Завершение
+проверяется по 30 эпохам поиска, обоим checkpoint-файлам и согласованным
+артефактам архитектуры; старое требование 75 эпох к этой сетке не применяется.
+Новый каталог сохраняет результаты прежнего варианта с 45 эпохами отдельно.
+Уже работающий старый процесс не переключается на новый режим от `git pull`.
 
 ## Новый запуск: диапазон λ от −12 до −8 п.п.
 

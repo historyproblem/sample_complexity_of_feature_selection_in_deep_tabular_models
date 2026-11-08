@@ -7,7 +7,7 @@ from hydra import compose, initialize_config_dir
 
 
 CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
-MANIFEST_PATH = CONFIGS_DIR / "mobilenet_onepass_grid_thr05_09.json"
+MANIFEST_PATH = CONFIGS_DIR / "mobilenet_onepass_grid_thr05_09_search_only.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text())
 GRID_POINTS = [
     (threshold, band["soft_drop"], band["hard_drop"])
@@ -16,9 +16,12 @@ GRID_POINTS = [
 
 
 def test_manifest_defines_eight_unique_points_including_both_requested_eight_twelve_bands():
-    assert set(MANIFEST) == {"base_config", "output_root", "seed", "thresholds", "lambda_bands"}
+    assert set(MANIFEST) == {
+        "base_config", "output_root", "seed", "search_only", "thresholds", "lambda_bands"
+    }
     assert MANIFEST["base_config"] == "mobilenet_onepass_thr05_gap8_12pp"
-    assert MANIFEST["output_root"] == "outputs/runs/mobilenet_onepass_grid_thr05_09"
+    assert MANIFEST["output_root"] == "outputs/runs/mobilenet_onepass_grid_thr05_09_search_only"
+    assert MANIFEST["search_only"] is True
     assert MANIFEST["seed"] == 42
     assert MANIFEST["thresholds"] == [0.5, 0.9]
     assert MANIFEST["lambda_bands"] == [
@@ -51,6 +54,9 @@ def test_grid_point_composes_threshold_and_band_while_preserving_onepass_method(
                 f"++seed={MANIFEST['seed']}",
                 f"cyclic_channel_pruning.g_prob_threshold={threshold}",
                 "cyclic_channel_pruning.threshold_max_param_fraction=null",
+                "++cyclic_channel_pruning.search_only=true",
+                "cyclic_channel_pruning.recovery_epochs=0",
+                "cyclic_channel_pruning.final_epochs=0",
                 f"training_arguments.adaptive_lambda.soft_drop={soft_drop}",
                 f"training_arguments.adaptive_lambda.hard_drop={hard_drop}",
             ],
@@ -65,8 +71,9 @@ def test_grid_point_composes_threshold_and_band_while_preserving_onepass_method(
     assert cyclic.g_prob_threshold == threshold
     assert cyclic.threshold_max_param_fraction is None
     assert cyclic.max_cycles == 1
-    assert (cyclic.gumbel_epochs, cyclic.recovery_epochs, cyclic.final_epochs) == (30, 45, 45)
-    assert cyclic.gumbel_epochs + cyclic.final_epochs == 75
+    assert cyclic.search_only is True
+    assert (cyclic.gumbel_epochs, cyclic.recovery_epochs, cyclic.final_epochs) == (30, 0, 0)
+    assert cyclic.gumbel_epochs + cyclic.final_epochs == 30
     assert cfg.training_arguments.num_epochs == 30
     assert cfg.scheduler.T_max == 30
     assert adaptive.enabled is True

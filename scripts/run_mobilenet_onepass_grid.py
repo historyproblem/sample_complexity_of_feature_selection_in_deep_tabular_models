@@ -1,7 +1,7 @@
-"""Run eight independent MobileNet search/recovery profiles sequentially.
+"""Run eight independent MobileNet channel-search profiles sequentially.
 
 Use .venv/bin/python from the repository root. --dry-run needs only the
-standard library and prints the reference import plus eight full-cycle commands.
+standard library and prints the reference import plus eight search-only commands.
 """
 from __future__ import annotations
 
@@ -17,16 +17,18 @@ from pathlib import Path
 import run_mobilenet_onepass as single
 
 
-CONFIG_NAME = "mobilenet_onepass_grid_thr05_09"
+CONFIG_NAME = "mobilenet_onepass_grid_thr05_09_search_only"
 GRID_CONFIG_PATH = Path("configs") / f"{CONFIG_NAME}.json"
 
 
 def load_grid(repo_root: Path) -> dict:
     grid = json.loads((repo_root / GRID_CONFIG_PATH).read_text(encoding="utf-8"))
     if grid["base_config"] != "mobilenet_onepass_thr05_gap8_12pp":
-        raise ValueError("The grid requires the verified 30+45 auto-step/no-boost base config")
+        raise ValueError("The grid requires the verified auto-step/no-boost base config")
     if grid["output_root"] != f"outputs/runs/{CONFIG_NAME}":
         raise ValueError("The grid must use its own output directory")
+    if grid["search_only"] is not True:
+        raise ValueError("This grid must disable post-search recovery training")
     if grid["thresholds"] != [0.5, 0.9]:
         raise ValueError("The grid must contain channel thresholds 0.5 and 0.9")
     if type(grid["seed"]) is not int or grid["seed"] < 0:
@@ -66,7 +68,7 @@ def build_plan(repo_root: Path, reference_identity: dict | None = None) -> list[
         for threshold in grid["thresholds"]:
             name = (
                 f"mobilenet_grid_thr{threshold:g}_soft{soft:g}_hard{hard:g}"
-                f"_seed{grid['seed']}_nocap_autostep_noboost"
+                f"_seed{grid['seed']}_nocap_autostep_noboost_search_only"
             )
             directory = repo_root / grid["output_root"] / name
             command = [
@@ -80,8 +82,11 @@ def build_plan(repo_root: Path, reference_identity: dict | None = None) -> list[
                 f"training_arguments.adaptive_lambda.hard_drop={hard:g}",
                 f"cyclic_channel_pruning.g_prob_threshold={threshold:g}",
                 "cyclic_channel_pruning.threshold_max_param_fraction=null",
+                "++cyclic_channel_pruning.search_only=true",
+                "cyclic_channel_pruning.recovery_epochs=0",
+                "cyclic_channel_pruning.final_epochs=0",
                 f"run_history.root_dir={json.dumps(str(repo_root / grid['output_root']))}",
-                "mlflow.experiment_name=mobilenetv2_onepass_grid_thr05_09_20261109",
+                "mlflow.experiment_name=mobilenetv2_onepass_grid_thr05_09_search_only_20261109",
                 f"mlflow.run_name={name}",
                 f"mlflow.tags.recipe={CONFIG_NAME}_seed{grid['seed']}",
                 f"hydra.run.dir={json.dumps(str(directory))}",
@@ -91,10 +96,67 @@ def build_plan(repo_root: Path, reference_identity: dict | None = None) -> list[
                 "reference": reference_identity or {"archive_sha256": single.EXPECTED_ARCHIVE_SHA256},
             }
             fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-            stages.append(single.Stage("onepass", directory, command, fingerprint))
+            stages.append(single.Stage("search_only", directory, command, fingerprint))
     if len(stages) != 8 or len({stage.directory for stage in stages}) != 8:
         raise ValueError("The grid must produce exactly eight distinct profiles")
     return stages
+
+
+def validate_existing_stage(stage: single.Stage) -> bool:
+    """Accept only complete 30-epoch searches with their channel architecture."""
+    if not stage.directory.exists():
+        return False
+    receipt_path = stage.directory / "launcher_receipt.json"
+    if not receipt_path.is_file():
+        raise RuntimeError(f"Existing directory has no launch receipt: {stage.directory}; refusing rerun")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if receipt.get("fingerprint") != stage.fingerprint:
+        raise RuntimeError(f"Existing stage fingerprint differs: {stage.directory}; refusing rerun")
+    try:
+        summary = json.loads((stage.directory / "cyclic_summary.json").read_text(encoding="utf-8"))
+        if summary["search_only"] is not True or summary["num_cycles_completed"] != 1:
+            raise RuntimeError("Expected exactly one search-only cycle")
+        if summary["training_cost"]["num_epochs_executed"] != 30:
+            raise RuntimeError("Search must finish exactly 30 epochs")
+        if len(summary["cycle_results"]) != 1 or summary["recovery_results"]:
+            raise RuntimeError("Recovery training must not run in this grid")
+        if summary["final_result"] is not None:
+            raise RuntimeError("Search-only results must not claim a trained final model")
+        search = summary["cycle_results"][0]
+        if search["num_epochs_executed"] != 30:
+            raise RuntimeError("Search result has the wrong epoch count")
+        search_dir = Path(search["run_dir"])
+        single.validate_history(search_dir / "history.csv", 30)
+        for name in ("best.pt", "last.pt"):
+            if not (search_dir / "checkpoints" / name).is_file():
+                raise RuntimeError(f"Search checkpoint missing: {name}")
+        architecture = summary["architecture"]
+        stored = json.loads(Path(architecture["architecture_file"]).read_text(encoding="utf-8"))
+        mask = json.loads(Path(architecture["mask_file"]).read_text(encoding="utf-8"))
+        if mask != summary["final_disabled_channels"] or stored["channel_mask"] != mask:
+            raise RuntimeError("Saved channel mask differs from the selected architecture")
+        for key, value in (("structural", True), ("trained", False), ("gate_free", True)):
+            if architecture[key] is not value or stored[key] is not value:
+                raise RuntimeError(f"Unexpected architecture flag: {key}")
+        keys = ("total_params", "dense_total_params", "removed_params", "channels_removed")
+        for key in keys:
+            if type(architecture[key]) is not int or architecture[key] != stored[key]:
+                raise RuntimeError(f"Invalid architecture count: {key}")
+        dense, compact = architecture["dense_total_params"], architecture["total_params"]
+        if not 0 < compact <= dense or architecture["removed_params"] != dense - compact:
+            raise RuntimeError("Physical parameter counts do not reconcile")
+        fraction = (dense - compact) / dense
+        if not math.isclose(architecture["removed_fraction"], fraction, abs_tol=1e-12):
+            raise RuntimeError("Physical removal fraction does not reconcile")
+        if architecture["removed_fraction"] != stored["removed_fraction"]:
+            raise RuntimeError("Saved physical removal fractions differ")
+        if architecture["channels_removed"] != sum(len(channels) for channels in mask.values()):
+            raise RuntimeError("Selected channel count does not match the mask")
+    except (OSError, KeyError, ValueError, TypeError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"Stage is incomplete or invalid: {stage.directory}; refusing to repeat training. {exc}"
+        ) from exc
+    return True
 
 
 def _write_json(target: Path, data: dict) -> None:
@@ -136,9 +198,9 @@ def main(argv: list[str] | None = None) -> int:
             reference_identity = single.validate_imported_reference(reference_dir, archive_path)
             single.preflight(repo_root, config_name=grid["base_config"])
             plan = build_plan(repo_root, reference_identity)
-            completed = {stage.directory: single.validate_existing_stage(stage) for stage in plan}
+            completed = {stage.directory: validate_existing_stage(stage) for stage in plan}
             plan_record = {
-                "grid": grid, "new_epochs_per_model": 75, "total_new_epochs": 600,
+                "grid": grid, "new_epochs_per_model": 30, "total_new_epochs": 240,
                 "profiles": [
                     {"directory": str(stage.directory), "command": stage.command,
                      "fingerprint": stage.fingerprint}
@@ -152,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_json(plan_path, plan_record)
             print(
                 f"Grid: 8 sequential profiles; seed={grid['seed']}; "
-                "each 30 search + 45 recovery = 75 epochs; 600 new epochs total. "
+                "each 30 search epochs; no recovery training; 240 new epochs total. "
                 "Historical reference reused; no new baseline training.",
                 flush=True,
             )
@@ -167,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 single.write_receipt(stage, "running")
                 print(shlex.join(stage.command), flush=True)
                 subprocess.run(stage.command, cwd=repo_root, check=True)
-                single.validate_existing_stage(stage)
+                validate_existing_stage(stage)
                 single.write_receipt(stage, "complete")
             results = []
             for stage in plan:
@@ -177,12 +239,15 @@ def main(argv: list[str] | None = None) -> int:
                     "profile": stage.directory.name,
                     "cyclic_summary": str(summary_path),
                     "num_epochs_executed": summary["training_cost"]["num_epochs_executed"],
-                    "test_metrics": summary["final_result"]["test_metrics"],
+                    "architecture": summary["architecture"],
+                    "last_search_validation_accuracy": summary["cycle_results"][0].get(
+                        "last_valid_metrics", {}
+                    ).get("valid_accuracy"),
                 })
             _write_json(output_root / "grid_summary.json", {
-                "grid": grid, "total_new_epochs": 600, "profiles": results,
+                "grid": grid, "total_new_epochs": 240, "profiles": results,
             })
-        print("Done: all eight search/recovery profiles have completed frozen-checkpoint test results.", flush=True)
+        print("Done: all eight searches completed; channel masks and architecture sizes saved; no recovery training.", flush=True)
         return 0
     except (OSError, KeyError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
