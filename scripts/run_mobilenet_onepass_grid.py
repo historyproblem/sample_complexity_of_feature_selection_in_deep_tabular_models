@@ -17,7 +17,7 @@ from pathlib import Path
 import run_mobilenet_onepass as single
 
 
-CONFIG_NAME = "mobilenet_onepass_grid_thr05_09_search_only"
+CONFIG_NAME = "mobilenet_onepass_grid_thr05_09_search_only_warmup10"
 GRID_CONFIG_PATH = Path("configs") / f"{CONFIG_NAME}.json"
 
 
@@ -29,6 +29,13 @@ def load_grid(repo_root: Path) -> dict:
         raise ValueError("The grid must use its own output directory")
     if grid["search_only"] is not True:
         raise ValueError("This grid must disable post-search recovery training")
+    if type(grid["warmup_epochs"]) is not int or grid["warmup_epochs"] != 10:
+        raise ValueError("This grid requires ten lambda warmup epochs")
+    fraction = float(grid["auto_log_step_epoch_fraction"])
+    if not math.isfinite(fraction) or not 0 < fraction <= 1:
+        raise ValueError("The auto-step target epoch fraction must be in (0, 1]")
+    if math.floor(30 * fraction - grid["warmup_epochs"]) < 1:
+        raise ValueError("The auto-step target must leave at least one post-warmup update")
     if grid["thresholds"] != [0.5, 0.9]:
         raise ValueError("The grid must contain channel thresholds 0.5 and 0.9")
     if type(grid["seed"]) is not int or grid["seed"] < 0:
@@ -68,7 +75,7 @@ def build_plan(repo_root: Path, reference_identity: dict | None = None) -> list[
         for threshold in grid["thresholds"]:
             name = (
                 f"mobilenet_grid_thr{threshold:g}_soft{soft:g}_hard{hard:g}"
-                f"_seed{grid['seed']}_nocap_autostep_noboost_search_only"
+                f"_seed{grid['seed']}_nocap_autostep_noboost_search_only_warmup10"
             )
             directory = repo_root / grid["output_root"] / name
             command = [
@@ -80,13 +87,16 @@ def build_plan(repo_root: Path, reference_identity: dict | None = None) -> list[
                 + json.dumps(str(reference_dir)),
                 f"training_arguments.adaptive_lambda.soft_drop={soft:g}",
                 f"training_arguments.adaptive_lambda.hard_drop={hard:g}",
+                f"training_arguments.adaptive_lambda.warmup_epochs={grid['warmup_epochs']}",
+                "++training_arguments.adaptive_lambda.auto_log_step_epoch_fraction="
+                + str(grid["auto_log_step_epoch_fraction"]),
                 f"cyclic_channel_pruning.g_prob_threshold={threshold:g}",
                 "cyclic_channel_pruning.threshold_max_param_fraction=null",
                 "++cyclic_channel_pruning.search_only=true",
                 "cyclic_channel_pruning.recovery_epochs=0",
                 "cyclic_channel_pruning.final_epochs=0",
                 f"run_history.root_dir={json.dumps(str(repo_root / grid['output_root']))}",
-                "mlflow.experiment_name=mobilenetv2_onepass_grid_thr05_09_search_only_20261109",
+                "mlflow.experiment_name=mobilenetv2_onepass_grid_thr05_09_search_only_warmup10_20261109",
                 f"mlflow.run_name={name}",
                 f"mlflow.tags.recipe={CONFIG_NAME}_seed{grid['seed']}",
                 f"hydra.run.dir={json.dumps(str(directory))}",
@@ -213,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("Existing grid plan differs; refusing to replace or repeat its training")
             _write_json(plan_path, plan_record)
             print(
-                f"Grid: 8 sequential profiles; seed={grid['seed']}; "
+                f"Grid: 8 sequential profiles; seed={grid['seed']}; warmup={grid['warmup_epochs']}; "
                 "each 30 search epochs; no recovery training; 240 new epochs total. "
                 "Historical reference reused; no new baseline training.",
                 flush=True,

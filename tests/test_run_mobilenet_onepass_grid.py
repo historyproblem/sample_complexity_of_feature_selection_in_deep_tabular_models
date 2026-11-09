@@ -45,8 +45,12 @@ def test_grid_plan_has_exact_cross_product_and_eight_distinct_outputs():
         assert overrides["++cyclic_channel_pruning.search_only"] == "true"
         assert overrides["cyclic_channel_pruning.final_epochs"] == "0"
         assert overrides["cyclic_channel_pruning.recovery_epochs"] == "0"
+        assert overrides["training_arguments.adaptive_lambda.warmup_epochs"] == "10"
+        assert float(overrides[
+            "++training_arguments.adaptive_lambda.auto_log_step_epoch_fraction"
+        ]) == 1.0
         assert stage.kind == "search_only"
-        assert stage.directory.name.endswith("_search_only")
+        assert stage.directory.name.endswith("_search_only_warmup10")
         assert overrides.get("++seed", overrides.get("+seed")) == "42"
         assert not any(
             argument.startswith("model.backbone.block.gate_threshold=")

@@ -1466,13 +1466,21 @@ def _resolve_adaptive_lambda_log_step_init(
             f"< {AUTO_LOG_STEP_TARGET_LAMBDA:g}."
         )
 
-    target_epoch = float(num_epochs) * AUTO_LOG_STEP_EPOCH_FRACTION
+    try:
+        epoch_fraction = float(
+            getattr(adaptive_cfg, "auto_log_step_epoch_fraction", AUTO_LOG_STEP_EPOCH_FRACTION)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("adaptive_lambda.auto_log_step_epoch_fraction must be finite and within (0, 1].") from exc
+    if not math.isfinite(epoch_fraction) or not 0.0 < epoch_fraction <= 1.0:
+        raise ValueError("adaptive_lambda.auto_log_step_epoch_fraction must be finite and within (0, 1].")
+    target_epoch = float(num_epochs) * epoch_fraction
     update_window = target_epoch - float(warmup_epochs)
     update_slots = math.floor(update_window / float(update_every_epochs))
     if update_slots <= 0:
         raise ValueError(
             "adaptive_lambda.log_step_init=auto requires at least one lambda update "
-            "within the first third of training."
+            "by its configured target epoch."
         )
 
     return math.log(AUTO_LOG_STEP_TARGET_LAMBDA / initial_lambda_coef) / float(update_slots)

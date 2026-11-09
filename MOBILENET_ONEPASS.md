@@ -10,7 +10,7 @@
 
 ## Сетка из восьми поисков без последующего обучения архитектуры
 
-`configs/mobilenet_onepass_grid_thr05_09_search_only.json` задаёт два порога физического
+`configs/mobilenet_onepass_grid_thr05_09_search_only_warmup10.json` задаёт два порога физического
 удаления каналов и четыре диапазона разности validation accuracy с reference:
 
 | Диапазон разности, п.п. | soft_drop | hard_drop | Пороги каналов |
@@ -28,8 +28,26 @@
 
 Все восемь профилей используют базовый конфиг `mobilenet_onepass_thr05_gap8_12pp`
 с явными overrides. Сохраняются adaptive λ, `log_step_init: auto`, отключённый
-boost, отсутствие cap, начальная λ 1e-4, warmup 3, label smoothing 0,
-ImageNet V2, batch 128 и workers 0. Шаг auto остаётся `1.64470363785289`.
+boost, отсутствие cap, начальная λ 1e-4, label smoothing 0,
+ImageNet V2, batch 128 и workers 0.
+
+**Warmup λ увеличен до 10 эпох.** На эпохах 1–10 λ фиксирована на 1e-4,
+веса и гейты обучаются. Первое решение контроллера принимается после
+validation эпохи 11 и применяется с эпохи 12. Общая длина поиска остаётся 30 эпох.
+
+Для этого grid задан `auto_log_step_epoch_fraction: 1.0`: auto рассчитывает
+шаг по 20 обновлениям после warmup до конца поиска. Прежняя цель auto к
+первой трети поиска совпала бы с концом warmup и дала бы ноль обновлений.
+
+```text
+N = floor((30 * 1.0 - 10) / 1) = 20
+log_step = ln(10 / 0.0001) / 20 = 0.5756462732485115
+```
+
+Этот шаг постоянный, boost выключен. Множители изменения λ: примерно
+1.778279 при повышении и 0.562341 при снижении, с сохранением границ λ.
+Auto рассчитывается один раз; фактическое направление определяется точностью.
+Стандартная цель auto к первой трети для прежних конфигов сохранена.
 Общий top-level seed — 42, seed разбиения данных также 42. Это по одному
 запуску на сочетание, без оценки разброса по нескольким seed.
 
@@ -57,8 +75,8 @@ git pull --ff-only
 mkdir -p outputs/logs
 nohup .venv/bin/python -u scripts/run_mobilenet_onepass_grid.py \
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz \
-    > outputs/logs/mobilenet_onepass_grid_thr05_09_search_only.log 2>&1 < /dev/null &
-tail -f outputs/logs/mobilenet_onepass_grid_thr05_09_search_only.log
+    > outputs/logs/mobilenet_onepass_grid_thr05_09_search_only_warmup10.log 2>&1 < /dev/null &
+tail -f outputs/logs/mobilenet_onepass_grid_thr05_09_search_only_warmup10.log
 ```
 
 Проверить все команды до обучения:
@@ -68,7 +86,7 @@ tail -f outputs/logs/mobilenet_onepass_grid_thr05_09_search_only.log
     --baseline-archive outputs/baselines/mobilenet_baseline_partial.tar.gz
 ```
 
-Результаты отдельные: `outputs/runs/mobilenet_onepass_grid_thr05_09_search_only/`.
+Результаты отдельные: `outputs/runs/mobilenet_onepass_grid_thr05_09_search_only_warmup10/`.
 `grid_plan.json` хранит точные команды и fingerprints восьми профилей.
 После завершения всех профилей `grid_summary.json` собирает размеры архитектур,
 validation accuracy поиска и пути к подробным `cyclic_summary.json`.

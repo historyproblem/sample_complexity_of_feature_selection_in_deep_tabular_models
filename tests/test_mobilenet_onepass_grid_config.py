@@ -7,7 +7,7 @@ from hydra import compose, initialize_config_dir
 
 
 CONFIGS_DIR = Path(__file__).resolve().parents[1] / "configs"
-MANIFEST_PATH = CONFIGS_DIR / "mobilenet_onepass_grid_thr05_09_search_only.json"
+MANIFEST_PATH = CONFIGS_DIR / "mobilenet_onepass_grid_thr05_09_search_only_warmup10.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text())
 GRID_POINTS = [
     (threshold, band["soft_drop"], band["hard_drop"])
@@ -17,12 +17,17 @@ GRID_POINTS = [
 
 def test_manifest_defines_eight_unique_points_including_both_requested_eight_twelve_bands():
     assert set(MANIFEST) == {
-        "base_config", "output_root", "seed", "search_only", "thresholds", "lambda_bands"
+        "base_config", "output_root", "seed", "search_only", "thresholds", "lambda_bands",
+        "warmup_epochs", "auto_log_step_epoch_fraction",
     }
     assert MANIFEST["base_config"] == "mobilenet_onepass_thr05_gap8_12pp"
-    assert MANIFEST["output_root"] == "outputs/runs/mobilenet_onepass_grid_thr05_09_search_only"
+    assert MANIFEST["output_root"] == (
+        "outputs/runs/mobilenet_onepass_grid_thr05_09_search_only_warmup10"
+    )
     assert MANIFEST["search_only"] is True
     assert MANIFEST["seed"] == 42
+    assert MANIFEST["warmup_epochs"] == 10
+    assert MANIFEST["auto_log_step_epoch_fraction"] == 1.0
     assert MANIFEST["thresholds"] == [0.5, 0.9]
     assert MANIFEST["lambda_bands"] == [
         {"soft_drop": 0.04, "hard_drop": 0.08},
@@ -59,6 +64,9 @@ def test_grid_point_composes_threshold_and_band_while_preserving_onepass_method(
                 "cyclic_channel_pruning.final_epochs=0",
                 f"training_arguments.adaptive_lambda.soft_drop={soft_drop}",
                 f"training_arguments.adaptive_lambda.hard_drop={hard_drop}",
+                f"training_arguments.adaptive_lambda.warmup_epochs={MANIFEST['warmup_epochs']}",
+                "++training_arguments.adaptive_lambda.auto_log_step_epoch_fraction="
+                f"{MANIFEST['auto_log_step_epoch_fraction']}",
             ],
         )
 
@@ -80,7 +88,8 @@ def test_grid_point_composes_threshold_and_band_while_preserving_onepass_method(
     assert (adaptive.soft_drop, adaptive.hard_drop) == (soft_drop, hard_drop)
     assert adaptive.log_step_init == "auto"
     assert adaptive.adaptive_log_step_enabled is False
-    assert adaptive.warmup_epochs == 3
+    assert adaptive.warmup_epochs == 10
+    assert adaptive.auto_log_step_epoch_fraction == 1.0
     assert adaptive.update_every_epochs == 1
     assert adaptive.recovery.enabled is False
     assert cfg.model.lambda_coef == pytest.approx(1e-4)
