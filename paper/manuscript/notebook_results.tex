@@ -1,14 +1,15 @@
-% Additional historical results from actual graphics (2).ipynb, 2026-11-07.
-% Exact values and per-row provenance: ../new_points.csv.
+% Channel trajectories: ../data/graphics_results.csv, supplied graphics.ipynb.
+% Historical block trajectory is retained from the previous manuscript snapshot.
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=\textwidth]{figures/additional_pruning_trajectories.png}
-  \caption{Additional notebook-reported pruning results.
-    (a) Seven one-iteration MobileNetV2 settings and the existing
+  \includegraphics[width=\textwidth]{figures/additional_pruning_trajectories.pdf}
+  \caption{Pruning trajectories, isolated from the comparator sweeps.
+    (a) Seven one-shot MobileNetV2 settings and the existing
     iterative trajectory. (b) Three iterative channel-pruning
     trajectories and one block-pruning trajectory for ResNet-50.
     Lines connect successive recorded cycles; the final model is
-    placed last. Squares in (a) are separate settings, not cycles.
+    placed last. Crosses in (a) are separate one-pass settings; squares mark final
+    channel-pruning models.
     Counts are reported model parameters, not FLOPs or active-count
     estimates. No uncertainty bars or matched-budget claim are implied.}
   \Description{Two panels of reported test accuracy against model

@@ -126,16 +126,19 @@ Our contributions are threefold.
 \section{Related Work}
 \label{sec:related-work}
 
-Feature selection and structured sparsification seek compact predictive
-models by selecting input variables, hidden units, or channels during
-training. Group sparse regularization penalizes groups of outgoing weights
-to jointly learn network weights, select input features, and determine
-hidden-layer widths~\cite{scardapane2017group}. Stochastic Gates (STG)
-uses clipped Gaussian gates to learn a subset of input features while
-penalizing the expected number of selected inputs~\cite{yamada2020feature}.
-At the weight level, stochastic gates also allow the expected number of
-nonzero parameters to be penalized through \(L_0\)
-regularization~\cite{louizos2018learning}.
+Feature selection and structured sparsification jointly learn a predictor
+and a smaller set of variables or computational units. Group sparse
+regularization groups the outgoing weights of each unit, allowing input
+features and hidden neurons to be selected during network
+training~\cite{scardapane2017group}. Stochastic Gates (STG) instead uses
+clipped Gaussian gates and a differentiable penalty on the expected
+number of selected input features~\cite{yamada2020feature}. Louizos et al.
+use hard-concrete gates to optimize expected $L_0$ regularization of
+network parameters~\cite{louizos2018learning}. These methods establish
+learnable gates and expected sparsity penalties as tools for selection.
+Our setting applies selection to intermediate convolutional channels;
+their physical parameter costs depend on the surrounding layers and
+cannot be identified with the number of selected input features or gates.
 
 Structural channel pruning applies selection to intermediate feature maps
 in convolutional networks. Network Slimming uses sparsity-regularized
@@ -150,25 +153,36 @@ removed~\cite{sui2021chip}. DepGraph identifies groups of parameters that
 must be pruned together to preserve architectural
 consistency~\cite{fang2023depgraph}.
 
-ConvNet-AIG uses input-dependent binary gates to select residual
-transformations at inference time~\cite{veit2018convnet}. Herrmann et al.
-learn channel gates using Gumbel-Softmax and a batch activation penalty
-that targets a prescribed activation rate, supporting both fixed pruning
-and input-dependent computation~\cite{herrmann2020channel}. Our method
-also learns channel gates during training to obtain a fixed compact
-network. Its objective penalizes expected channel activity and optionally
-includes an entropy term that discourages gate probabilities from
-becoming deterministic early in the search.
+Conditional computation changes which operations are executed for each
+input, without necessarily removing stored weights. ConvNet-AIG learns
+input-dependent binary gates for residual
+transformations~\cite{veit2018convnet}. Stochastic Depth randomly drops
+residual branches during training and uses the full network at test
+time~\cite{huang2016deep}; our sampled-test baseline is an explicitly
+specified variant. In contrast, our channel scores are independent of
+the input and are converted to a fixed compact architecture. Thus active
+parameter counts for conditional execution and physical parameter counts
+after pruning describe different resources.
 
-The amount of pruning can also be adapted during optimization.
-DCP-Adapt determines the number of retained channels using a stopping
-criterion based on the improvement in its selection
-loss~\cite{zhuang2018discrimination}. AMC uses reinforcement learning to
-search for layer-wise compression ratios~\cite{he2018amc}. Our method
-adjusts the strength of the sparsity penalty during training using the
-validation accuracy gap relative to a dense reference model. The learned
-gate probabilities then guide permanent channel removal, followed by
-fine-tuning of the compact network.
+Herrmann et al. provide a close connection between these settings: their
+Gumbel-Softmax channel gates support both input-independent pruning and
+input-dependent computation~\cite{herrmann2020channel}. Their batch
+activation penalty targets a prescribed activation rate and encourages
+gate polarization. Consequently, neither channel gating nor a fixed
+inference architecture alone distinguishes our approach. We use a
+penalty on mean channel-opening scores, adjust its strength from
+validation feedback, and distinguish threshold/budget-based iterative
+selection from validation-feasible one-shot checkpoint selection.
+
+Adaptive compression also appears in DCP-Adapt, which stops channel
+selection based on improvement in its selection
+loss~\cite{zhuang2018discrimination}, and AMC, which uses reinforcement
+learning to search layer-wise compression ratios~\cite{he2018amc}.
+Our controller instead increases or relaxes the sparsity coefficient
+according to the validation accuracy gap to a dense reference. This is
+a feedback heuristic, not a guarantee of a prescribed final size or
+accuracy loss. Its effect must be assessed together with the subsequent
+structural selection and recovery procedure.
 
 \section{Methodology}
 
@@ -782,6 +796,8 @@ A_t^{\rm mask}\geq A_{T_s}^{\rm ref}-\delta_h\}$.
 \end{algorithm*}
 % END COMPACT PRUNING ALGORITHM
 
+\input{iterative_pruning}
+
 \section{Experimental Setup}
 
 Experiments include iterative channel-pruning trajectories and
@@ -790,30 +806,36 @@ single-pass pruning results on both model--dataset pairs.
 \subsection{Datasets}
 
 We evaluate MobileNetV2 on TinyImageNet-200~\cite{le2015tiny}
-and ResNet-50 on CIFAR-10~\cite{krizhevsky2009learning}, using
-train/validation/test splits of 90{,}000/10{,}000/10{,}000 and
-45{,}000/5{,}000/10{,}000 images, respectively. For TinyImageNet-200,
-the official validation set serves as the test set. Its native
-$64\times64$ images are upscaled to $224\times224$ inputs;
-CIFAR-10 inputs remain $32\times32$.
-Training uses random crops and horizontal flips with
-dataset-specific normalization; evaluation uses resizing to
-$256\times256$ followed by a $224\times224$ center crop for
-TinyImageNet-200, and only tensor conversion and normalization
-for CIFAR-10.
+(90,000 training, 10,000 validation and 10,000 test images, official validation
+used as test) and ResNet-50 on CIFAR-10~\cite{krizhevsky2009learning}
+(45,000 training, 5,000 validation and 10,000 test images). Inputs are $224\times224$ for TinyImageNet
+(upscaled from $64\times64$) and $32\times32$ for CIFAR-10. Training
+uses random crops, horizontal flips and dataset-specific normalization.
+TinyImageNet evaluation resizes to $256\times256$ before a $224\times224$
+center crop; CIFAR-10 evaluation only converts and normalizes tensors.
 
-\subsection{Implementation Details}
+\subsection{Implementation Details}\label{sec:implementation}
 
-\paragraph{Iterative pruning.}
-Each cycle trains gates, updates a cumulative mask of removed channels,
-and trains the physically compact network without gates. Initialization
-and state transfer are specified for each setting below.
+Algorithms~\ref{alg:accuracy-guided-pruning} and
+\ref{alg:iterative-pruning} differ in channel/checkpoint selection and
+weight initialization, as well as the number of cycles.
+Table~\ref{tab:pruning-schedules} summarizes the phase budgets; warmup is
+included in search, and reference-model training is additional.
 
-\paragraph{One-shot pruning.}
-One search phase is followed by a single structural pruning and recovery
-phase; the compact architecture remains fixed during recovery.
-Algorithm~\ref{alg:accuracy-guided-pruning} specifies the ResNet-50 setting,
-including checkpoint selection and weight inheritance.
+\begin{table*}[t]
+\centering\small
+\caption{Pruning schedules. Each phase starts a fresh optimizer and scheduler.
+The iterative algorithms carry only the disabled-channel set between phases.
+Training epochs exclude shared dense-reference or ImageNet pretraining costs.}
+\label{tab:pruning-schedules}
+\begin{tabular}{@{}lrrrll@{}}\toprule
+Procedure & Cycles & Search & Recovery & Search initialization & Recovery initialization \\\midrule
+MobileNetV2, iterative & 10 & 30 & 45 & ImageNet + fresh gates & Surviving ImageNet slices \\
+MobileNetV2, one pass & 1 & 30 & 45 & ImageNet + fresh gates & Surviving ImageNet slices \\
+ResNet-50, iterative & 10 & 120 & 150 & New random weights & New random weights \\
+ResNet-50, one shot & 1 & 60 & 90 & Random weights & Selected search weights \\
+\bottomrule\end{tabular}
+\end{table*}
 
 The iterative MobileNetV2 and one-shot ResNet-50 configurations
 described below use AdamW, batch size 128 and a
@@ -824,12 +846,10 @@ zero weight decay.
 %%% >>> BEGIN [MBV2-TIN] MobileNetV2 + TinyImageNet-200 >>>
 \subsubsection{MobileNetV2: iterative pruning}
 \label{sec:mbv2-iterative-implementation}
-Each pruning cycle takes 75 epochs: 30 for search and 45 for recovery.
-Both search and recovery restart from ImageNet weights, with fresh
-gates for search; only the removed-channel set passes between cycles.
-The procedure stops when no channel is selected or after ten cycles.
-The reported run completed ten cycles (750 training epochs),
-producing an accuracy--size trajectory of compact recovery models.
+The ten-cycle run uses Algorithm~\ref{alg:iterative-pruning}, totaling
+750 search/recovery epochs. Search and recovery restart from ImageNet
+weights; only the removed-channel set passes between phases. Each recovery
+phase contributes one validation-selected model to the trajectory.
 
 We use MobileNetV2~\cite{sandler2018mobilenetv2} with its standard
 channel widths (2{,}480{,}072 parameters), using torchvision
@@ -904,38 +924,38 @@ $\lambda$ is not increased.
 % Source: adaptive_lambda configuration; training/adaptive_lambda.py.
 
 \paragraph{Channel selection.}
-After search, channels with $r_{l,c}<0.95$ are considered in
-increasing probability order. A channel is accepted for removal if
-the cumulative parameter cost stays within 10\% of the full gated
-network's parameters; candidates that do not fit are skipped, and
-at least one channel remains per gate group. Since gates start below
-0.95, search must raise their probabilities above this threshold
-to protect them from selection, subject to the parameter cap.
-Accepted channels are physically removed before recovery.
-
-% Source: cyclic_channel_pruning configuration; weight_handoff disabled.
+Algorithm~\ref{alg:iterative-pruning} uses $\tau=0.95$ and $\rho=0.10$.
+Because gates start below the pruning threshold, search must raise their
+scores to protect them, subject to the parameter cap. Recovery evaluates
+the physically compact network without gates.
 
 \subsubsection{MobileNetV2: one-shot pruning}
 \label{sec:mbv2-one-shot-implementation}
-\noindent\textbf{[TODO: insert the configuration of the one-iteration
-MobileNetV2 runs and any differences from the one-shot procedure.]}
-% Author TODO: confirm search/recovery budgets, initialization and state
-% transfer, gate placement and modes, objective and normalization,
-% lambda/reference settings, channel selection, and checkpoint selection.
-% State whether these runs use Algorithm 1 or one cycle of the iterative
-% procedure; the notebook labels alone do not establish this.
+The seven settings use the same training, gate, controller and
+initialization protocol as iterative MobileNetV2, with one 30-epoch
+search and one 45-epoch recovery phase. They vary only the selection
+threshold and cap: $\tau=0.99$ with $\rho\in\{0.6,0.5,0.4\}$, or
+$\tau=0.95$ with $\rho\in\{0.4,0.3,0.2,0.1\}$.
+This is one cycle of Algorithm~\ref{alg:iterative-pruning}; it does not
+use the ResNet checkpoint selector in Algorithm~\ref{alg:accuracy-guided-pruning}.
+% Phase budgets and protocol equivalence confirmed by the author, 2026-11-11.
+
 %%% <<< END [MBV2-TIN] <<<
 
 %%% >>> BEGIN [RN50-C10] >>>
 \subsubsection{ResNet-50: iterative pruning}
 \label{sec:resnet-iterative-implementation}
-\noindent\textbf{[TODO: insert the configuration of the iterative
-ResNet-50 runs and any differences from the iterative procedure.]}
-% Author TODO: confirm search/intermediate/final recovery budgets,
-% initialization and state transfer, gate placement and modes, objective
-% and normalization, lambda/reference settings, channel-selection rules
-% for each reported trajectory, stopping, and checkpoint selection.
-% Use confirmed run information rather than historical recipe defaults.
+Each of the three trajectories uses ten cycles of Algorithm~\ref{alg:iterative-pruning},
+with 120 search and 150 recovery epochs per cycle (2,700 epochs in total).
+Every search and recovery phase starts with newly initialized random
+weights; search weights are not inherited. The trajectories use threshold
+selection with $\tau=0.7$ or $\tau=0.1$, or budget-only selection with
+$\rho=0.05$. Only the cumulative removed-channel set is carried forward.
+The parameter counts and test accuracies of all ten recovery models in
+each series are listed in Table~\ref{tab:resnet-notebook-trajectories}.
+% Initialization and phase budgets confirmed by the author, 2026-11-11.
+% The source notebook does not establish the remaining historical gate/controller
+% settings or a possible additional cap for the two threshold trajectories.
 
 \subsubsection{ResNet-50: one-shot pruning}
 \label{sec:resnet-cifar-implementation}
@@ -975,10 +995,10 @@ with a 0.001 retention floor, equivalent here to retaining at least
 one channel per group; fallback maximizes validation accuracy.
 Candidates are scored before additional BatchNorm calibration.
 
-Earlier red/black tolerance sweeps used retention floors of
-0.001/0.08. Red feasible candidates came from epochs 1--60, with
-fallback from 31--60; both black windows were 31--60. The additional
-red mean represents two selected repeats of the configuration above.
+Earlier S1/S2 tolerance sweeps used retention floors of
+0.001/0.08. S1 feasible candidates came from epochs 1--60, with
+fallback from 31--60; both S2 windows were 31--60. The additional
+mean represents two selected repeats of the configuration above.
 % Sources and historical-series distinctions: EXPERIMENTS.md;
 % saved resnet-implementation and algorithm-clarification research.
 %%% <<< END [RN50-C10] <<<
@@ -1055,99 +1075,23 @@ test inference follows the protocols described above.
 \subsubsection{MobileNetV2 on TinyImageNet-200}
 
 %%% >>> BEGIN [MBV2-TIN] MobileNetV2 + TinyImageNet-200 >>>
-%%% Рисунок строится скриптом paper/figures/mobilenetv2_tinyimagenet200_tradeoff.py
-%%% (данные: paper/graphics.ipynb, ячейка 1, и paper/autopruner_mobilenetv2_tinyimagenet200.csv).
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/mobilenetv2_tinyimagenet200_tradeoff.pdf}
-\caption{Test accuracy versus number of parameters of pruned
-MobileNetV2 on TinyImageNet-200. Each line connects the models
-of one run of our method (one point per pruning cycle) or of one
-hyperparameter sweep of a compared method. The star and the
-dotted line mark the dense Baseline. $\dagger$: expected number
-of executed parameters; these methods store all 2.48M
-parameters.}
-\Description{Line plot of test top-1 accuracy against the
-number of parameters for our method, AutoPruner, DepGraph, Stochastic Depth,
-ConvNet-AIG and the dense baseline.}
+\includegraphics[width=\textwidth]{figures/mobilenetv2_tinyimagenet200_tradeoff.pdf}
+\caption{MobileNetV2 on TinyImageNet-200. Physical sizes of fixed
+networks, including all seven one-pass settings and ten iterative
+recovery models. Lines connect successive cycles; the square marks the
+final cycle and crosses denote independent one-pass settings.
+Dynamic methods retain all 2.48M backbone parameters; active counts
+are test means for AIG and expectations for SD. The dotted line is the
+dense baseline. Training budgets differ.}
+\Description{One plot compares iterative and one-pass MobileNetV2 pruning,
+AutoPruner, DepGraph, the dense baseline, AIG and SD. Fixed networks use
+physical parameter counts; AIG and SD use active counts.}
 \label{fig:mbv2-tin-tradeoff}
-\end{figure}
+\end{figure*}
 
-%%% Таблица сгенерирована из тех же данных; точность округлена до 0.1
-%%% (у AutoPruner в CSV два знака: 59.19, 64.49, 66.83, 68.92, 68.87).
-\begin{table}[!t]
-\caption{MobileNetV2 on TinyImageNet-200.}
-\label{tab:mbv2-tin-all}
-\raggedright
-\footnotesize
-\setlength{\tabcolsep}{2pt}
-\renewcommand{\arraystretch}{0.90}
-\par\smallskip\noindent\textbf{(a) Pruning trajectory}\par\smallskip
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lrrrr@{}}
-\toprule
-\multicolumn{5}{@{}l}{\textbf{Baseline}} \\
-\multicolumn{1}{c}{\textbf{Model}} & \multicolumn{1}{c}{\textbf{Params}} & \multicolumn{1}{c}{\textbf{Params}} & \multicolumn{1}{c}{\textbf{Test acc.}} & \multicolumn{1}{c}{\textbf{Acc. change}} \\
-\multicolumn{1}{c}{\textbf{}} & \multicolumn{1}{c}{\textbf{(M)}} & \multicolumn{1}{c}{\textbf{(\% of dense)}} & \multicolumn{1}{c}{\textbf{(\%)}} & \multicolumn{1}{c}{\textbf{(pp)}} \\
-\textit{dense} & \textit{2.480} & \textit{100.0} & 71.6 & \textit{0.0} \\
-\midrule
-\multicolumn{5}{@{}l}{\textbf{Ours}} \\
-\multicolumn{1}{c}{\textbf{Pruning}} & \multicolumn{1}{c}{\textbf{Params}} & \multicolumn{1}{c}{\textbf{Params}} & \multicolumn{1}{c}{\textbf{Test acc.}} & \multicolumn{1}{c}{\textbf{Acc. change}} \\
-\multicolumn{1}{c}{\textbf{cycle}} & \multicolumn{1}{c}{\textbf{(M)}} & \multicolumn{1}{c}{\textbf{(\% of dense)}} & \multicolumn{1}{c}{\textbf{(\%)}} & \multicolumn{1}{c}{\textbf{(pp)}} \\
-\textit{1} & \textit{2.235} & \textit{90.1} & 71.2 & \textit{$-$0.4} \\
-\textit{2} & \textit{2.015} & \textit{81.3} & 70.0 & \textit{$-$1.6} \\
-\textit{3} & \textit{1.817} & \textit{73.3} & 68.3 & \textit{$-$3.3} \\
-\textit{4} & \textit{1.725} & \textit{69.5} & 67.6 & \textit{$-$4.0} \\
-\textit{5} & \textit{1.676} & \textit{67.6} & 66.6 & \textit{$-$5.0} \\
-\textit{6} & \textit{1.642} & \textit{66.2} & 66.3 & \textit{$-$5.3} \\
-\textit{7} & \textit{1.620} & \textit{65.3} & 65.9 & \textit{$-$5.7} \\
-\textit{8} & \textit{1.605} & \textit{64.7} & 65.7 & \textit{$-$5.9} \\
-\textit{9} & \textit{1.593} & \textit{64.2} & 65.7 & \textit{$-$5.9} \\
-\textit{10 (final)} & \textit{1.584} & \textit{63.8} & \textbf{65.8} & \textit{$-$5.8} \\
-\bottomrule
-\end{tabular*}
-\par\smallskip\noindent\textbf{(b) Comparison at similar model sizes}\par\smallskip
-\setlength{\tabcolsep}{1.2pt}
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lrrrrrr@{}}
-\toprule
-\textbf{Size (M)} & \multicolumn{2}{c}{\textbf{Ours}} & \multicolumn{2}{c}{\textbf{AutoPruner}} & \multicolumn{2}{c}{\textbf{DepGraph}} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
-\multicolumn{1}{c}{\textbf{}} & \multicolumn{1}{c}{\textbf{Acc. (\%)}} & \multicolumn{1}{c}{\textbf{Size (M)}} & \multicolumn{1}{c}{\textbf{Acc. (\%)}} & \multicolumn{1}{c}{\textbf{Size (M)}} & \multicolumn{1}{c}{\textbf{Acc. (\%)}} & \multicolumn{1}{c}{\textbf{Size (M)}} \\
-\midrule
-\textit{$\approx$1.6} & 65.7 & \textit{1.605} & 66.8 & \textit{1.599} & -- & -- \\
- & \multicolumn{2}{c}{\textit{cycle 8}} & \multicolumn{2}{c}{\textit{r=0.5125}} & \multicolumn{2}{c}{} \\
-\midrule
-\textit{$\approx$1.9} & 68.3 & \textit{1.817} & 68.9 & \textit{1.900} & 67.3 & \textit{1.936} \\
- & \multicolumn{2}{c}{\textit{cycle 3}} & \multicolumn{2}{c}{\textit{r=0.6792}} & \multicolumn{2}{c}{\textit{$\times$1.25}} \\
-\midrule
-\textit{$\approx$2.0} & 70.0 & \textit{2.015} & 68.9 & \textit{1.900} & 67.3 & \textit{1.936} \\
- & \multicolumn{2}{c}{\textit{cycle 2}} & \multicolumn{2}{c}{\textit{r=0.6792}} & \multicolumn{2}{c}{\textit{$\times$1.25}} \\
-\midrule
-\textit{$\approx$2.2} & 71.2 & \textit{2.235} & 68.9 & \textit{2.200} & 70.0 & \textit{2.185} \\
- & \multicolumn{2}{c}{\textit{cycle 1}} & \multicolumn{2}{c}{\textit{r=0.8452}} & \multicolumn{2}{c}{\textit{$\times$1.1}} \\
-\bottomrule
-\end{tabular*}
-\setlength{\tabcolsep}{2pt}
-\par\smallskip\noindent Cells (b,c): accuracy (\%); \textit{params (M), setting}.
-\par\smallskip\noindent Nearest size within $\pm5\%$; no interpolation. Repeated entries reuse a model. $r$: target channel keep ratio; $\times$: target FLOPs speedup.
-\par\smallskip\noindent\textbf{(c) Active-count results\,$\dagger$}\par\smallskip
-\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lcccc@{}}
-\toprule
-\textbf{Method} & $\approx1.6$M & $\approx1.9$M & $\approx2.0$M & $\approx2.2$M \\
-\midrule
-Stoch. Depth & 62.2 & -- & 70.1 & 71.8 \\
- & \textit{(1.605)} &  & \textit{(2.000)} & \textit{(2.200)} \\
- & \textit{$p_L$=0.000} &  & \textit{$p_L$=0.451} & \textit{$p_L$=0.680} \\
-\midrule
-ConvNet-AIG & -- & 62.8 & 65.0 & 68.2 \\
- &  & \textit{(1.913)} & \textit{(2.033)} & \textit{(2.289)} \\
- &  & \textit{t=0.1} & \textit{t=0.2} & \textit{t=0.4} \\
-\bottomrule
-\end{tabular*}
-\par\smallskip\noindent $\dagger$: both store 2.48M parameters. AIG reports test means; SD reports expected active counts under sampled test masks. Active counts are not storage or latency measurements.
-\par\smallskip\noindent One run per setting; the ten Ours points share one run. Training budgets differ.
-\par\smallskip\noindent In (a), shares and changes use the dense Baseline (2{,}480{,}072 parameters); pp denotes percentage points.
-\par\smallskip\noindent Full sweeps: Table~\ref{tab:mbv2-tin-full}.
-\end{table}
+\input{generated/mobilenet_pruning_table}
 
 \paragraph{Iterative channel pruning.}
 Figure~\ref{fig:mbv2-tin-tradeoff} and
@@ -1179,11 +1123,11 @@ at 1.300M, compared with DepGraph's 59.2\% at 1.423M.
 %%% <<< END [MBV2-TIN] <<<
 
 \paragraph{Single-pass channel pruning.}
-The seven one-iteration MobileNetV2 models in
-Figure~\ref{fig:additional-pruning-trajectories}(a) and
-Table~\ref{tab:mbv2-one-iteration} span 1.262--2.235M
+The seven one-shot MobileNetV2 models in
+Figure~\ref{fig:mbv2-tin-tradeoff} and
+Table~\ref{tab:mbv2-tin-all} span 1.262--2.235M
 parameters and 60.7--71.1\% reported test accuracy. At nearly the
-same size, the one-iteration model reaches 69.5\% at 2.013M,
+same size, the one-shot model reaches 69.5\% at 2.013M,
 compared with 70.0\% at 2.015M on the existing iterative
 trajectory; at 1.813M it reaches 68.4\%, compared with 68.3\%
 at 1.817M. These observations do not show a consistent advantage
@@ -1232,22 +1176,15 @@ Acknowledgments text.
 %% Bibliography
 %%
 %%% >>> BEGIN [MBV2-TIN] MobileNetV2 + TinyImageNet-200 >>>
-%%% Записи для ключей \cite из этой части находятся в sample-base.bib:
-%%% le2015tiny — Y. Le, X. Yang. Tiny ImageNet Visual Recognition Challenge, 2015.
-%%% sandler2018mobilenetv2 — M. Sandler et al. MobileNetV2: Inverted Residuals and Linear Bottlenecks. CVPR 2018.
-%%% fang2023depgraph — G. Fang et al. DepGraph: Towards Any Structural Pruning. CVPR 2023.
-%%% luo2020autopruner — J.-H. Luo, J. Wu. AutoPruner: An End-to-End Trainable Filter Pruning Method
-%%% for Efficient Deep Model Inference. Pattern Recognition, 2020.
-%%% veit2018convnet — A. Veit, S. Belongie. Convolutional Networks with Adaptive Inference Graphs.
-%%% ECCV 2018 (журнальная версия: IJCV 2020).
-%%% huang2016deep — G. Huang et al. Deep Networks with Stochastic Depth. ECCV 2016.
 %%% <<< END [MBV2-TIN] <<<
+\clearpage
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{sample-base}
 
 %%
 %% Appendices
 %%
+\clearpage
 \appendix
 
 \section{Additional Experiments}
@@ -1255,7 +1192,7 @@ Acknowledgments text.
 
 Table~\ref{tab:mbv2-tin-full} retains all MobileNetV2 settings and
 results underlying Figure~\ref{fig:mbv2-tin-tradeoff};
-Table~\ref{tab:mbv2-tin-all} highlights comparisons at similar sizes.
+Table~\ref{tab:mbv2-tin-all} includes all seven additional one-pass settings.
 
 \begin{table}[!t]
 \caption{Complete MobileNetV2 results on TinyImageNet-200. Shares and accuracy changes

@@ -1,30 +1,20 @@
-% ResNet-50/CIFAR-10 selection confirmed by the author on 2026-10-29.
-% Exact coordinates and run IDs: data/resnet50_cifar10/selection.json.
-% Comparator coordinates: current source notebook, 26 points retained.
+% Existing one-shot/comparator measurements are retained at table precision in
+% ../data/manuscript_comparators.csv; new trajectories: ../data/graphics_results.csv.
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.96\textwidth]{figures/resnet50_cifar10_selected.pdf}
-  \caption{ResNet-50 on CIFAR-10. Hollow red circles show three selected
-    deployments from sweep~1 and the coordinate-wise mean of two
-    selected runs from eight repeats of one fixed pruning configuration.
-    The filled black circle
-    shows one selected deployment from sweep~2.
-    All 26 comparison points are retained.
-    Our method, DepGraph, AutoPruner and the dense baseline use physical
-    parameter counts. ConvNet-AIG uses active parameters averaged over
-    validation images; Stochastic Depth uses the expected active count
-    under sampled inference. Both retain the full backbone weights.
-    Training protocols and historical accuracy aggregation differ.}
+  \includegraphics[width=\textwidth]{figures/resnet50_cifar10_selected.pdf}
+  \caption{ResNet-50 on CIFAR-10. Fixed networks: the existing one-shot
+    results, all 30 iterative channel-pruning models, AutoPruner and
+    DepGraph (random importance). Lines follow cycle order and squares
+    mark final iterative models. The hollow diamond is a coordinate-wise
+    mean of two selected same-seed runs out of eight; it is not a deployed
+    network. Dynamic baselines retain the full backbone: AIG counts
+    are validation means and SD counts are expectations. Training budgets
+    and historical accuracy aggregation differ.}
   \label{fig:resnet-cifar-tradeoff}
-  \Description{Scatter plot of test top-1 accuracy against reported
-    parameter count on CIFAR-10. Three hollow red circles at about
-    4.660, 4.801 and 9.868 million parameters show individual models.
-    A fourth hollow red circle at 10.805 million parameters and
-    93.78 percent accuracy shows the mean of two selected repeated runs.
-    One black circle at 18.512 million parameters shows another
-    selected model.
-    The other points represent Stochastic Depth, AutoPruner, DepGraph,
-    ConvNet-AIG and the dense baseline.}
+  \Description{One plot compares three iterative ResNet channel-pruning
+    trajectories, the one-shot models, structural-pruning comparators and
+    dynamic baselines, using physical or active parameter counts.}
 \end{figure*}
 
 \paragraph{One-shot pruning.}
@@ -49,34 +39,34 @@ Stochastic Depth reaches up to 94.84\% accuracy but retains all
 
 \paragraph{Iterative channel pruning.}
 Three channel-pruning trajectories in
-Figure~\ref{fig:additional-pruning-trajectories}(b) contain ten
+Figure~\ref{fig:resnet-cifar-tradeoff} contain ten
 models each, ordered by cycle rather than by notebook row order.
-The series labeled \texttt{thr0.7} reaches 92.1\% at 5.325M
+The threshold series $\tau=0.7$ reaches 92.1\% at 5.325M
 parameters before declining to 87.8\% at 3.220M in its final
-model. The \texttt{thr0.1} series ends at 91.4\% with 5.787M
-parameters. The more conservative series labeled
-\texttt{param\_}\allowbreak\texttt{fraction\_0.05} retains 15.475M parameters with
+model. The $\tau=0.1$ series ends at 91.4\% with 5.787M
+parameters. The budget-only series $\rho=0.05$ retains 15.475M parameters with
 93.2\% accuracy at the end. Complete trajectories are given in
 Table~\ref{tab:resnet-notebook-trajectories}.
 
 \paragraph{Block pruning.}
-Four additional block-pruning
-models span 15.266--18.974M parameters and 92.80--93.27\%
+Four historical block-pruning models in Figure~\ref{fig:additional-pruning-trajectories}(b) span 15.266--18.974M parameters and 92.80--93.27\%
 reported accuracy. Their final and preceding recovery models
 have the same parameter count but different accuracies;
 they are separate checkpoints, not seed repetitions.
 
-% Generated from the same 31 selected_points.csv rows as Figure 2.
-% Shares and differences use unrounded values; display uses ROUND_HALF_UP.
+% Existing rows retain their previously reported precision and accuracy changes.
+\input{generated/resnet_iterative_final_rows}
 \begin{table*}[t]
-  \caption{Test top-1 results for all 31 ResNet-50/CIFAR-10 points in
-    Figure~\ref{fig:resnet-cifar-tradeoff}. Params: reported parameter
+  \caption{ResNet-50/CIFAR-10 one-shot and comparator results, with the three
+    final iterative channel-pruning models. All 30 iterative checkpoints
+    are listed in Table~\ref{tab:resnet-notebook-trajectories}. Params: reported parameter
     count (M) and its share of the dense model (23{,}547{,}338 parameters,
     \%). $\Delta$: accuracy difference from the Baseline in percentage
     points. S1 and S2 denote our two sweeps; the following pair gives
     $\delta_s/\delta_h$ in percentage points. Mean averages both
     coordinates of two selected runs from eight same-configuration,
     same-seed repeats; it is not one deployed network.
+    Iterative settings use threshold $\tau$ or budget fraction $\rho$.
     DepGraph settings are target FLOPs speedups; $k$ is AutoPruner's
     target keep ratio, $p_L$ the final survival probability, and $t$
     the ConvNet-AIG target rate. $\dagger$: expected active parameters
@@ -97,7 +87,7 @@ they are separate checkpoints, not seed repetitions.
       % 716de1ac4ae743689a7962a3a4dfae3b
       dense & 23.547 & 100.0 & 93.93 & 0.00 \\
       \midrule
-      \multicolumn{5}{l}{\textit{Ours (selected)}} \\
+      \multicolumn{5}{l}{\textit{Ours: one-shot (selected)}} \\
       % resnet50_cifar10_ls0_curve7_v1/large_18m
       S1: $0.025/0.05$ & 4.660 & 19.8 & 93.31 & $-$0.62 \\
       % resnet50_cifar10_ls0_curve7_v1/middle_8m
@@ -108,6 +98,9 @@ they are separate checkpoints, not seed repetitions.
       Mean ($n=2$) & 10.805 & 45.9 & 93.78 & $-$0.15 \\
       % resnet50_cifar10_ls0_curve7_v2/middle_8m
       S2: $0.25/0.5$ & 18.512 & 78.6 & 93.72 & $-$0.21 \\
+      \midrule
+      \multicolumn{5}{l}{\textit{Ours: iterative (final cycle)}} \\
+      \ResNetIterativeFinalRows
       \midrule
       \multicolumn{5}{l}{\textit{DepGraph (random importance)}} \\
       % a66ef23af1d94813bf2629ffec935f40

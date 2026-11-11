@@ -1,0 +1,80 @@
+\subsection{Iterative Pruning Procedure}
+\label{sec:iterative-method}
+
+Algorithm~\ref{alg:iterative-pruning} makes the iterative procedure above
+explicit. It uses the same gate probabilities and structural removal
+operations, while changing how channels and recovery weights are selected.
+At each cycle, the final search checkpoint supplies the channel scores
+$\overline r_{l,c}$. For the input-independent gates used in these
+experiments, $\overline r_{l,c}=r_{l,c}$, so no calibration average is needed.
+Unlike Algorithm~\ref{alg:accuracy-guided-pruning}, this procedure does not
+select the smallest validation-feasible checkpoint from the search history.
+
+Let $D$ contain the permanently disabled channels. Threshold selection
+considers remaining channels with
+$\overline r_{l,c}<\varepsilon_{\mathrm{prune}}$; the experimental tables
+denote this threshold by $\tau$. Budget-only selection considers all
+remaining channels. Both retain at least one channel per gate group.
+When a cap $\rho$ is specified, the removal budget is
+$B=\rho P_{\mathrm{probe}}$, where $P_{\mathrm{probe}}$ counts parameters
+in the full-width gated model. The estimated cost $c(l,c)$ includes
+the associated convolutional and normalization parameters. These costs
+are additive approximations: the cap is not an achieved compression ratio
+or a fraction of the current compact model.
+
+\begin{algorithm*}[t]
+\caption{Iterative structural channel pruning. Search/recovery budgets
+are $T_s=30$, $T_r=45$ epochs for MobileNetV2 and $T_s=120$, $T_r=150$
+for ResNet-50. Both iterative runs use $N=10$ cycles; one-pass MobileNetV2
+uses the same procedure with $N=1$.}
+\label{alg:iterative-pruning}
+\begin{algorithmic}[1]
+\REQUIRE Training and validation data; initialization policy $\mathcal I$;
+search/recovery budgets $T_s,T_r$; maximum cycles $N$;
+selection mode, threshold $\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$;
+gate and sparsity-controller settings.
+\STATE $D\gets\varnothing$; recovery trajectory $\mathcal G\gets[\,]$.
+\FOR{$k=1,\ldots,N$}
+\STATE \textit{// Search}
+\STATE Initialize a full-width gated network from $\mathcal I$;
+permanently mask channels in $D$; reset gates, optimizer, scheduler and controller.
+\STATE Train for $T_s$ epochs with the gate objective and validation-based
+sparsity updates specified for the experiment.
+\STATE Read $\overline r_{l,c}$ from the final search checkpoint.
+\STATE $Q\gets\{(l,c)\notin D:\overline r_{l,c}<\varepsilon_{\mathrm{prune}}\}$
+in threshold mode; $Q\gets\{(l,c)\notin D\}$ in budget-only mode.
+\STATE If all remaining channels of a group belong to $Q$, exclude
+one with maximal score from $Q$ to preserve a nonempty group.
+\STATE \textit{// Structural selection}
+\STATE Sort $Q$ by increasing $\overline r_{l,c}$; $R\gets\varnothing$;
+$B\gets\rho P_{\mathrm{probe}}$ if a cap is set, otherwise $B\gets\infty$.
+\FOR{channel $(l,c)$ in $Q$}
+\IF{$c(l,c)\leq B$}
+\STATE $R\gets R\cup\{(l,c)\}$; $B\gets B-c(l,c)$.
+\ENDIF
+\ENDFOR
+\STATE $D\gets D\cup R$; physically remove channels in $D$ and all gates.
+\STATE \textit{// Recovery}
+\STATE Initialize the compact network anew from $\mathcal I$;
+initialize a fresh optimizer and scheduler.
+\STATE Train for $T_r$ epochs without gates; append the best validation
+checkpoint to $\mathcal G$.
+\IF{$R=\varnothing$}
+\STATE \textbf{break}.
+\ENDIF
+\ENDFOR
+\RETURN Recovery trajectory $\mathcal G$; its last element is the final model.
+\end{algorithmic}
+\end{algorithm*}
+
+For MobileNetV2, $\mathcal I$ reloads ImageNet weights for every phase,
+using the surviving channel slices for recovery and a fresh classifier.
+For iterative ResNet-50, every search and recovery phase starts with
+random weights. Thus only $D$ passes between phases and cycles; recovery
+does not inherit search weights or initialize the next search.
+Candidates that exceed the remaining budget are skipped. The procedure
+stops after recovery if no new removal was accepted, or after $N$ cycles.
+Validation selects recovery checkpoints, rather than vetoing individual
+channel removals. One-pass MobileNetV2 sets $N=1$ and retains these
+selection and initialization rules.
+
