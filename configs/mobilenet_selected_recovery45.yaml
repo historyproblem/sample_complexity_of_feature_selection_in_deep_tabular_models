@@ -1,0 +1,25 @@
+defaults:
+  - mobilenet_onepass_thr05_gap8_12pp
+  - _self_
+
+seed: 42
+model:
+  backbone:
+    pretrained_weights: null
+  lambda_coef: 0.0
+training_arguments:
+  num_epochs: 45
+  adaptive_lambda:
+    enabled: false
+scheduler:
+  T_max: 45
+run_history:
+  root_dir: outputs/runs/mobilenet_recovery45_then_wide_search_20261112/recovery45
+mlflow:
+  experiment_name: mobilenet_recovery45_then_wide_search_20261112
+  run_name: mobilenet_thr09_gap6_10_epoch30_recovery45_transferred
+  tags:
+    recipe: mobilenet_selected_recovery45_transferred
+selected_recovery:
+  source_profile: null
+  manifest: configs/mobilenet_recovery45_then_wide_search.json

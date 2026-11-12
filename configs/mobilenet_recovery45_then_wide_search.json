@@ -1,0 +1,34 @@
+{
+  "base_config": "mobilenet_onepass_thr05_gap8_12pp",
+  "recovery_config": "mobilenet_selected_recovery45",
+  "output_root": "outputs/runs/mobilenet_recovery45_then_wide_search_20261112",
+  "seed": 42,
+  "recovery_epochs": 45,
+  "search_epochs": 30,
+  "warmup_epochs": 10,
+  "auto_log_step_epoch_fraction": 1.0,
+  "thresholds": [
+    0.5,
+    0.9
+  ],
+  "lambda_bands": [
+    {
+      "soft_drop": 0.15,
+      "hard_drop": 0.2
+    },
+    {
+      "soft_drop": 0.2,
+      "hard_drop": 0.25
+    }
+  ],
+  "recovery_source": {
+    "source_profile": "outputs/runs/mobilenet_onepass_grid_thr05_09_search_only_warmup10/mobilenet_grid_thr0.9_soft0.06_hard0.1_seed42_nocap_autostep_noboost_search_only_warmup10",
+    "expected_epoch": 30,
+    "expected_params": 2251882,
+    "expected_channels": 962,
+    "mask_file": "configs/masks/mobilenet_thr09_gap6_10_epoch30.json",
+    "mask_sha256": "8105900087856329717b07e2787e01b85ed9cb84f9db7df7f75975f37e07f9ff",
+    "config_sha256": "f2f91e3a33d90439ba2c758a8bf779fda8c3d22671bde4dfb5a5383974f0f958",
+    "history_sha256": "e06b0a196ec9642fb33ce22907f89770d00c968a359067fe81bbbe88bf9bc300"
+  }
+}

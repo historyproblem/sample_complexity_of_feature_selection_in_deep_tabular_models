@@ -794,6 +794,33 @@ def build_gated_to_structural_parameter_mappings(
 
 
 @torch.no_grad()
+def transfer_mobilenet_weights_to_structural(
+    gated_model: nn.Module,
+    structural_model: nn.Module,
+) -> None:
+    """Copy every surviving MobileNet tensor, including learned BN statistics."""
+    from .mobilenet_v2 import MobileNetV2
+    from .pruned_mobilenet_v2 import PrunedGumbelInvertedResidual, PrunedMobileNetV2
+
+    source = _unwrap_backbone(gated_model)
+    target = _unwrap_backbone(structural_model)
+    if not isinstance(source, MobileNetV2) or not isinstance(target, PrunedMobileNetV2):
+        raise TypeError("MobileNet handoff requires a MobileNetV2 and PrunedMobileNetV2 pair")
+    if len(source.features) != len(target.features):
+        raise ValueError("Source and target MobileNet topologies differ")
+    for source_block, target_block in zip(source.features, target.features):
+        if isinstance(target_block, PrunedGumbelInvertedResidual):
+            state = {"branch." + key: value for key, value in source_block.branch.state_dict().items()}
+            narrowed = target_block.narrow_full_width_state(state)
+            target_block.branch.load_state_dict(
+                {key.removeprefix("branch."): value for key, value in narrowed.items()}, strict=True
+            )
+        else:
+            target_block.load_state_dict(source_block.state_dict(), strict=True)
+    target.classifier.load_state_dict(source.classifier.state_dict(), strict=True)
+
+
+@torch.no_grad()
 def transfer_gated_weights_to_structural(
     gated_model: nn.Module,
     structural_model: nn.Module,
@@ -809,6 +836,11 @@ def transfer_gated_weights_to_structural(
 
     source_backbone = _unwrap_backbone(gated_model)
     target_backbone = _unwrap_backbone(structural_model)
+    from .pruned_mobilenet_v2 import PrunedMobileNetV2
+
+    if isinstance(target_backbone, PrunedMobileNetV2):
+        transfer_mobilenet_weights_to_structural(gated_model, structural_model)
+        return
     source_blocks = _bottleneck_blocks(source_backbone)
     target_blocks = _bottleneck_blocks(target_backbone)
     _validate_bottleneck_pair(source_blocks, target_blocks)
