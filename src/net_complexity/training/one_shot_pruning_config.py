@@ -18,6 +18,7 @@ from .accuracy_guided_config import (
 )
 
 PROTOCOL = "pruning_v3_one_shot_60_90"
+ABLATION_PROTOCOL = "pruning_v3_size_ablations_60_90"
 HANDOFF_PROTOCOL = "pruning_v3_optimizer_scheduler_handoff_60_90"
 MAPPED_REPEATS_PROTOCOL = "pruning_v3_mapped_optimizer_fresh_scheduler_repeats2_60_90"
 QUALITY_RECOVERY_PROTOCOL = "pruning_v3_quality_recovery_single_60_90"
@@ -101,7 +102,47 @@ def validate_config(config):
     one = plain.get("one_shot")
     _require(isinstance(one, dict), "one_shot mapping is required")
     protocol = one.get("protocol")
-    if protocol in SEARCH_PROTOCOLS:
+    if protocol == ABLATION_PROTOCOL:
+        _keys = {
+            "protocol", "search_epochs", "final_epochs", "branches",
+            "scratch_initialization", "inherited_optimizer_state", "random_mask_seed",
+            "search_scheduler_eta_min", "search_selection_last_epochs",
+            "search_selection_bn_calibration_batches",
+        }
+        _require(set(one) == _keys, "size-ablation fields differ")
+        block = plain["model"]["backbone"]["resnet_block"]
+        internal = block.get("gate_internal_width") is True and block.get("gate_output") is False
+        output = block.get("gate_internal_width") is False and block.get("gate_output") is True
+        _require(internal or output, "size ablation requires exactly internal or output gates")
+        _require(one["branches"] == (["inherited", "scratch", "random"] if internal else ["inherited"]),
+                 "size-ablation branches differ from the gate placement")
+        _require(one["inherited_optimizer_state"] == "fresh", "all size-ablation optimizers must be fresh")
+        _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",
+                 "scratch must reset all parameters and BN")
+        _require(type(one["random_mask_seed"]) is int, "random mask seed must be explicit")
+        _require(one["search_scheduler_eta_min"] == 0
+                 and one["search_selection_bn_calibration_batches"] == 0,
+                 "size-ablation search requires cosine floor zero and pre-BN selection")
+        _require(plain["accuracy_guided"]["eligibility"]["min_keep_ratio"] == 0.08,
+                 "size-ablation floor must remain 0.08")
+        criterion = dict(plain["model"]["criterion"])
+        _require(criterion.pop("label_smoothing", 0) == 0
+                 and criterion == {"_target_": "torch.nn.CrossEntropyLoss"},
+                 "size ablations require plain CE / label_smoothing=0")
+        if not plain["accuracy_guided"]["smoke"]:
+            _require(one["search_selection_last_epochs"] == 30, "candidate window must be epochs31-60")
+            _require(plain["accuracy_guided"]["guard"]["train_bn_calibration_batches"] == 200,
+                     "physical recovery must use train-only BN200")
+        _require(block.get("gate_threshold") == 0.5, "gate threshold must remain0.5")
+        _require(plain["optimizer"]["lr"] == 0.001
+                 and plain["optimizer"]["weight_decay"] == 0.0005
+                 and plain["scheduler"]["eta_min"] == 0, "size-ablation optimizer recipe changed")
+        adaptive = plain["training_arguments"]["adaptive_lambda"]
+        if not plain["accuracy_guided"]["smoke"]:
+            _require(adaptive["initial_search_warmup"] == 10 and adaptive["log_step"] == "auto"
+                     and adaptive["update_every_search_epochs"] == 1,
+                     "size-ablation adaptive controller recipe changed")
+    elif protocol in SEARCH_PROTOCOLS:
         required_fields = {
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state",
@@ -228,7 +269,7 @@ def validate_config(config):
         ("shared_search", "search", one["search_epochs"]), ("export_only", "commit", 0),
         ("final_recovery", "recovery", one["final_epochs"])], "unexpected one-shot stage identities or lengths")
     bn_calibration_batches = shared.accuracy_guided.guard.train_bn_calibration_batches
-    if protocol in QUALITY_RECOVERY_PROTOCOLS:
+    if protocol in QUALITY_RECOVERY_PROTOCOLS or protocol == ABLATION_PROTOCOL:
         _require(
             type(bn_calibration_batches) is int and bn_calibration_batches >= 0,
             "quality recovery BN calibration batches must be a non-negative integer",
@@ -277,6 +318,15 @@ def resolved_branch_plan(config):
     """Expand the checked-in branch order into concrete, auditable runs."""
     validate_config(config)
     one = OmegaConf.to_container(config.one_shot, resolve=True)
+    if one["protocol"] == ABLATION_PROTOCOL:
+        return [
+            {"id": name, "method": name, "repeat": "repeat_1",
+             "training_seed": int(config.seed),
+             "model_state": ("pytorch_default_all_trainable_and_bn" if name == "scratch"
+                             else "selected_surviving_state"),
+             "optimizer_state": "fresh", "scheduler_state": FRESH_SCHEDULER}
+            for name in one["branches"]
+        ]
     if one["protocol"] in SEARCH_PROTOCOLS:
         return [
             {"id": "inherited", "method": "inherited", "repeat": "repeat_1",
@@ -417,7 +467,7 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
         execution["search_selection_epoch_window"] = {
             "start": start, "end": end, "applies_to": "feasible_and_fallback",
         }
-    if one["protocol"] in SEARCH_PROTOCOLS:
+    if one["protocol"] in SEARCH_PROTOCOLS or one["protocol"] == ABLATION_PROTOCOL:
         execution.update({
             "inherited_initialization": "selected search Conv/BN tensors sliced into the compact architecture",
             "scratch_initialization": one["scratch_initialization"],
@@ -439,6 +489,15 @@ def resolved_one_shot(config, *, check_inputs=True, output_root=None):
                   "per_branch_budget_including_shared_search": total,
                   "total_unique_training_epochs_both_branches": one["search_epochs"] + 2 * one["final_epochs"],
                   "selection_does_not_rewind_consumed_budget": True}
+        if one["protocol"] == ABLATION_PROTOCOL:
+            execution.update(
+                shared_search_checkpoint_and_mask=False,
+                shared_search_checkpoint_and_learned_widths=True,
+                recovery_bn_calibration_batches=int(config.accuracy_guided.guard.train_bn_calibration_batches),
+                search_only_bn_calibration_batches=0,
+            )
+            budget.pop("total_unique_training_epochs_both_branches")
+            budget["total_unique_training_epochs_all_branches"] = one["search_epochs"] + len(branches) * one["final_epochs"]
     else:
         continued_search_scheduler = one["protocol"] == HANDOFF_PROTOCOL
         quality_recovery = one["protocol"] in QUALITY_RECOVERY_PROTOCOLS

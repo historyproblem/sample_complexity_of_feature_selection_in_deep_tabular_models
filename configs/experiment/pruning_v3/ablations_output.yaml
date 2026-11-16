@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - /experiment/pruning_v3/ablations_internal
+  - _self_
+
+one_shot:
+  branches: [inherited]
+
+model:
+  backbone:
+    resnet_block:
+      gate_internal_width: false
+      gate_output: true
+
+mlflow:
+  run_name: ablations_output
+run_history:
+  run_name: ablations_output

@@ -47,6 +47,21 @@ def checkpoint_probabilities(model):
     return result
 
 
+def make_matched_random_mask(model, learned_mask, *, seed, min_keep_ratio=0.08):
+    """Randomize identities independently per boundary, preserving every width."""
+    validate_mask(model, learned_mask, min_keep_ratio=min_keep_ratio)
+    rng = random.Random(seed)
+    mask = {
+        name: sorted(rng.sample(range(gate.initial_channels), len(learned_mask.get(name, []))))
+        for name, gate in sorted(gates(model).items())
+        if learned_mask.get(name)
+    }
+    validate_mask(model, mask, min_keep_ratio=min_keep_ratio)
+    if PhysicalBudget(model, mask).total() != PhysicalBudget(model, learned_mask).total():
+        raise AssertionError("Matched random identities changed physical parameter count")
+    return mask
+
+
 def select_learned_closed(model, previous, min_keep_ratio=0.0, *, dependency_groups=None):
     """Materialize the maximal valid deterministic learned-closed subset.
 

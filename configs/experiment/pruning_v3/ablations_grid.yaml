@@ -1,0 +1,16 @@
+# Five tolerance settings; actual sizes are measured, never enforced as quotas.
+protocol: pruning_v3_size_ablations_grid_v1
+seed: 42
+split_seed: 42
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/pruning_ablations_20261116
+configs:
+  internal: experiment/pruning_v3/ablations_internal
+  output: experiment/pruning_v3/ablations_output
+pilot_profiles: [gap_005, gap_050, gap_300]
+profiles:
+  - {id: gap_005, soft_drop: 0.00025, hard_drop: 0.0005}
+  - {id: gap_010, soft_drop: 0.0005, hard_drop: 0.001}
+  - {id: gap_050, soft_drop: 0.0025, hard_drop: 0.005}
+  - {id: gap_150, soft_drop: 0.0075, hard_drop: 0.015}
+  - {id: gap_300, soft_drop: 0.015, hard_drop: 0.03}

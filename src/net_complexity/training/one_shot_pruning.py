@@ -28,6 +28,7 @@ from .cyclic_aig import _configure_run_history, _set_num_epochs
 from .engine import _build_optimizer, run_training
 from .interruption import cooperative_signals, TrainingInterrupted
 from .one_shot_pruning_config import (
+    ABLATION_PROTOCOL,
     FRESH_SCHEDULER,
     HANDOFF_PROTOCOL,
     MAPPED_OPTIMIZER,
@@ -222,9 +223,14 @@ def build_physical_branches(config, selected_carrier, mask, selection_identity):
     return inherited, scratch, report
 
 
-def build_planned_physical_branches(config, selected_carrier, mask, selection_identity):
+def build_planned_physical_branches(config, selected_carrier, mask, selection_identity, *, search_only=False):
     """Build every planned branch without allowing optimizer policy to affect weights."""
     plan = resolved_branch_plan(config)
+    if str(config.one_shot.protocol) == ABLATION_PROTOCOL:
+        from .pruning_ablations import build_ablation_branches
+        return build_ablation_branches(
+            config, selected_carrier, mask, selection_identity, search_only=search_only,
+        )
     if str(config.one_shot.protocol) in SEARCH_PROTOCOLS:
         inherited, scratch, report = build_physical_branches(
             config, selected_carrier, mask, selection_identity,
@@ -803,13 +809,26 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             write_json(output_root / "selection.json", selection)
             progress_message("selection", f"selected {identity['selected_checkpoint_id']}; physical_parameters={selected['physical_cost']}")
             branch_models, initialization = build_planned_physical_branches(
-                config, selected_carrier, mask, identity,
+                config, selected_carrier, mask, identity, search_only=search_only,
             )
             export_model = branch_models[branch_plan[0]["id"]]
             if sum(p.numel() for p in export_model.parameters()) != selected["physical_cost"]:
                 raise AssertionError("Selected cost estimate differs from the actual compact tensors.")
             export_dir = output_root / "export_only"
             export_dir.mkdir()
+            if protocol == ABLATION_PROTOCOL and not search_only and "random" in branch_models:
+                random_mask = initialization["random"]["pruning_mask"]
+                with isolated_diagnostic_rng(data.valid_dataloader):
+                    random_equivalence = committed_equivalence(
+                        selected_carrier, branch_models["random"], random_mask, sample, device,
+                        report_path=export_dir / "random_transfer_equivalence.json",
+                    )
+                    random_cost = deployment_cost(branch_models["random"], image_shape=image_shape)
+                    learned_cost = deployment_cost(export_model, image_shape=image_shape)
+                for cost_key in ("physical_total_parameters", "conv_linear_macs_per_image"):
+                    if random_cost[cost_key] != learned_cost[cost_key]:
+                        raise AssertionError("Matched random export changed " + cost_key)
+                initialization["random"]["transfer_equivalence"] = random_equivalence
             source_hash = state_hash(selected_carrier.state_dict())
             physical_hash_before_bn = state_hash(export_model.state_dict())
             # The deployable predictor has every physically retained channel
@@ -879,11 +898,12 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             if report["status"] == "technical_gated_export_failure":
                 raise RuntimeError("Dependency-safe gated/physical export mismatch; see export_only/diagnostics.json")
 
-            calibration_requested = int(
+            calibration_requested = 0 if search_only and protocol == ABLATION_PROTOCOL else int(
                 cfg.accuracy_guided.guard.train_bn_calibration_batches
             )
             branch_calibration = {}
-            for branch_spec in branch_plan:
+            calibration_plan = (branch_plan[:1] if search_only and protocol == ABLATION_PROTOCOL else branch_plan)
+            for branch_spec in calibration_plan:
                 name = branch_spec["id"]
                 model = branch_models[name]
                 parameters_before = {
@@ -975,6 +995,17 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     "optimizer_state_initialization": branch_spec["optimizer_state"],
                     "scheduler_state_initialization": branch_spec["scheduler_state"],
                     "normalization_metadata": normalization, "provenance": provenance, "test_evaluated": False}
+                branch_mask = mask
+                branch_identity = identity
+                if protocol == ABLATION_PROTOCOL:
+                    branch_mask = initialization[name]["pruning_mask"]
+                    branch_identity = {**identity, "mask_hash": mask_hash(branch_mask)}
+                    branch.update(
+                        **branch_identity, pruning_mask=branch_mask,
+                        source_learned_mask_hash=identity["mask_hash"],
+                        architecture_hash=initialization[name]["architecture_hash"],
+                        random_mask_seed=int(config.one_shot.random_mask_seed) if name == "random" else None,
+                    )
                 state["branches"][name] = branch
                 atomic_checkpoint(branch_dir / "initial_state.pt", {**branch,
                     "model_state_dict": model.cpu().state_dict(), "model_state_hash": state_hash(model.state_dict())})
@@ -1004,11 +1035,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 paths, stage_record = train_stage(
                     name,
                     model,
-                    mask,
+                    branch_mask,
                     final_epochs,
                     ledger,
                     structural=True,
-                    identity=identity,
+                    identity=branch_identity,
                     held_state=held_controller,
                     optimizer_initializer=optimizer_initializer,
                     scheduler_initializer=scheduler_initializer,
@@ -1050,11 +1081,17 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             if any(branch["ledger"]["global_training_epoch"] != total for branch in state["branches"].values()):
                 raise AssertionError("Each branch must consume its complete attributed search+final budget.")
             state["status"] = "completed"
-            write_json(output_root / "comparison.json", {"protocol": protocol, **identity,
+            comparison_summary = {"protocol": protocol, **identity,
                 "architecture_hash": initialization["architecture_hash"],
                 "validation": {name: branch["validation"] for name, branch in state["branches"].items()},
                 "quality_feasible": {name: branch["quality_feasible"] for name, branch in state["branches"].items()},
-                "official_test": None, "test_evaluated": False})
+                "official_test": None, "test_evaluated": False}
+            if protocol == ABLATION_PROTOCOL:
+                comparison_summary.update(
+                    branch_architecture_hashes={name: branch["architecture_hash"] for name, branch in state["branches"].items()},
+                    branch_mask_hashes={name: branch["mask_hash"] for name, branch in state["branches"].items()},
+                )
+            write_json(output_root / "comparison.json", comparison_summary)
             persist()
             return state
     except Exception as exc:

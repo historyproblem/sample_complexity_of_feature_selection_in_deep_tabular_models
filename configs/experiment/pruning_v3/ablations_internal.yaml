@@ -1,0 +1,26 @@
+# @package _global_
+# Search-only first; recovery is a separate explicit command using its artifacts.
+defaults:
+  - /experiment/pruning_v3/resnet50_cifar10_ls0_prebn_repro4_search
+  - _self_
+
+one_shot:
+  protocol: pruning_v3_size_ablations_60_90
+  branches: [inherited, scratch, random]
+  inherited_optimizer_state: fresh
+  random_mask_seed: 42
+  search_scheduler_eta_min: 0.0
+  search_selection_last_epochs: 30
+  search_selection_bn_calibration_batches: 0
+
+# Plain CrossEntropyLoss defaults to label_smoothing=0 in both phases.
+# Search-only skips this pass; each physical recovery receives train-only BN200.
+accuracy_guided:
+  guard:
+    train_bn_calibration_batches: 200
+
+mlflow:
+  enabled: false
+  run_name: ablations_internal
+run_history:
+  run_name: ablations_internal
