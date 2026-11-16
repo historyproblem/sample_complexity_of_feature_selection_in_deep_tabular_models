@@ -18,6 +18,10 @@ DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/ablations_grid.yaml"
 PROTOCOL = "pruning_v3_size_ablations_grid_v1"
 
 
+class MissingReferenceError(FileNotFoundError):
+    """Actionable input setup failure before any training is started."""
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -166,10 +170,30 @@ def execute(study, args):
         return planned
     if args.reference_archive:
         require(args.stage == "search", "Restore a reference only before search")
+        if not args.reference_archive.is_file():
+            raise MissingReferenceError(
+                f"Reference archive not found: {args.reference_archive}\n"
+                "Upload the existing epoch_split_dense_reference_seed42_fresh_upload.tar.gz "
+                "to the repository root, or pass its actual path with --reference-archive.\n"
+                "No new baseline or search training has started."
+            )
         restore_reference(args.reference_archive, reference)
     # All configs and inputs are checked before the first training call.
     for _, _, config in cells:
-        validate_inputs(config)
+        try:
+            validate_inputs(config)
+        except FileNotFoundError as exc:
+            raise MissingReferenceError(
+                f"Existing dense reference/zero-epoch initializer is missing under: {reference}\n"
+                "These run artifacts are not included in Git. Use an existing extracted reference:\n"
+                "  --dense-source PATH_TO_EXISTING_REFERENCE\n"
+                "or restore the existing archive with the first search command:\n"
+                "  .venv/bin/python scripts/launch_pruning_ablations.py --stage search "
+                f"--subset {args.subset} "
+                "--reference-archive epoch_split_dense_reference_seed42_fresh_upload.tar.gz\n"
+                "The archive must already be uploaded to the server. "
+                "This does not train a new dense baseline. No search/recovery has started."
+            ) from exc
     paths = {f"{row['id']}/{placement}": output / row["id"] / placement
              for row, placement, _ in cells}
     receipt_path = output / f"search_review_{args.subset}.json"
@@ -255,7 +279,10 @@ def main(argv=None):
     parser.add_argument("--device")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    return execute(load_study(args.config), args)
+    try:
+        return execute(load_study(args.config), args)
+    except MissingReferenceError as exc:
+        parser.exit(2, f"{exc}\n")
 
 
 if __name__ == "__main__":

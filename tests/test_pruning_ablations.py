@@ -256,3 +256,22 @@ def test_reference_archive_restores_only_inputs_without_path_traversal(tmp_path)
     assert not (tmp_path / "unrelated").exists()
     with pytest.raises(ValueError, match="already exists"):
         launcher.restore_reference(archive, destination)
+
+
+@pytest.mark.parametrize("use_archive", [False, True])
+def test_missing_reference_cli_explains_actual_flags_without_training(tmp_path, use_archive):
+    output = tmp_path / "not_started"
+    args = [sys.executable, "scripts/launch_pruning_ablations.py", "--stage", "search",
+            "--dense-source", str(tmp_path / "missing_reference"), "--output", str(output)]
+    if use_archive:
+        args += ["--reference-archive", str(tmp_path / "missing.tar.gz")]
+    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
+    assert result.returncode == 2
+    assert "--reference-archive" in result.stderr
+    assert "epoch_split_dense_reference_seed42_fresh_upload.tar.gz" in result.stderr
+    assert "has started" in result.stderr
+    assert "--from-scratch" not in result.stderr and "--override" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not output.exists() and not (tmp_path / "missing_reference").exists()
+    if not use_archive:
+        assert "--dense-source" in result.stderr

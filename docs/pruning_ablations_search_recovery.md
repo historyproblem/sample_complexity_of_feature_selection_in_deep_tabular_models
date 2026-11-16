@@ -43,11 +43,12 @@ The reference must include the matching zero-epoch initializer and the complete
 150-epoch dense validation history/state/config. No dense trained weights are
 loaded into search, and no reference is trained implicitly.
 
-On a server without an extracted reference, upload the existing archive and add
-this option to the **first search command only**:
+On a server without an extracted reference, upload the existing archive to the
+repository root and use this complete **first search command**:
 
 ```sh
---reference-archive epoch_split_dense_reference_seed42_fresh_upload.tar.gz
+.venv/bin/python scripts/launch_pruning_ablations.py --stage search --subset pilot \
+  --reference-archive epoch_split_dense_reference_seed42_fresh_upload.tar.gz
 ```
 
 It restores only the four required input files to the configured reference path,
@@ -56,6 +57,11 @@ extraction destination; for an already extracted reference omit this option.
 The local preflight verified this existing archive for both gate placements.
 This reference is the fresh archive, not the earlier pinned prebn_repro4 reference;
 all new branches share its matching zero-epoch initializer and validation curve.
+After restoration, omit `--reference-archive` on subsequent commands.
+If the reference is already extracted at
+`outputs/runs/epoch_split_dense_reference_seed42_fresh`, use
+`--dense-source outputs/runs/epoch_split_dense_reference_seed42_fresh` instead,
+and keep that same option for inspect and recovery. No repeated upload is needed.
 
 ## First command: search only
 
