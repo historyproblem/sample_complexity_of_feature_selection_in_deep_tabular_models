@@ -1,0 +1,59 @@
+% Fill the empty cells. Use -- for settings that do not apply.
+% Separate runs/sweeps within a cell when their settings differ.
+% Optional inclusion after filling: \input{method_hyperparameters_template}
+% Requires booktabs (already provided by the manuscript class).
+\begin{table*}[t]
+  \caption{Method-specific hyperparameters and procedural settings.
+    M: MobileNetV2; R: ResNet-50. M one-pass uses one cycle of the
+    iterative procedure; R one-shot uses checkpoint selection.
+    Accuracy tolerances are in percentage points. Search includes warmup.
+    A dash indicates a setting that does not apply.}
+  \label{tab:method-hyperparameters}
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}p{0.39\textwidth}*{4}{p{0.135\textwidth}}@{}}
+    \toprule
+    Hyperparameter / setting & M iterative & M one-pass & R iterative & R one-shot \\
+    \midrule
+    \multicolumn{5}{l}{\textit{Gates and regularization}} \\
+    Gate placement / groups & & & & \\
+    Training gate mode (sampled / deterministic ST) & & & & \\
+    Initial opening probability $r_0$ & & & & \\
+    Gate-initialization noise (distribution / scale) & & & & \\
+    Relaxation temperature $T$ & & & & \\
+    Evaluation gate threshold & & & & \\
+    Entropy coefficient $\beta$ & & & & \\
+    Sparsity normalization (group means / other) & & & & \\
+    Group denominator (original / remaining channels) & & & & \\
+    \midrule
+    \multicolumn{5}{l}{\textit{Adaptive sparsity controller}} \\
+    Initial sparsity coefficient $\lambda_0$ & & & & \\
+    Clipping bounds $[\lambda_{\min},\lambda_{\max}]$ & & & & \\
+    Soft accuracy tolerance $\delta_s$ (pp) & & & & \\
+    Hard accuracy tolerance $\delta_h$ (pp) & & & & \\
+    Warmup $W$ (epochs) & & & & \\
+    Averaging window $w$ (epochs) & & & & \\
+    Gap definition (paired / current reference minus mean) & & & & \\
+    Update interval (epochs) & & & & \\
+    Log-step $\eta$ (fixed value / rule) & & & & \\
+    Automatic-step target $\lambda_{\rm target}$ & & & & \\
+    Step boost (multiplier / maximum level) & & & & \\
+    Closing-probability growth thresholds & & & & \\
+    \midrule
+    \multicolumn{5}{l}{\textit{Search, selection and recovery}} \\
+    Maximum pruning cycles $N$ & & & & \\
+    Search budget $T_s$ (epochs per cycle) & & & & \\
+    Recovery budget $T_r$ (epochs per cycle) & & & & \\
+    Search initialization policy & & & & \\
+    Recovery initialization policy & & & & \\
+    Selection mode (threshold / budget / checkpoint) & & & & \\
+    Pruning probability threshold $\tau$ & & & & \\
+    Parameter-removal cap $\rho$ & & & & \\
+    Minimum retention (fraction / channels per group) & & & & \\
+    Feasible-checkpoint window (search epochs) & & & & \\
+    Fallback-checkpoint window (search epochs) & & & & \\
+    BN recalibration budget (training batches) & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table*}

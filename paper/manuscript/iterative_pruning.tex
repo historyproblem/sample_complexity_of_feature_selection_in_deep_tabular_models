@@ -1,64 +1,88 @@
 \subsection{Iterative Pruning Procedure}
 \label{sec:iterative-method}
 
-Algorithm~\ref{alg:iterative-pruning} makes the iterative procedure above
-explicit. It uses the same gate probabilities and structural removal
-operations, while changing how channels and recovery weights are selected.
-At each cycle, the final search checkpoint supplies the channel scores
-$\overline r_{l,c}$. For the input-independent gates used in these
-experiments, $\overline r_{l,c}=r_{l,c}$, so no calibration average is needed.
-Unlike Algorithm~\ref{alg:accuracy-guided-pruning}, this procedure does not
-select the smallest validation-feasible checkpoint from the search history.
+\paragraph{Algorithm overview.}
+Algorithm~\ref{alg:iterative-pruning} specifies the iterative procedure
+with input-independent gates. As in
+Algorithm~\ref{alg:accuracy-guided-pruning}, $T_s,T_r$ are the search
+and recovery budgets. The procedure repeats these phases for at most
+$N$ cycles, carrying a set $D$ of permanently disabled channels.
+The initialization policy $\mathcal I$ specifies the starting weights
+for each phase. Numerical training and controller settings are given in
+Sections~\ref{sec:mbv2-iterative-implementation}--\ref{sec:resnet-iterative-implementation}.
 
-Let $D$ contain the permanently disabled channels. Threshold selection
-considers remaining channels with
-$\overline r_{l,c}<\varepsilon_{\mathrm{prune}}$; the experimental tables
-denote this threshold by $\tau$. Budget-only selection considers all
-remaining channels. Both retain at least one channel per gate group.
-When a cap $\rho$ is specified, the removal budget is
-$B=\rho P_{\mathrm{probe}}$, where $P_{\mathrm{probe}}$ counts parameters
-in the full-width gated model. The estimated cost $c(l,c)$ includes
-the associated convolutional and normalization parameters. These costs
-are additive approximations: the cap is not an achieved compression ratio
-or a fraction of the current compact model.
+Let $(\theta_t,\phi_t)$ denote the saved search checkpoint, with
+$\theta_t$ including weights and BatchNorm statistics and $\phi_t$ the gate
+logits. Each cycle selects channels from the final checkpoint
+$(\theta_{T_s},\phi_{T_s})$. For input-independent gates, the channel
+scores satisfy $\overline r_{l,c}=r_{l,c}$.
+The operator $\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$ considers
+remaining channels with $r_{l,c}<\varepsilon_{\mathrm{prune}}$ in threshold
+mode, or all remaining channels in budget-only mode. If every remaining
+channel of a group qualifies, it excludes one with maximal score,
+retaining at least one channel per group. The experimental tables denote
+$\varepsilon_{\mathrm{prune}}$ by $\tau$.
+
+Selection processes candidates in increasing score order. The optional
+budget is $B=\rho P_{\mathrm{probe}}$, where $P_{\mathrm{probe}}$ counts
+parameters in the full-width gated model. The estimated removal cost
+$c(l,c)$ includes associated convolutional and normalization parameters.
+These additive costs are approximate; $\rho$ is a removal cap rather
+than an achieved compression ratio. Candidates exceeding the remaining
+budget are skipped.
+
+After selection, $\operatorname{Compact}(\theta_{T_s},m)$ physically
+removes discarded channels and gates using the cumulative mask $m$.
+The operator $\operatorname{Initialize}(g,\mathcal I)$ then replaces
+its weights according to $\mathcal I$. Recovery uses a fresh optimizer
+and scheduler for $T_r$ epochs and saves the checkpoint with the highest
+validation accuracy. Only $D$ passes to the next cycle.
 
 \begin{algorithm*}[t]
-\caption{Iterative structural channel pruning. Search/recovery budgets
-are $T_s=30$, $T_r=45$ epochs for MobileNetV2 and $T_s=120$, $T_r=150$
-for ResNet-50. Both iterative runs use $N=10$ cycles; one-pass MobileNetV2
-uses the same procedure with $N=1$.}
+\caption[Iterative accuracy-guided structural channel pruning]{Iterative
+accuracy-guided structural channel pruning. Each cycle performs search,
+channel selection and recovery. Gate initialization, warmup, averaging
+window and sparsity updates follow the configured search controller.
+Setting $N=1$ gives the one-pass variant with the same selection rule.}
 \label{alg:iterative-pruning}
 \begin{algorithmic}[1]
-\REQUIRE Training and validation data; initialization policy $\mathcal I$;
-search/recovery budgets $T_s,T_r$; maximum cycles $N$;
-selection mode, threshold $\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$;
-gate and sparsity-controller settings.
+\REQUIRE Network $f_\theta$; training and validation data;
+dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$; initialization policy $\mathcal I$.
+\REQUIRE Search and recovery budgets $T_s,T_r$; maximum cycles $N$;
+accuracy tolerances $\delta_s,\delta_h$; selection mode, threshold
+$\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$.
 \STATE $D\gets\varnothing$; recovery trajectory $\mathcal G\gets[\,]$.
 \FOR{$k=1,\ldots,N$}
 \STATE \textit{// Search}
-\STATE Initialize a full-width gated network from $\mathcal I$;
-permanently mask channels in $D$; reset gates, optimizer, scheduler and controller.
-\STATE Train for $T_s$ epochs with the gate objective and validation-based
-sparsity updates specified for the experiment.
-\STATE Read $\overline r_{l,c}$ from the final search checkpoint.
-\STATE $Q\gets\{(l,c)\notin D:\overline r_{l,c}<\varepsilon_{\mathrm{prune}}\}$
-in threshold mode; $Q\gets\{(l,c)\notin D\}$ in budget-only mode.
-\STATE If all remaining channels of a group belong to $Q$, exclude
-one with maximal score from $Q$ to preserve a nonempty group.
-\STATE \textit{// Structural selection}
-\STATE Sort $Q$ by increasing $\overline r_{l,c}$; $R\gets\varnothing$;
+\STATE Initialize $\theta$ from $\mathcal I$ and gate logits $\phi$;
+permanently mask channels in $D$.
+\STATE $\lambda_1\gets\lambda_0$; reset the search controller, optimizer and scheduler.
+\FOR{$t=1,\ldots,T_s$}
+\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$;
+measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
+\IF{$t\leq W$ or $t<w$}
+\STATE $\lambda_{t+1}\gets\lambda_t$.
+\ELSE
+\STATE Update $\lambda_{t+1}$ using the configured validation-gap controller.
+\ENDIF
+\ENDFOR
+\STATE \textit{// Channel selection}
+\STATE $Q\gets\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$;
+sort $Q$ by increasing $r_{l,c}$.
+\STATE $R\gets\varnothing$;
 $B\gets\rho P_{\mathrm{probe}}$ if a cap is set, otherwise $B\gets\infty$.
 \FOR{channel $(l,c)$ in $Q$}
 \IF{$c(l,c)\leq B$}
 \STATE $R\gets R\cup\{(l,c)\}$; $B\gets B-c(l,c)$.
 \ENDIF
 \ENDFOR
-\STATE $D\gets D\cup R$; physically remove channels in $D$ and all gates.
+\STATE $D\gets D\cup R$; $m_{l,c}\gets\mathbf 1[(l,c)\notin D]$.
 \STATE \textit{// Recovery}
-\STATE Initialize the compact network anew from $\mathcal I$;
+\STATE $g\gets\operatorname{Compact}(\theta_{T_s},m)$.
+\STATE $g\gets\operatorname{Initialize}(g,\mathcal I)$;
 initialize a fresh optimizer and scheduler.
-\STATE Train for $T_r$ epochs without gates; append the best validation
-checkpoint to $\mathcal G$.
+\STATE Train $g$ for $T_r$ epochs without gates.
+\STATE Append the best validation checkpoint of $g$ during recovery to $\mathcal G$.
 \IF{$R=\varnothing$}
 \STATE \textbf{break}.
 \ENDIF
