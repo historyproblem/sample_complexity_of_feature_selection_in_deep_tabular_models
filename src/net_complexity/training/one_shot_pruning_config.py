@@ -138,6 +138,9 @@ def validate_config(config):
                  and plain["optimizer"]["weight_decay"] == 0.0005
                  and plain["scheduler"]["eta_min"] == 0, "size-ablation optimizer recipe changed")
         adaptive = plain["training_arguments"]["adaptive_lambda"]
+        _require(adaptive["alpha_init"] == 0.001 and adaptive["alpha_min"] == 1e-8
+                 and adaptive["alpha_max"] == 80,
+                 "size-ablation lambda initialization and bounds must remain 0.001 / 1e-8 / 80")
         if not plain["accuracy_guided"]["smoke"]:
             _require(adaptive["initial_search_warmup"] == 10 and adaptive["log_step"] == "auto"
                      and adaptive["update_every_search_epochs"] == 1,

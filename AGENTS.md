@@ -5,6 +5,13 @@
 
 # Pruning experiment requirements
 
+- For the current ResNet50/CIFAR10 ablation follow-ups, vary only
+  adaptive_lambda.soft_drop and adaptive_lambda.hard_drop. Preserve the last
+  internal/gap_005 model/training recipe, including alpha_init=0.001,
+  alpha_min=1e-8 and alpha_max=80. Use internal-only gates. Run IDs and output
+  directories may change to keep experiments separate. Any other training
+  parameter change requires an explicit user instruction.
+
 - New pruning experiments keep label_smoothing=0 in both search and recovery,
   per the team's decision. Do not tune it without a new explicit instruction.
 - Existing ResNet50/CIFAR10 sweeps keep min_keep_ratio=0.08. The follow-up

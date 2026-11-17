@@ -1,20 +1,18 @@
 # Two fresh internal-only searches; recovery remains a separate command.
-# Relative to gap_005, change only the adaptive-lambda upper clipping bound.
+# Change only soft_drop/hard_drop; inherit alpha_max=80 without modification.
 # Actual sizes are measured after search, never imposed as parameter quotas.
-protocol: pruning_v3_internal_less_sparse_pair_v1
+protocol: pruning_v3_internal_threshold_pair_v1
 seed: 42
 split_seed: 42
 reference_output: outputs/baseline/one_shot_dense_reference_seed42
-output: outputs/runs/pruning_internal_less_sparse_20261117
+output: outputs/runs/pruning_internal_threshold_pair_20261117
 configs:
   internal: experiment/pruning_v3/ablations_internal
-pilot_profiles: [internal_cap0p1, internal_cap1p0]
+pilot_profiles: [internal_gap001, internal_gap0025]
 profiles:
-  - id: internal_cap0p1
-    soft_drop: 0.00025
-    hard_drop: 0.0005
-    alpha_max: 0.1
-  - id: internal_cap1p0
-    soft_drop: 0.00025
-    hard_drop: 0.0005
-    alpha_max: 1.0
+  - id: internal_gap001
+    soft_drop: 0.00005
+    hard_drop: 0.0001
+  - id: internal_gap0025
+    soft_drop: 0.000125
+    hard_drop: 0.00025

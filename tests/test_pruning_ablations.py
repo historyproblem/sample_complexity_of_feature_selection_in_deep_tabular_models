@@ -67,6 +67,7 @@ def test_full_recipes(placement, count):
     ("accuracy_guided.eligibility.min_keep_ratio", .001),
     ("one_shot.search_selection_last_epochs", 60),
     ("training_arguments.adaptive_lambda.enabled", False),
+    ("training_arguments.adaptive_lambda.alpha_max", 0.1),
 ])
 def test_recipe_rejects_method_drift(key, value):
     cfg = compose_config("experiment/pruning_v3/ablations_internal")
@@ -280,21 +281,24 @@ def test_missing_reference_cli_explains_actual_flags_without_training(tmp_path, 
 PAIR_CONFIG = ROOT / 'configs/experiment/pruning_v3/ablations_internal_less_sparse_pair.yaml'
 
 
-def test_less_sparse_pair_changes_only_adaptive_ceiling():
+def test_less_sparse_pair_changes_only_quality_thresholds():
     study = launcher.load_study(PAIR_CONFIG)
     assert list(study['configs']) == ['internal'] and len(study['profiles']) == 2
     reference = ROOT / 'outputs/baseline/one_shot_dense_reference_seed42'
     baseline_study = launcher.load_study(launcher.DEFAULT_CONFIG)
     control = launcher.compose_cell(baseline_study, baseline_study['profiles'][0], 'internal', reference)
     control = OmegaConf.to_container(control, resolve=True)
-    control['training_arguments']['adaptive_lambda'].pop('alpha_max')
-    for row, ceiling in zip(study['profiles'], [.1, 1.]):
+    control['training_arguments']['adaptive_lambda'].pop('soft_drop')
+    control['training_arguments']['adaptive_lambda'].pop('hard_drop')
+    for row, thresholds in zip(study['profiles'], [(.00005, .0001), (.000125, .00025)]):
         cfg = launcher.compose_cell(study, row, 'internal', reference)
         assert cfg.training_arguments.adaptive_lambda.enabled is True
         assert cfg.model.backbone.resnet_block.gate_internal_width is True
         assert cfg.model.backbone.resnet_block.gate_output is False
         plain = OmegaConf.to_container(cfg, resolve=True)
-        assert plain['training_arguments']['adaptive_lambda'].pop('alpha_max') == ceiling
+        assert plain['training_arguments']['adaptive_lambda']['alpha_max'] == 80
+        assert (plain['training_arguments']['adaptive_lambda'].pop('soft_drop'),
+                plain['training_arguments']['adaptive_lambda'].pop('hard_drop')) == thresholds
         assert plain == control
     assert study['output'] != baseline_study['output']
 
@@ -310,7 +314,9 @@ def test_less_sparse_pair_dispatches_exactly_two_searches(tmp_path, monkeypatch)
     assert len(calls) == plan['searches'] == 2
     assert plan['new_training_epochs'] == 120 and plan['placements'] == ['internal']
     assert plan['recoveries'] == 6 and plan['official_test'] is False
-    assert [a[0].training_arguments.adaptive_lambda.alpha_max for a, _ in calls] == [.1, 1.]
+    assert all(a[0].training_arguments.adaptive_lambda.alpha_max == 80 for a, _ in calls)
+    assert [(a[0].training_arguments.adaptive_lambda.soft_drop,
+             a[0].training_arguments.adaptive_lambda.hard_drop) for a, _ in calls] == [(.00005, .0001), (.000125, .00025)]
     assert all(kw['search_only'] is True and kw['reuse_search_from'] is None for _, kw in calls)
     assert all(a[1].parts[-2:] == ('internal', 'search') for a, _ in calls)
 
@@ -361,3 +367,14 @@ def test_pair_missing_reference_hint_preserves_internal_config(tmp_path, capsys)
     assert PAIR_CONFIG.name in error and '--config' in error
     assert '--reference-archive' in error
     assert not (tmp_path / 'out').exists()
+
+
+@pytest.mark.parametrize("field,value", [("alpha_max", .1), ("alpha_init", .0001), ("gate_threshold", .7), ("lr", .0003)])
+def test_threshold_pair_rejects_any_other_profile_override(tmp_path, field, value):
+    study = launcher.load_study(PAIR_CONFIG)
+    study['profiles'][0][field] = value
+    path = tmp_path / 'bad_override.yaml'
+    import yaml
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match='only soft_drop/hard_drop'):
+        launcher.load_study(path)

@@ -144,18 +144,25 @@ No command above evaluates official test. Freeze the complete deployment list
 before the separate final test/report step; validation values are not final test
 quality. Historical test-informed comparisons remain exploratory.
 
-## Two additional less-sparse internal searches, 17 November
+## Two additional internal searches: quality thresholds only, 17 November
 
-The new pair uses only internal gates and the same existing reference/zero-epoch
-initializer as the completed pilot. It keeps the strict gap_005 tolerances
-soft0.00025/hard0.0005, seed42, floor0.08, threshold0.5, LS0, beta0, search60,
-pre-BN selection31-60, warmup10 and automatic log step0.9210340371976183.
+The current pair changes only the validation-quality tolerances driving lambda:
 
-Only the adaptive-lambda upper clipping bound changes: **0.1** and **1.0** instead
-of80. The completed internal pilot used peak lambda25.12-63.10 and removed77-89%
-of channels. Reducing the allowed peak is intended to produce denser candidates;
-actual sizes must be measured. Lambda remains adaptive, with quality feedback
-and both increases and decreases; no fixed-lambda replacement is used.
+| Profile | soft_drop | hard_drop |
+| --- | ---: | ---: |
+| internal_gap001 | 0.00005 | 0.0001 |
+| internal_gap0025 | 0.000125 | 0.00025 |
+
+Both pairs are stricter than the completed internal/gap_005 control
+(0.00025/0.0005). Lambda remains adaptive with its original initialization0.001,
+minimum1e-8 and maximum80. The earlier cap0.1/1.0 proposal is withdrawn.
+Profiles reject every training override except soft_drop/hard_drop. Resolved
+configs are checked against internal/gap_005 with only these two fields removed.
+
+Internal-only gates, seed42, existing reference/zero-epoch initializer,floor0.08,
+threshold0.5,LS0,beta0,search60,pre-BN selection31-60,warmup10 and automatic log
+step0.9210340371976183 are unchanged. Larger resulting sizes remain a hypothesis
+until the searches finish; no parameter quota enters selection.
 
 ```sh
 git pull --ff-only
@@ -164,14 +171,14 @@ git pull --ff-only
   --stage search --subset full
 ```
 
-This command trains exactly **two new searches /120epochs**, in sequence, under
-`outputs/runs/pruning_internal_less_sparse_20261117/{internal_cap0p1,internal_cap1p0}/internal/search/`.
-It performs no output-gate search, recovery, test inference or new baseline fit.
-The reference already restored for the completed pilot is reused; do not repeat
-`--reference-archive` when the extraction directory exists.
+This command trains exactly two new internal searches /120epochs, under
+`outputs/runs/pruning_internal_threshold_pair_20261117/{internal_gap001,internal_gap0025}/internal/search/`.
+The new directory separates the corrected threshold experiment from any previous
+cap-based attempt. No existing outputs are overwritten or reused across the two
+protocols. The same --config is required for later inspect/recovery.
 
-For a config-only preview append `--dry-run`. After the two searches finish,
-use the same `--config` argument with `--stage inspect --subset full`. Recovery
-is still a separate later command using that config and the inspection receipt.
-The old pilot output and its configurations remain unchanged. Each later model
-still has60search+90recovery=150attributed training epochs.
+The already restored reference is reused without --reference-archive. Recovery,
+official test and baseline training are not started. Each eventual deployment
+still has60search+90recovery=150attributed epochs. A process already launched with
+the withdrawn cap config retains that old configuration until it is stopped;
+a Git update cannot change a running Python process.

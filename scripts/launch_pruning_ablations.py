@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/ablations_grid.yaml"
 PROTOCOL = "pruning_v3_size_ablations_grid_v1"
-INTERNAL_PAIR_PROTOCOL = "pruning_v3_internal_less_sparse_pair_v1"
+INTERNAL_PAIR_PROTOCOL = "pruning_v3_internal_threshold_pair_v1"
 
 
 class MissingReferenceError(FileNotFoundError):
@@ -65,23 +65,16 @@ def load_study(path):
     count = 2 if internal_pair else 5
     require(len(study["profiles"]) == count, f"This study requires {count} profiles")
     for row in study["profiles"]:
-        fields = {"id", "soft_drop", "hard_drop"}
-        if internal_pair:
-            fields.add("alpha_max")
-        require(set(row) == fields, "Unexpected profile fields")
+        require(set(row) == {"id", "soft_drop", "hard_drop"},
+                "Profiles may vary only soft_drop/hard_drop; other training overrides are forbidden")
         require(isinstance(row["id"], str) and re.fullmatch(r"[a-zA-Z0-9_-]+", row["id"]), "Invalid profile id")
         require(type(row["soft_drop"]) in (int, float) and type(row["hard_drop"]) in (int, float)
                 and 0 <= row["soft_drop"] < row["hard_drop"] <= 1, "Invalid accuracy tolerances")
-        if internal_pair:
-            require(row["soft_drop"] == 0.00025 and row["hard_drop"] == 0.0005,
-                    "The less-sparse pair keeps the strict reference tolerance unchanged")
-            require(type(row["alpha_max"]) in (int, float) and 0.001 < row["alpha_max"] < 80,
-                    "The pair requires a reduced positive adaptive-lambda ceiling")
         ids.append(row["id"])
     require(len(set(ids)) == count, "Duplicate profile ids")
     if internal_pair:
-        require(len({row["alpha_max"] for row in study["profiles"]}) == 2,
-                "The pair must use two different adaptive-lambda ceilings")
+        require(len({(row["soft_drop"], row["hard_drop"]) for row in study["profiles"]}) == 2,
+                "The pair must use two different quality-threshold pairs")
     pilot = study["pilot_profiles"]
     pilot_count = 2 if internal_pair else 3
     require(len(pilot) == len(set(pilot)) == pilot_count and set(pilot) <= set(ids),
@@ -93,8 +86,6 @@ def compose_cell(study, row, placement, reference, device=None):
     from net_complexity.training.one_shot_pruning_config import compose_config, validate_config
     overrides = [f"training_arguments.adaptive_lambda.{key}={row[key]}"
                  for key in ("soft_drop", "hard_drop")]
-    if "alpha_max" in row:
-        overrides.append(f"training_arguments.adaptive_lambda.alpha_max={row['alpha_max']}")
     if device:
         overrides.append(f"device={device}")
     cfg = compose_config(study["configs"][placement], overrides, dense_source=reference)
