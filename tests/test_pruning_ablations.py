@@ -275,3 +275,89 @@ def test_missing_reference_cli_explains_actual_flags_without_training(tmp_path, 
     assert not output.exists() and not (tmp_path / "missing_reference").exists()
     if not use_archive:
         assert "--dense-source" in result.stderr
+
+
+PAIR_CONFIG = ROOT / 'configs/experiment/pruning_v3/ablations_internal_less_sparse_pair.yaml'
+
+
+def test_less_sparse_pair_changes_only_adaptive_ceiling():
+    study = launcher.load_study(PAIR_CONFIG)
+    assert list(study['configs']) == ['internal'] and len(study['profiles']) == 2
+    reference = ROOT / 'outputs/baseline/one_shot_dense_reference_seed42'
+    baseline_study = launcher.load_study(launcher.DEFAULT_CONFIG)
+    control = launcher.compose_cell(baseline_study, baseline_study['profiles'][0], 'internal', reference)
+    control = OmegaConf.to_container(control, resolve=True)
+    control['training_arguments']['adaptive_lambda'].pop('alpha_max')
+    for row, ceiling in zip(study['profiles'], [.1, 1.]):
+        cfg = launcher.compose_cell(study, row, 'internal', reference)
+        assert cfg.training_arguments.adaptive_lambda.enabled is True
+        assert cfg.model.backbone.resnet_block.gate_internal_width is True
+        assert cfg.model.backbone.resnet_block.gate_output is False
+        plain = OmegaConf.to_container(cfg, resolve=True)
+        assert plain['training_arguments']['adaptive_lambda'].pop('alpha_max') == ceiling
+        assert plain == control
+    assert study['output'] != baseline_study['output']
+
+
+def test_less_sparse_pair_dispatches_exactly_two_searches(tmp_path, monkeypatch):
+    import net_complexity.training.one_shot_pruning_config as schema
+    import net_complexity.training.one_shot_pruning as runtime
+    monkeypatch.setattr(schema, 'validate_inputs', lambda cfg: {'status': 'ready'})
+    calls = []
+    monkeypatch.setattr(runtime, 'run_one_shot_pruning', lambda *a, **kw: calls.append((a, kw)))
+    plan = launcher.main(['--config', str(PAIR_CONFIG), '--stage', 'search', '--subset', 'full',
+                          '--output', str(tmp_path / 'searches')])
+    assert len(calls) == plan['searches'] == 2
+    assert plan['new_training_epochs'] == 120 and plan['placements'] == ['internal']
+    assert plan['recoveries'] == 6 and plan['official_test'] is False
+    assert [a[0].training_arguments.adaptive_lambda.alpha_max for a, _ in calls] == [.1, 1.]
+    assert all(kw['search_only'] is True and kw['reuse_search_from'] is None for _, kw in calls)
+    assert all(a[1].parts[-2:] == ('internal', 'search') for a, _ in calls)
+
+
+def test_less_sparse_pair_review_protocol_and_recovery(tmp_path, monkeypatch):
+    import net_complexity.training.one_shot_pruning_config as schema
+    import net_complexity.training.one_shot_pruning as runtime
+    study = launcher.load_study(PAIR_CONFIG)
+    output, reference = tmp_path / 'pair', tmp_path / 'reference'
+    for row in study['profiles']:
+        cfg = launcher.compose_cell(study, row, 'internal', reference)
+        fake_finished_search(output / row['id'] / 'internal/search', cfg)
+    monkeypatch.setattr(schema, 'validate_inputs', lambda cfg: {'status': 'ready'})
+    args = ['--config', str(PAIR_CONFIG), '--subset', 'full', '--output', str(output),
+            '--dense-source', str(reference)]
+    receipt = launcher.main(['--stage', 'inspect', *args])
+    assert receipt['protocol'] == launcher.INTERNAL_PAIR_PROTOCOL and len(receipt['searches']) == 2
+    calls = []
+    monkeypatch.setattr(runtime, 'run_one_shot_pruning', lambda *a, **kw: calls.append((a, kw)))
+    path = output / 'search_review_full.json'
+    altered = deepcopy(receipt); altered['protocol'] = launcher.PROTOCOL
+    launcher.write_json(path, altered)
+    with pytest.raises(ValueError, match='Invalid search review'):
+        launcher.main(['--stage', 'recover', *args])
+    assert calls == []
+    launcher.write_json(path, receipt)
+    plan = launcher.main(['--stage', 'recover', *args])
+    assert len(calls) == 2 and plan['new_training_epochs'] == 540
+    assert all(kw['search_only'] is False and kw['reuse_search_from'].name == 'search' for _, kw in calls)
+
+
+def test_less_sparse_pair_rejects_output_arm(tmp_path):
+    study = launcher.load_study(PAIR_CONFIG)
+    study['configs']['output'] = 'experiment/pruning_v3/ablations_output'
+    path = tmp_path / 'bad.yaml'
+    import yaml
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match='checked size-ablation recipes'):
+        launcher.load_study(path)
+
+
+def test_pair_missing_reference_hint_preserves_internal_config(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        launcher.main(['--config', str(PAIR_CONFIG), '--stage', 'search', '--subset', 'full',
+                       '--dense-source', str(tmp_path / 'missing'), '--output', str(tmp_path / 'out')])
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert PAIR_CONFIG.name in error and '--config' in error
+    assert '--reference-archive' in error
+    assert not (tmp_path / 'out').exists()

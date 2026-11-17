@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 import tarfile
 
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/ablations_grid.yaml"
 PROTOCOL = "pruning_v3_size_ablations_grid_v1"
+INTERNAL_PAIR_PROTOCOL = "pruning_v3_internal_less_sparse_pair_v1"
 
 
 class MissingReferenceError(FileNotFoundError):
@@ -50,22 +52,40 @@ def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
     require(set(study) == {"protocol", "seed", "split_seed", "reference_output", "output",
                            "configs", "pilot_profiles", "profiles"}, "Unexpected study fields")
-    require(study["protocol"] == PROTOCOL and study["seed"] == study["split_seed"] == 42,
+    internal_pair = study["protocol"] == INTERNAL_PAIR_PROTOCOL
+    require(study["protocol"] in {PROTOCOL, INTERNAL_PAIR_PROTOCOL}
+            and study["seed"] == study["split_seed"] == 42,
             "Expected the single-seed42 size-ablation study")
-    require(study["configs"] == {"internal": "experiment/pruning_v3/ablations_internal",
-                                  "output": "experiment/pruning_v3/ablations_output"},
+    expected_configs = {"internal": "experiment/pruning_v3/ablations_internal"}
+    if not internal_pair:
+        expected_configs["output"] = "experiment/pruning_v3/ablations_output"
+    require(study["configs"] == expected_configs,
             "Study must use the checked size-ablation recipes")
     ids = []
-    require(len(study["profiles"]) == 5, "The full study has five tolerance profiles")
+    count = 2 if internal_pair else 5
+    require(len(study["profiles"]) == count, f"This study requires {count} profiles")
     for row in study["profiles"]:
-        require(set(row) == {"id", "soft_drop", "hard_drop"}, "Unexpected profile fields")
+        fields = {"id", "soft_drop", "hard_drop"}
+        if internal_pair:
+            fields.add("alpha_max")
+        require(set(row) == fields, "Unexpected profile fields")
         require(isinstance(row["id"], str) and re.fullmatch(r"[a-zA-Z0-9_-]+", row["id"]), "Invalid profile id")
         require(type(row["soft_drop"]) in (int, float) and type(row["hard_drop"]) in (int, float)
                 and 0 <= row["soft_drop"] < row["hard_drop"] <= 1, "Invalid accuracy tolerances")
+        if internal_pair:
+            require(row["soft_drop"] == 0.00025 and row["hard_drop"] == 0.0005,
+                    "The less-sparse pair keeps the strict reference tolerance unchanged")
+            require(type(row["alpha_max"]) in (int, float) and 0.001 < row["alpha_max"] < 80,
+                    "The pair requires a reduced positive adaptive-lambda ceiling")
         ids.append(row["id"])
-    require(len(set(ids)) == 5, "Duplicate profile ids")
+    require(len(set(ids)) == count, "Duplicate profile ids")
+    if internal_pair:
+        require(len({row["alpha_max"] for row in study["profiles"]}) == 2,
+                "The pair must use two different adaptive-lambda ceilings")
     pilot = study["pilot_profiles"]
-    require(len(pilot) == len(set(pilot)) == 3 and set(pilot) <= set(ids), "Pilot must name three profiles")
+    pilot_count = 2 if internal_pair else 3
+    require(len(pilot) == len(set(pilot)) == pilot_count and set(pilot) <= set(ids),
+            f"Pilot must name {pilot_count} profiles")
     return study
 
 
@@ -73,6 +93,8 @@ def compose_cell(study, row, placement, reference, device=None):
     from net_complexity.training.one_shot_pruning_config import compose_config, validate_config
     overrides = [f"training_arguments.adaptive_lambda.{key}={row[key]}"
                  for key in ("soft_drop", "hard_drop")]
+    if "alpha_max" in row:
+        overrides.append(f"training_arguments.adaptive_lambda.alpha_max={row['alpha_max']}")
     if device:
         overrides.append(f"device={device}")
     cfg = compose_config(study["configs"][placement], overrides, dense_source=reference)
@@ -156,13 +178,15 @@ def execute(study, args):
     output = Path(args.output or study["output"]).resolve()
     reference = Path(args.dense_source or study["reference_output"]).resolve()
     profiles = [p for p in study["profiles"] if args.subset == "full" or p["id"] in study["pilot_profiles"]]
+    placements = [name for name in ("internal", "output") if name in study["configs"]]
     cells = [(p, placement, compose_cell(study, p, placement, reference, args.device))
-             for p in profiles for placement in ("internal", "output")]
+             for p in profiles for placement in placements]
+    recoveries = len(profiles) * sum(3 if name == "internal" else 1 for name in placements)
     planned = {"stage": args.stage, "subset": args.subset, "seed": 42, "reference": str(reference),
                "output": str(output), "reference_training_epochs": 0, "official_test": False,
-               "searches": len(cells), "recoveries": len(profiles) * 4,
+               "placements": placements, "searches": len(cells), "recoveries": recoveries,
                "new_training_epochs": {"search": len(cells) * 60, "inspect": 0,
-                                       "recover": len(profiles) * 4 * 90}[args.stage],
+                                       "recover": recoveries * 90}[args.stage],
                "per_model_budget": 150, "profiles": profiles,
                "reference_archive": str(args.reference_archive) if args.reference_archive else None}
     if args.dry_run:
@@ -188,7 +212,8 @@ def execute(study, args):
                 "These run artifacts are not included in Git. Use an existing extracted reference:\n"
                 "  --dense-source PATH_TO_EXISTING_REFERENCE\n"
                 "or restore the existing archive with the first search command:\n"
-                "  .venv/bin/python scripts/launch_pruning_ablations.py --stage search "
+                "  .venv/bin/python scripts/launch_pruning_ablations.py "
+                f"--config {shlex.quote(str(args.config))} --stage search "
                 f"--subset {args.subset} "
                 "--reference-archive epoch_split_dense_reference_seed42_fresh_upload.tar.gz\n"
                 "The archive must already be uploaded to the server. "
@@ -201,7 +226,7 @@ def execute(study, args):
         rows = {f"{row['id']}/{placement}": inspect_search(paths[f"{row['id']}/{placement}"] / "search", config)
                 for row, placement, config in cells}
         output.mkdir(parents=True, exist_ok=True)
-        receipt = {"protocol": PROTOCOL, "subset": args.subset, "test_evaluated": False, "searches": rows}
+        receipt = {"protocol": study["protocol"], "subset": args.subset, "test_evaluated": False, "searches": rows}
         write_json(receipt_path, receipt)
         with (output / f"search_summary_{args.subset}.csv").open("w", newline="") as stream:
             fields = ["cell", "selected_epoch", "physical_parameters", "macs_per_image", "validation_accuracy",
@@ -218,7 +243,7 @@ def execute(study, args):
     receipt = None
     if args.stage == "recover":
         receipt = read_json(receipt_path)
-        require(receipt["protocol"] == PROTOCOL and receipt["test_evaluated"] is False, "Invalid search review")
+        require(receipt["protocol"] == study["protocol"] and receipt["test_evaluated"] is False, "Invalid search review")
         expected = {f"{row['id']}/{placement}" for row, placement, _ in cells}
         require(set(receipt["searches"]) == expected, "Search review does not cover this subset")
     # Preflight every selected cell, including later cells, before starting any training.
