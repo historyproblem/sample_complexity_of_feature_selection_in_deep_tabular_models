@@ -8,9 +8,10 @@ import json
 from pathlib import Path
 import re
 import shlex
-import subprocess
 import sys
 import tarfile
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -48,8 +49,6 @@ def write_json(path, value):
 
 
 def load_study(path):
-    import yaml
-
     study = yaml.safe_load(Path(path).read_text())
     require(set(study) == {"protocol", "seed", "split_seed", "reference_output", "output",
                            "configs", "pilot_profiles", "profiles"}, "Unexpected study fields")
@@ -295,18 +294,8 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--install-deps", action="store_true",
-                        help="Install runtime dependencies into the current .venv before loading configs")
     args = parser.parse_args(argv)
     try:
-        if args.install_deps and not args.dry_run:
-            try:
-                subprocess.run(
-                    [sys.executable, str(ROOT / "scripts/setup_pruning_dependencies.py")],
-                    check=True,
-                )
-            except subprocess.CalledProcessError:
-                parser.exit(2, "Dependency setup failed; search/recovery has not started.\n")
         return execute(load_study(args.config), args)
     except MissingReferenceError as exc:
         parser.exit(2, f"{exc}\n")
