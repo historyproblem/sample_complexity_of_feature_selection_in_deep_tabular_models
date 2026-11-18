@@ -15,6 +15,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/ablations_grid.yaml"
 PROTOCOL = "pruning_v3_size_ablations_grid_v1"
 INTERNAL_PAIR_PROTOCOL = "pruning_v3_internal_threshold_pair_v1"
@@ -50,6 +51,9 @@ def write_json(path, value):
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
+    if study.get("protocol") == "pruning_v3_selected_internal_recovery5_v1":
+        from pruning_recovery_matrix import validate_manifest
+        return validate_manifest(study)
     require(set(study) == {"protocol", "seed", "split_seed", "reference_output", "output",
                            "configs", "pilot_profiles", "profiles"}, "Unexpected study fields")
     internal_pair = study["protocol"] == INTERNAL_PAIR_PROTOCOL
@@ -125,7 +129,7 @@ def restore_reference(archive, destination):
                     output.write(block)
 
 
-def inspect_search(path, config):
+def inspect_search(path, config, *, include_provenance=False):
     """Read and pin finished search artifacts without data/model/test construction."""
     from omegaconf import OmegaConf
     from net_complexity.training.one_shot_pruning_config import ABLATION_PROTOCOL
@@ -155,16 +159,28 @@ def inspect_search(path, config):
     files = ["resolved_config.yaml", "one_shot_state.json", "selection.json", "selected_checkpoint.pt",
              "export_only/diagnostics.json", "export_only/deployment.pt", "export_only/transfer_equivalence.json"]
     pins = {name: digest(path / name) for name in files}
-    return {"path": str(path.resolve()), "files": pins, "config_hash": config_hash(config),
+    result = {"path": str(path.resolve()), "files": pins, "config_hash": config_hash(config),
             "selected_epoch": selection["selected_epoch"], "mask_hash": selection["mask_hash"],
             "physical_parameters": export["physical_cost"]["physical_total_parameters"],
             "macs_per_image": export["physical_cost"]["conv_linear_macs_per_image"],
             "validation_accuracy": export["physical_validation_before_bn_calibration"]["accuracy"],
             "selection_policy": selection["policy"], "fallback_used": selection["trace"]["fallback_used"],
             "retained_closed_channels": len(export["retained_learned_closed_channels"])}
+    if include_provenance:
+        provenance = state.get("provenance", {})
+        inputs = provenance.get("inputs", {})
+        result.update(reference_sha256=inputs.get("sha256"),
+                      initializer_model_state_hash=inputs.get("initializer_model_state_hash"),
+                      split_indices_hash=provenance.get("split_indices_hash"),
+                      selected_model_state_hash=selection.get("selected_model_state_hash"))
+    return result
 
 
 def execute(study, args):
+    if study["protocol"] == "pruning_v3_selected_internal_recovery5_v1":
+        from pruning_recovery_matrix import execute_matrix
+        return execute_matrix(study, args)
+    require(args.stage != "test", "The test stage requires the selected recovery-matrix config")
     from net_complexity.training.one_shot_pruning_config import validate_inputs
     output = Path(args.output or study["output"]).resolve()
     reference = Path(args.dense_source or study["reference_output"]).resolve()
@@ -287,13 +303,16 @@ def execute(study, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--stage", choices=["search", "inspect", "recover"], required=True)
+    parser.add_argument("--stage", choices=["search", "inspect", "recover", "test"], required=True)
     parser.add_argument("--subset", choices=["pilot", "full"], default="pilot")
     parser.add_argument("--dense-source", type=Path)
     parser.add_argument("--reference-archive", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-test", action="store_true", help="Selected matrix: stop after frozen recoveries")
+    parser.add_argument("--keep-epoch-checkpoints", action="store_true",
+                        help="Selected matrix: retain completed nested epoch checkpoints")
     args = parser.parse_args(argv)
     try:
         return execute(load_study(args.config), args)

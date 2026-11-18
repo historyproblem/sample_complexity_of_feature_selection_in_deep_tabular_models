@@ -115,10 +115,22 @@ def _validate_validation(metrics):
             and metrics["ce_loss"] >= 0, "Invalid selected validation accuracy/CE")
 
 
+def ablation_expectations(config, selected, selection, identity):
+    """Recreate the prescribed pre-BN forks, without calibrating or training."""
+    from hydra.utils import instantiate
+    from net_complexity.training.pruning_ablations import build_ablation_branches
+    carrier = instantiate(config.model).cpu()
+    carrier.load_state_dict(selected["model_state_dict"], strict=True)
+    return build_ablation_branches(
+        config, carrier, selection["pruning_mask"],
+        {**identity, "mask_hash": selection["mask_hash"]},
+    )
+
+
 def prepare_branches(run_dir):
     """Validate finalized branches and their common frozen search selection."""
     from net_complexity.training.one_shot_pruning_config import (
-        resolved_branch_plan, validate_config,
+        ABLATION_PROTOCOL, resolved_branch_plan, validate_config,
     )
     from net_complexity.training.one_shot_pruning import physical_architecture_signature
     run_dir = Path(run_dir).resolve()
@@ -162,6 +174,8 @@ def prepare_branches(run_dir):
     require(type(selection.get("quality_threshold")) in (int, float)
             and math.isfinite(selection["quality_threshold"]), "Invalid frozen search quality threshold")
     _validate_ledger(selection.get("search_ledger_consumed"), total=search_epochs, search=search_epochs)
+    expected_models, expected_initial = (ablation_expectations(config, selected, selection, identity)
+        if protocol == ABLATION_PROTOCOL else ({}, {}))
     prepared = []
     for branch in branches:
         branch_spec = branch_specs[branch]
@@ -207,6 +221,23 @@ def prepare_branches(run_dir):
                 and state["architecture_hash"] == checkpoint.get("architecture_hash"),
                 f"{branch}: physical architecture identity differs")
         weights, mask = checkpoint["model_state_dict"], checkpoint["pruning_mask"]
+        if protocol == ABLATION_PROTOCOL:
+            expected = expected_initial[branch]
+            require(mask == expected["pruning_mask"]
+                    and state.get("source_learned_mask_hash") == selection["mask_hash"],
+                    f"{branch}: prescribed learned/random mask differs")
+            require(state.get("pre_bn_calibration_state_hash") == expected["initialization_state_hash"],
+                    f"{branch}: prescribed inherited/scratch initialization differs")
+            initial = torch.load(run_dir / branch / "initial_state.pt", map_location="cpu", weights_only=True)
+            initial_weights = initial["model_state_dict"]
+            require(state_hash(initial_weights) == initial.get("model_state_hash")
+                    == state["initialization_state_hash"], f"{branch}: initial tensors differ")
+            parameters = dict(expected_models[branch].named_parameters())
+            require(state_hash({key: initial_weights[key] for key in parameters}) == state_hash(parameters),
+                    f"{branch}: BN pass changed the prescribed initial trainable weights")
+            require(state["bn_calibration"]["requested_batches"] == state["bn_calibration"]["batches"] == 200
+                    and state["bn_calibration"]["trainable_weights_unchanged"] is True,
+                    f"{branch}: expected train-only BN200 without weight updates")
         require(not any("gumbel" in name or "gate_logits" in name for name in weights),
                 f"{branch}: ungated evaluator refuses gate tensors")
         require(mask == state.get("pruning_mask") and mask_hash(mask) == state.get("mask_hash")
@@ -295,15 +326,18 @@ def prepare_branches(run_dir):
             "conv_linear_macs_per_image": cost["conv_linear_macs_per_image"],
         }))
     first = prepared[0][1]
-    for key in ("pruning_mask", "mask_hash", "architecture_hash", "normalization_metadata", "selection_provenance", "physical_parameters",
+    common_keys = ("normalization_metadata", "selection_provenance", "physical_parameters",
                 "conv_linear_macs_per_image", "ledger", "validation_quality_threshold",
-                "validation_reference_epoch", "final_selection_policy", *identity):
+                "validation_reference_epoch", "final_selection_policy", *identity)
+    if protocol != ABLATION_PROTOCOL:
+        common_keys += ("pruning_mask", "mask_hash", "architecture_hash")
+    for key in common_keys:
         require(all(first[key] == record[key] for _, record in prepared[1:]),
                 f"Physical branches do not share the required {key}")
     require(all(first["validation"]["example_count"] == record["validation"]["example_count"]
                 for _, record in prepared[1:]),
             "Physical branches used different validation sample counts")
-    if protocol != PROTOCOL:
+    if protocol not in {PROTOCOL, ABLATION_PROTOCOL}:
         require(all(first["initialization"] == record["initialization"]
                     and first["initialization_state_hash"] == record["initialization_state_hash"]
                     for _, record in prepared[1:]),

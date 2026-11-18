@@ -1,0 +1,59 @@
+# Frozen source identities; parameters are checks of already selected models, never search quotas.
+protocol: pruning_v3_selected_internal_recovery5_v1
+config: experiment/pruning_v3/ablations_internal
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/pruning_recovery_selected5_20261119
+seed: 42
+architectures:
+- id: p3923049
+  search: outputs/runs/pruning_ablations_20261116/gap_300/internal/search
+  soft_drop: 0.015
+  hard_drop: 0.03
+  parameters: 3923049
+  selected_epoch: 41
+  selected_checkpoint_sha256: 2e3da48857fe2b286435e5a190ad0aa21b8ba07de48bc69e41723f334eec4d9d
+  selected_model_state_hash: c5d309ffe7f300db249eeba6a43b3ffb36a4117c737eef6843ffe72a20e4de78
+  mask_hash: 4276810a7e9b8e2fa7a2f891d4da0215c06bdccc887ff2ad1558fbc727c54ce0
+- id: p5871099
+  search: outputs/runs/pruning_internal_midrange_pair_20261118/internal_probe_6_7m/internal/search
+  soft_drop: 0.000225
+  hard_drop: 0.00045
+  parameters: 5871099
+  selected_epoch: 37
+  selected_checkpoint_sha256: 0c0eb9d3fbe65c2c8de815610a3dce9a01202d960766b5a7477ff7d1a7c9644f
+  selected_model_state_hash: 97ad56394a71e817e6f087bdcfea2898a82d168e4208905c50e4c4dc1866dd54
+  mask_hash: 156f09db1dc14410654e6dcf6cc3ffad10475a1d9057aec2a7d7e587f65c5aec
+- id: p12373042
+  search: outputs/runs/pruning_internal_midrange_pair_20261118/internal_probe_12_13m/internal/search
+  soft_drop: 0.0001
+  hard_drop: 0.0002
+  parameters: 12373042
+  selected_epoch: 31
+  selected_checkpoint_sha256: 1e0f7c2163d2dcefe77e13207eb86243967fa599315756ba6ee5d86752489473
+  selected_model_state_hash: 01ec19bf1d5802513b65bd469ea5ae0aa76cf64e750d72b3ca9d90ef6307b270
+  mask_hash: baa7a087bac3761af3ac5afeed4185602e34726e3e0b19f4dce179cb39d89277
+- id: p16260925
+  search: outputs/runs/pruning_internal_threshold_pair_20261117/internal_gap001/internal/search
+  soft_drop: 5.0e-05
+  hard_drop: 0.0001
+  parameters: 16260925
+  selected_epoch: 42
+  selected_checkpoint_sha256: 8ba90502524bf317391e370789208ad758b2de83ad79bf1faee579614343132e
+  selected_model_state_hash: 94f9c21844d8cf2e77bb3bec89165b9dbcce5712a251ba30f95efb2787e947f3
+  mask_hash: 24aaf5bbfbb46cee930c73d5a1c41c3f17c81f5422c008da61d49cd6ddc460ee
+- id: p23507429
+  search: outputs/runs/pruning_internal_threshold_pair_20261117/internal_gap0025/internal/search
+  soft_drop: 0.000125
+  hard_drop: 0.00025
+  parameters: 23507429
+  selected_epoch: 31
+  selected_checkpoint_sha256: 5a0789c22a2a4d7c57c5ab654ca378ecce80a75edcf507dd0d723fe735ee772f
+  selected_model_state_hash: d7ffeb5a7d67ef61e9ebeb950eff089c9c57247c57557b8937e9626f37e0cbad
+  mask_hash: 3bce96fd97e23df777581bf6d2635ba9e9d5a8c3493f5d53002fd91041404a2c
+reference_sha256:
+  history_path: 8a8f8e3ea6fb593d471cdfa9132ea9771795dae45028d7fc7d35293c6b2eba26
+  state_path: 33cf79a489e77b1d7dfa5c3118e103fc56b9ab86523e6bd67d8b1db8490963b9
+  config_path: a7fba16e46a1cecf792f4fa0330319480c13c44b4e1d0f32a02b7026ffb01b09
+  initializer_path: 17c20512b6fb0822e5b37f7ba3b2bb3bb26705823c65f34ce553c73775f42342
+initializer_model_state_hash: 4cbb6127d128c76362c717bd6c3ea96d248c1ecaf0df90a2b54c0b468cac044e
+split_indices_hash: 0e014034dd7ffb459c07bf57c1b0a8945f9b33208f3ca6c4adb91106b0b5aaf0

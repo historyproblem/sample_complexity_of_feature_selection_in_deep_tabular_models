@@ -222,3 +222,72 @@ existing reference. New outputs are under
 `outputs/runs/pruning_internal_midrange_pair_20261118/`; previous results are
 preserved. For inspection use the same --config with --stage inspect. Recovery
 remains a separate step; each eventual deployment stays within60+90=150epochs.
+
+## Selected five architectures: one recovery command, 19 November
+
+`configs/experiment/pruning_v3/ablations_recovery_selected5.yaml` pins the already
+selected models by checkpoint SHA256,mask SHA256,source epoch and exact size:
+
+| Size M | Existing source search |
+| ---: | --- |
+| 3.923 | outputs/runs/pruning_ablations_20261116/gap_300/internal/search |
+| 5.871 | outputs/runs/pruning_internal_midrange_pair_20261118/internal_probe_6_7m/internal/search |
+| 12.373 | outputs/runs/pruning_internal_midrange_pair_20261118/internal_probe_12_13m/internal/search |
+| 16.261 | outputs/runs/pruning_internal_threshold_pair_20261117/internal_gap001/internal/search |
+| 23.507 | outputs/runs/pruning_internal_threshold_pair_20261117/internal_gap0025/internal/search |
+
+Each model runs inherited,scratch,matched-random90:15physical trainings/1350new
+epochs, executed sequentially. No new search or source mask/epoch reselection.
+The same selected60-epoch search is charged to each branch, for150epochs/model.
+All use train-onlyBN200,freshAdamW1e-3/wd5e-4,freshcosine90,CE/LS0,seed42. The
+physical graph has no gates or active gate penalty; controller state is held.
+
+From the repository root:
+
+```sh
+git pull --ff-only
+nohup .venv/bin/python -u scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_recovery_selected5.yaml \
+  --stage recover --subset full > pruning_recovery_selected5.log 2>&1 &
+tail -f pruning_recovery_selected5.log
+```
+
+Before the first optimizer step, every source folder/reference and all five
+pinned identities are checked. Missing or altered inputs stop the entire launch
+before training. `selected_checkpoint.pt` must be present; metadata-only downloads
+cannot restore trained source weights. The3.923M source is in the first pilot
+folder, not in either of the two later pair folders. No new baseline or dependency
+bootstrap is started. Existing reference paths can be remapped with --dense-source;
+content hashes and all training settings remain fixed.
+
+Completed compatible architectures are verified/reused on a repeated command.
+A partial failed/interrupted recovery is retained and refused, rather than silently
+restarted and charged another90epochs. Input searches are never deleted or changed.
+By default, completed recovery epoch_N checkpoint files are removed only after
+root initial/deployment artifacts and histories have been written. The selected
+weights and nested best checkpoint remain. Use --keep-epoch-checkpoints to retain
+all epoch files. This artifact policy does not change training or selection.
+
+After all fifteen deployments are complete, they are validated and frozen in
+`outputs/runs/pruning_recovery_selected5_20261119/frozen_deployments.json`. Only
+then does official CIFAR10 test inference start, without training or BN updates.
+All outcomes, including validation-infeasible branches, are evaluated and reported.
+Reports are exploratory because earlier test results informed experimentation.
+Use --skip-test to stop after recovery. To run/resume only final inference later:
+
+```sh
+.venv/bin/python scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_recovery_selected5.yaml \
+  --stage test --subset full
+```
+
+The final-test stage uses completed recovery artifacts and their copied source
+checkpoints; original source directories/reference files need not remain present.
+A complete matching test report is reused, and partial test reports resume only
+remaining frozen deployments. No training is rerun.
+
+Outputs: matrix_state.json,validation_results.csv,per-architecture frozen branch
+artifacts,test_evaluation/test_summary.json,test_comparison.csv and
+`test_comparisons.json` with inherited-minus-scratch and learned-minus-random(pp).
+For a no-training source check use --stage inspect; for a config-only plan append
+--dry-run. The launcher itself does not connect to or start jobs on another server.

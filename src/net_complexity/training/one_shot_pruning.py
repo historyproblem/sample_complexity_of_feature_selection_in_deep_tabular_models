@@ -316,7 +316,7 @@ def _paused_search(config, source_root, provenance, search_epochs):
 
 def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search_from=None,
                          stop_after_search_epoch=None, search_diagnostics=False,
-                         resume_search_from=None):
+                         resume_search_from=None, keep_epoch_checkpoints=True):
     """Execute one shared search/export and, unless requested otherwise, compact branches."""
     if search_only and reuse_search_from is not None:
         raise ValueError("search_only and reuse_search_from are mutually exclusive")
@@ -1077,6 +1077,20 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                 atomic_checkpoint(branch_dir / "deployment.pt", {**branch, "model_state_dict": deployed.state_dict()})
                 write_json(branch_dir / "branch_state.json", branch)
                 persist()
+                if not keep_epoch_checkpoints:
+                    # Only newly generated, finalized branch artifacts; never source-search files.
+                    targets = [Path(path) for path in paths]
+                    for path in targets:
+                        if (not path.is_file() or path.is_symlink() or path.parent.name != "checkpoints"
+                                or branch_dir.resolve() not in path.resolve().parents):
+                            raise ValueError(f"Refusing unexpected checkpoint cleanup target: {path}")
+                    cleanup = {"files": len(targets), "bytes": sum(path.stat().st_size for path in targets)}
+                    for path in targets:
+                        path.unlink()
+                    branch["completed_epoch_checkpoints_removed"] = cleanup
+                    write_json(branch_dir / "branch_state.json", branch)
+                    persist()
+                    progress_message(name, f"removed {cleanup['files']} completed epoch checkpoints; initial/deployment retained")
                 progress_message(name, f"{branch['status']}; validation={validation['accuracy']:.4%}; deployment={branch_dir / 'deployment.pt'}")
             if any(branch["ledger"]["global_training_epoch"] != total for branch in state["branches"].values()):
                 raise AssertionError("Each branch must consume its complete attributed search+final budget.")
