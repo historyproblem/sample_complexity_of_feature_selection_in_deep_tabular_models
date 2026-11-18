@@ -1,4 +1,4 @@
-"""Run the frozen five-architecture recovery matrix; no new mask searches."""
+"""Run the frozen selected-architecture recovery matrix; no new mask searches."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -52,8 +52,10 @@ def validate_manifest(study):
     require(study['config'] == 'experiment/pruning_v3/ablations_internal' and study['seed'] == 42,
             'Selected recovery must preserve internal-only recipe and seed42')
     rows = study['architectures']
-    require(len(rows) == 5 and {r['parameters'] for r in rows} == PARAMETERS, 'Expected the five selected sizes')
-    require(len({r['id'] for r in rows}) == 5, 'Duplicate recovery architecture IDs')
+    sizes = {r['parameters'] for r in rows}
+    require(len(rows) == len(sizes) and sizes in (PARAMETERS, PARAMETERS - {3923049}),
+            'Expected the five selected sizes or the four-size matrix without 3.923M')
+    require(len({r['id'] for r in rows}) == len(rows), 'Duplicate recovery architecture IDs')
     require(set(study['reference_sha256']) == {'history_path', 'state_path', 'config_path', 'initializer_path'},
             'Expected all four pinned reference artifacts')
     for value in [*study['reference_sha256'].values(), study['initializer_model_state_hash'], study['split_indices_hash']]:
@@ -148,7 +150,7 @@ def preflight(study, args):
         if absent:
             missing.append(row['id'] + ': ' + str(source) + '\n  missing: ' + ', '.join(absent))
     if missing:
-        raise FileNotFoundError('All five source searches must be available before training:\n' + '\n'.join(missing)
+        raise FileNotFoundError('All configured source searches must be available before training:\n' + '\n'.join(missing)
             + '\nRestore original search folders including selected_checkpoint.pt. Metadata-only archives are insufficient.'
             + '\nNo search is restarted and no recovery has started.')
     prepared = []
@@ -230,7 +232,8 @@ def evaluate_matrix(study, output, args, prepared):
             record.update(architecture=cell['row']['id'], job=cell['row']['id'] + '__' + record['branch'])
             require(record['physical_parameters'] == cell['row']['parameters'], 'Frozen model size differs')
             models.append((model, record))
-    require(len(models) == 15, 'Official test requires all fifteen frozen deployments')
+    require(len(models) == len(study['architectures']) * len(BRANCHES),
+            'Official test requires all configured frozen deployments')
     freeze = {'protocol': PROTOCOL, 'comparison_scope': 'exploratory',
               'deployments': [record for _, record in models]}
     frozen_path = output / 'frozen_deployments.json'
@@ -253,8 +256,8 @@ def evaluate_matrix(study, output, args, prepared):
         require(record['checkpoint_sha256'] == frozen_by_id[record['job']]['checkpoint_sha256'], 'Test checkpoint changed')
         require(digest(test_output / record['predictions']) == record['predictions_sha256'], 'Saved predictions changed')
         done.add(record['job'])
-    if len(done) == 15 and report['status'] == 'completed':
-        print('All fifteen frozen official-test evaluations are already complete', flush=True)
+    if len(done) == len(models) and report['status'] == 'completed':
+        print('All configured frozen official-test evaluations are already complete', flush=True)
         return report
     cfg = prepared[0]['config']
     device = args.device or str(cfg.device)
@@ -305,9 +308,10 @@ def evaluate_matrix(study, output, args, prepared):
 def execute_matrix(study, args):
     require(args.stage in {'inspect', 'recover', 'test'}, 'Selected recovery matrix never starts a new search')
     require(args.reference_archive is None, 'Reuse the existing reference; this matrix does not create/restore one')
+    model_count = len(study['architectures']) * len(BRANCHES)
     plan = {'protocol': PROTOCOL, 'stage': args.stage, 'architectures': study['architectures'],
-            'models': 15, 'search_epochs_reused_per_model': 60, 'recovery_epochs_per_model': 90,
-            'new_training_epochs': 1350 if args.stage == 'recover' else 0, 'per_model_budget': 150,
+            'models': model_count, 'search_epochs_reused_per_model': 60, 'recovery_epochs_per_model': 90,
+            'new_training_epochs': model_count * 90 if args.stage == 'recover' else 0, 'per_model_budget': 150,
             'new_searches': 0, 'automatic_test_after_all_models': not args.skip_test,
             'source_preflight_before_any_training': True, 'output': str(Path(args.output or ROOT / study['output']).resolve())}
     if args.dry_run:
@@ -330,14 +334,14 @@ def execute_matrix(study, args):
     else:
         write_json(review_path, source_review)
     if args.stage == 'inspect':
-        print('All five pinned searches and reference inputs verified; no training performed', flush=True)
+        print('All configured pinned searches and reference inputs verified; no training performed', flush=True)
         return source_review
     # Import the evaluator before long training, catching missing evaluation dependencies now.
     import evaluate_one_shot_pruning_test
     from launch_pruning_ablations import inspect_search
     from net_complexity.training.one_shot_pruning import run_one_shot_pruning
     records = [r for cell in prepared for r in cell['completed']]
-    matrix_state = {'protocol': PROTOCOL, 'status': 'running', 'planned_models': 15,
+    matrix_state = {'protocol': PROTOCOL, 'status': 'running', 'planned_models': model_count,
                     'completed_models': len(records), 'validation_results': records}
     write_summary(output, records)
     try:

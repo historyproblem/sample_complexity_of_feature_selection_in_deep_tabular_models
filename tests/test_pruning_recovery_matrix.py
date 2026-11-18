@@ -22,6 +22,7 @@ from net_complexity.training.one_shot_pruning_config import compose_config, reso
 from net_complexity.training.pruning_measurement import state_hash, mask_hash
 
 CONFIG = ROOT / 'configs/experiment/pruning_v3/ablations_recovery_selected5.yaml'
+CONFIG4 = CONFIG.with_name('ablations_recovery_selected4.yaml')
 
 
 @pytest.fixture(autouse=True)
@@ -36,10 +37,12 @@ def cli_args(output):
                            dry_run=False, reference_archive=None, skip_test=True, keep_epoch_checkpoints=False)
 
 
-def test_manifest_and_public_dry_run(tmp_path, capsys):
-    manifest = launcher.load_study(CONFIG)
-    assert len(manifest['architectures']) == 5
-    assert {r['parameters'] for r in manifest['architectures']} == matrix.PARAMETERS
+@pytest.mark.parametrize('config,count', [(CONFIG, 5), (CONFIG4, 4)])
+def test_manifest_and_public_dry_run(tmp_path, capsys, config, count):
+    manifest = launcher.load_study(config)
+    assert len(manifest['architectures']) == count
+    expected = matrix.PARAMETERS if count == 5 else matrix.PARAMETERS - {3923049}
+    assert {r['parameters'] for r in manifest['architectures']} == expected
     for row in manifest['architectures']:
         cfg = compose_config(manifest['config'], [f"training_arguments.adaptive_lambda.soft_drop={row['soft_drop']}",
                                                   f"training_arguments.adaptive_lambda.hard_drop={row['hard_drop']}"])
@@ -47,20 +50,23 @@ def test_manifest_and_public_dry_run(tmp_path, capsys):
         assert cfg.model.backbone.resnet_block.gate_output is False
         assert [r['optimizer_state'] for r in resolved_branch_plan(cfg)] == ['fresh'] * 3
     output = tmp_path / 'absent'
-    plan = launcher.main(['--config', str(CONFIG), '--stage', 'recover', '--dry-run', '--output', str(output)])
-    assert (plan['models'], plan['new_training_epochs'], plan['new_searches']) == (15, 1350, 0)
+    plan = launcher.main(['--config', str(config), '--stage', 'recover', '--dry-run', '--output', str(output)])
+    assert (plan['models'], plan['new_training_epochs'], plan['new_searches']) == (count * 3, count * 270, 0)
     assert plan['automatic_test_after_all_models'] is True and not output.exists()
 
 
-def test_all_missing_sources_are_reported_before_any_training(tmp_path, monkeypatch):
+@pytest.mark.parametrize('config', [CONFIG, CONFIG4])
+def test_all_missing_sources_are_reported_before_any_training(tmp_path, monkeypatch, config):
     monkeypatch.setattr(matrix, 'ROOT', tmp_path)
     monkeypatch.setattr('net_complexity.training.one_shot_pruning.run_one_shot_pruning',
                         lambda *a, **kw: pytest.fail('training began with missing source files'))
-    study = launcher.load_study(CONFIG)
+    study = launcher.load_study(config)
     with pytest.raises(FileNotFoundError) as exc:
         matrix.preflight(study, cli_args(tmp_path / 'out'))
     for row in study['architectures']:
         assert row['id'] in str(exc.value)
+    if config == CONFIG4:
+        assert 'p3923049:' not in str(exc.value)
     assert 'selected_checkpoint.pt' in str(exc.value) and not (tmp_path / 'out').exists()
 
 
@@ -71,8 +77,9 @@ def fake_prepared(study, tmp_path):
              'review': {'frozen': row['id']}, 'completed': []} for row in study['architectures']]
 
 
-def test_dispatch_exactly_fifteen_recoveries_without_search(tmp_path, monkeypatch):
-    study = launcher.load_study(CONFIG); args = cli_args(tmp_path / 'out')
+@pytest.mark.parametrize('config,count', [(CONFIG, 5), (CONFIG4, 4)])
+def test_dispatch_selected_recoveries_without_search(tmp_path, monkeypatch, config, count):
+    study = launcher.load_study(config); args = cli_args(tmp_path / 'out')
     prepared = fake_prepared(study, tmp_path)
     monkeypatch.setattr(matrix, 'preflight', lambda s, a: (args.output, prepared))
     monkeypatch.setattr(launcher, 'inspect_search', lambda source, cfg, **kw: {'frozen': source.name})
@@ -88,8 +95,8 @@ def test_dispatch_exactly_fifteen_recoveries_without_search(tmp_path, monkeypatc
         return {}
     monkeypatch.setattr('net_complexity.training.one_shot_pruning.run_one_shot_pruning', recover)
     result = matrix.execute_matrix(study, args)
-    assert len(calls) == 5 and result['completed_models'] == 15
-    assert sum(r['new_training_epochs'] for r in result['validation_results']) == 1350
+    assert len(calls) == count and result['completed_models'] == result['planned_models'] == count * 3
+    assert sum(r['new_training_epochs'] for r in result['validation_results']) == count * 270
     assert (args.output / 'validation_results.csv').is_file()
 
 
@@ -169,8 +176,9 @@ def test_frozen_evaluator_refuses_unprescribed_random_mask(ablation_pair):
         evaluation.prepare_branches(ablation_pair)
 
 
-def test_all_models_frozen_before_test_and_completed_test_is_reused(tmp_path, monkeypatch):
-    study = launcher.load_study(CONFIG); args = cli_args(tmp_path / 'out'); args.output.mkdir()
+@pytest.mark.parametrize('config,count', [(CONFIG, 5), (CONFIG4, 4)])
+def test_all_models_frozen_before_test_and_completed_test_is_reused(tmp_path, monkeypatch, config, count):
+    study = launcher.load_study(config); args = cli_args(tmp_path / 'out'); args.output.mkdir()
     prepared = fake_prepared(study, tmp_path)
     events = []
     monkeypatch.setattr(matrix, 'check_completed', lambda *a: [])
@@ -182,8 +190,8 @@ def test_all_models_frozen_before_test_and_completed_test_is_reused(tmp_path, mo
                     'conv_linear_macs_per_image': 123}) for name in matrix.BRANCHES]
     monkeypatch.setattr(evaluation, 'prepare_branches', prepare)
     def loader(*a):
-        assert len(events) == 5
-        assert len(matrix.read_json(args.output / 'frozen_deployments.json')['deployments']) == 15
+        assert len(events) == count
+        assert len(matrix.read_json(args.output / 'frozen_deployments.json')['deployments']) == count * 3
         return SimpleNamespace(dataset=SimpleNamespace(targets=np.zeros(10000, dtype=np.int64))), {
             'dataset': 'CIFAR10', 'split': 'official_test', 'example_count': 10000}
     monkeypatch.setattr(evaluation.frozen, 'build_test_loader', loader)
@@ -194,11 +202,11 @@ def test_all_models_frozen_before_test_and_completed_test_is_reused(tmp_path, mo
             'label': np.zeros(10000, dtype=np.int64), 'prediction': np.zeros(10000, dtype=np.int64)}
     monkeypatch.setattr(evaluation.frozen, 'evaluate_fixed', evaluate)
     result = matrix.evaluate_matrix(study, args.output, args, prepared)
-    assert result['status'] == 'completed' and len(calls) == 15
+    assert result['status'] == 'completed' and len(calls) == count * 3
     events.clear()
     monkeypatch.setattr(evaluation.frozen, 'build_test_loader', lambda *a: pytest.fail('completed test reran'))
     matrix.evaluate_matrix(study, args.output, args, prepared)
-    assert len(calls) == 15
+    assert len(calls) == count * 3
 
 
 def test_incomplete_fifteenth_model_prevents_any_test_access(tmp_path, monkeypatch):

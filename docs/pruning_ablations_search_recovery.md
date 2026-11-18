@@ -223,7 +223,27 @@ existing reference. New outputs are under
 preserved. For inspection use the same --config with --stage inspect. Recovery
 remains a separate step; each eventual deployment stays within60+90=150epochs.
 
-## Selected five architectures: one recovery command, 19 November
+## Current launch: four architectures, 19 November
+
+The user dropped the unavailable 3.923M source. Use
+`configs/experiment/pruning_v3/ablations_recovery_selected4.yaml` for the remaining
+5.871M, 12.373M, 16.261M and 23.507M models. It preserves their source pins and
+training settings: four architectures, twelve 90-epoch recoveries, 1080 new epochs.
+Each model still uses 60 search + 90 recovery = 150 total epochs.
+
+```sh
+git pull --ff-only
+nohup .venv/bin/python -u scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_recovery_selected4.yaml \
+  --stage recover --subset full > pruning_recovery_selected4.log 2>&1 &
+tail -f pruning_recovery_selected4.log
+```
+
+Outputs go to `outputs/runs/pruning_recovery_selected4_20261119`. All four source
+searches are checked before training, and all twelve deployments are frozen
+before official test inference. The missing 3.923M folder is not required.
+
+## Original five-architecture configuration
 
 `configs/experiment/pruning_v3/ablations_recovery_selected5.yaml` pins the already
 selected models by checkpoint SHA256,mask SHA256,source epoch and exact size:
