@@ -1,0 +1,19 @@
+# Exploratory size goals only; never used as quotas or selection inputs.
+# Vary only soft_drop/hard_drop; all other internal-search settings are inherited.
+protocol: pruning_v3_internal_threshold_pair_v1
+seed: 42
+split_seed: 42
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/pruning_internal_midrange_pair_20261118
+configs:
+  internal: experiment/pruning_v3/ablations_internal
+pilot_profiles: [internal_probe_6_7m, internal_probe_12_13m]
+profiles:
+  # Slightly stricter than the previous approximately5M gap_005 profile.
+  - id: internal_probe_6_7m
+    soft_drop: 0.000225
+    hard_drop: 0.00045
+  # Between the previous16.261M and approximately5M threshold settings.
+  - id: internal_probe_12_13m
+    soft_drop: 0.0001
+    hard_drop: 0.0002

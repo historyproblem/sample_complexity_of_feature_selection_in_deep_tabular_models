@@ -193,3 +193,32 @@ official test and baseline training are not started. Each eventual deployment
 still has60search+90recovery=150attributed epochs. A process already launched with
 the withdrawn cap config retains that old configuration until it is stopped;
 a Git update cannot change a running Python process.
+
+## Two intermediate-size probes, 18 November
+
+The next internal-only pair aims to fill the6-7M and12-13M parameter ranges:
+
+| Profile | Planning goal | soft_drop | hard_drop |
+| --- | --- | ---: | ---: |
+| internal_probe_6_7m | 6-7M | 0.000225 | 0.00045 |
+| internal_probe_12_13m | 12-13M | 0.0001 | 0.0002 |
+
+Only the two quality thresholds change from the existing internal recipe.
+Lambda initialization/bounds,automatic step,seed42,reference/initializer,
+floor0.08,gate threshold0.5,LS0,beta0,search60 and selection31-60/preBN0 are fixed.
+The profile names are planning labels, not parameter quotas or selection criteria.
+Observed size is not monotonic in the previous thresholds, so these two ranges
+are exploratory goals and are not guaranteed before training.
+
+```sh
+git pull --ff-only
+.venv/bin/python -u scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_internal_midrange_pair.yaml \
+  --stage search --subset full
+```
+
+This starts exactly two new internal search-only runs /120epochs and reuses the
+existing reference. New outputs are under
+`outputs/runs/pruning_internal_midrange_pair_20261118/`; previous results are
+preserved. For inspection use the same --config with --stage inspect. Recovery
+remains a separate step; each eventual deployment stays within60+90=150epochs.
