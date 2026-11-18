@@ -4,6 +4,17 @@ Branch: `feature/pruning-ablations-search-recovery`.
 All commands run from the repository root using `.venv/bin/python`.
 This launcher does not start training a dense reference or access official test data.
 
+Install dependencies using the existing standard file before launching:
+
+```sh
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+For this Linux/CUDA branch, requirements.txt pins the working pair
+torch2.6.0+cu126/torchvision0.21.0+cu126 and includes the official CUDA126 wheel
+index. setup.py uses the matching2.6.0/0.21.0 base-version requirements, which
+accept these CUDA builds. No extra installer or launcher flag is required.
+
 ## Matrix
 
 One seed42 and fixed train/validation split42. Five soft/hard accuracy-drop pairs,
