@@ -38,58 +38,7 @@ its weights according to $\mathcal I$. Recovery uses a fresh optimizer
 and scheduler for $T_r$ epochs and saves the checkpoint with the highest
 validation accuracy. Only $D$ passes to the next cycle.
 
-\begin{algorithm*}[t]
-\caption[Iterative accuracy-guided structural channel pruning]{Iterative
-accuracy-guided structural channel pruning. Each cycle performs search,
-channel selection and recovery. Gate initialization, warmup, averaging
-window and sparsity updates follow the configured search controller.
-Setting $N=1$ gives the one-pass variant with the same selection rule.}
-\label{alg:iterative-pruning}
-\begin{algorithmic}[1]
-\REQUIRE Network $f_\theta$; training and validation data;
-dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$; initialization policy $\mathcal I$.
-\REQUIRE Search and recovery budgets $T_s,T_r$; maximum cycles $N$;
-accuracy tolerances $\delta_s,\delta_h$; selection mode, threshold
-$\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$.
-\STATE $D\gets\varnothing$; recovery trajectory $\mathcal G\gets[\,]$.
-\FOR{$k=1,\ldots,N$}
-\STATE \textit{// Search}
-\STATE Initialize $\theta$ from $\mathcal I$ and gate logits $\phi$;
-permanently mask channels in $D$.
-\STATE $\lambda_1\gets\lambda_0$; reset the search controller, optimizer and scheduler.
-\FOR{$t=1,\ldots,T_s$}
-\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$;
-measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
-\IF{$t\leq W$ or $t<w$}
-\STATE $\lambda_{t+1}\gets\lambda_t$.
-\ELSE
-\STATE Update $\lambda_{t+1}$ using the configured validation-gap controller.
-\ENDIF
-\ENDFOR
-\STATE \textit{// Channel selection}
-\STATE $Q\gets\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$;
-sort $Q$ by increasing $r_{l,c}$.
-\STATE $R\gets\varnothing$;
-$B\gets\rho P_{\mathrm{probe}}$ if a cap is set, otherwise $B\gets\infty$.
-\FOR{channel $(l,c)$ in $Q$}
-\IF{$c(l,c)\leq B$}
-\STATE $R\gets R\cup\{(l,c)\}$; $B\gets B-c(l,c)$.
-\ENDIF
-\ENDFOR
-\STATE $D\gets D\cup R$; $m_{l,c}\gets\mathbf 1[(l,c)\notin D]$.
-\STATE \textit{// Recovery}
-\STATE $g\gets\operatorname{Compact}(\theta_{T_s},m)$.
-\STATE $g\gets\operatorname{Initialize}(g,\mathcal I)$;
-initialize a fresh optimizer and scheduler.
-\STATE Train $g$ for $T_r$ epochs without gates.
-\STATE Append the best validation checkpoint of $g$ during recovery to $\mathcal G$.
-\IF{$R=\varnothing$}
-\STATE \textbf{break}.
-\ENDIF
-\ENDFOR
-\RETURN Recovery trajectory $\mathcal G$; its last element is the final model.
-\end{algorithmic}
-\end{algorithm*}
+
 
 For MobileNetV2, $\mathcal I$ reloads ImageNet weights for every phase,
 using the surviving channel slices for recovery and a fresh classifier.

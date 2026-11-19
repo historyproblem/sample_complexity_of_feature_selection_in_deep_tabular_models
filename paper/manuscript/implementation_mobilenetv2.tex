@@ -1,0 +1,100 @@
+\section{Implementation for MobileNetV2}
+\label{app:implementation-mobilenetv2}
+
+\subsection{Iterative Pruning}
+\label{sec:mbv2-iterative-implementation}
+The iterative run uses Algorithm~\ref{alg:iterative-pruning} with
+the phase budgets in Table~\ref{tab:pruning-schedules}. Search and recovery restart from ImageNet
+weights; only the removed-channel set passes between phases. Each recovery
+phase contributes one validation-selected model to the trajectory.
+
+We use MobileNetV2~\cite{sandler2018mobilenetv2} with its standard
+channel widths (2{,}480{,}072 parameters), using torchvision
+\texttt{IMAGENET1K\_V2} weights and a new 200-way classifier.
+Learning rates are $10^{-4}$ for ImageNet-initialized weights and
+$10^{-3}$ for gates and classifier. The dense Baseline is fine-tuned
+for 45 epochs using the same optimizer settings.
+% Source: mobilenetv2_tinyimagenet200_224_pretrained.yaml; adamw_finetune.yaml.
+
+\paragraph{Gate placement.}
+We gate the hidden width of all 16 inverted residual blocks with
+an expansion layer, after depthwise convolution, BatchNorm and
+ReLU6 (ReLU clipped at 6). Each hidden gate couples one expansion filter, one depthwise
+filter, their BatchNorm parameters and the corresponding projection
+input channel. Placing the gate after normalization makes masking
+equivalent to physical removal; placing it before BatchNorm would
+allow a closed channel to become nonzero. The ten blocks with identity
+shortcuts also have output gates after projection BatchNorm:
+\begin{equation}
+\mathbf{x}_l=\mathbf{x}_{l-1}
++\mathbf{g}^{\mathrm{out}}_l\odot
+b_{\theta,l}(\mathbf{g}_l\odot a_{\theta,l}(\mathbf{x}_{l-1})).
+\end{equation}
+Closing an output gate removes the corresponding projection filter
+and BatchNorm parameters while the shortcut preserves that channel
+and the block output width. Hidden and output gates follow the same
+objective and pruning rule: 7{,}104 hidden gates and 792 output gates,
+7{,}896 in total.
+
+Each gate has an input-independent learnable logit with small random
+initialization perturbations. Training uses sampled ST masks;
+evaluation thresholds the opening probabilities. Initialization and
+evaluation settings are listed in Table~\ref{tab:method-hyperparameters}.
+The sampling temperature is $T=1$. Thus the calibration average in the Methodology
+section is simply $\overline r_{l,c}=r_{l,c}$.
+% Sources: MaskedGumbelLayer; MaskedGumbelInvertedResidual;
+% PrunedGumbelInvertedResidual; ours_iterative_channels configuration.
+
+\paragraph{Objective and normalization.}
+Let $M$ be the number of gate groups and $\mathcal C_j$ the
+$C_j>0$ channels in group $j$ not
+permanently masked in the current search phase. Hidden and output
+gates form separate groups. We average within groups, then across them:
+\begin{equation}
+S(r_\phi)=\frac{1}{M}\sum_{j=1}^{M}\frac{1}{C_j}
+\sum_{c\in\mathcal C_j}r_{j,c}.
+\label{eq:mbv2-regularizer-means}
+\end{equation}
+The implemented objective is
+\begin{equation}
+\mathcal J_{\mathrm{impl}}
+=\mathcal L_{\mathrm{CE}}+\lambda S(r_\phi).
+\label{eq:mbv2-implemented-objective}
+\end{equation}
+Each group has equal weight, giving coefficient $\lambda/(MC_j)$
+to each channel. The reported coefficients use this normalization.
+
+\paragraph{Adaptive sparsity.}
+The controller holds $\lambda$ fixed during warmup, then updates it at
+the interval and within the bounds in Table~\ref{tab:method-hyperparameters}.
+The reference is a separate dense model trained for 30 epochs, distinct
+from the 45-epoch Baseline. Its accuracy at epoch $t$ is compared with
+the moving average of gated accuracy. The window and accuracy tolerances
+are specified in Table~\ref{tab:method-hyperparameters}. We increase
+$\lambda$ when the gap is at most $\delta_s$, decrease it above
+$\delta_h$, and hold it otherwise.
+The log-space step is
+$\eta=\log(1.25)\,2^k$, $k\in\{0,1,2\}$. During increases, $k$
+rises by one (up to 2) if mean closing probability $1-r_{l,c}$ over
+all gates grows by less than 0.02 since the previous update, resets for growth in
+$[0.02,0.07]$ and otherwise stays unchanged; it also resets whenever
+$\lambda$ is not increased.
+% Source: adaptive_lambda configuration; training/adaptive_lambda.py.
+
+\paragraph{Channel selection.}
+Algorithm~\ref{alg:iterative-pruning} uses the threshold and cap in
+Table~\ref{tab:method-hyperparameters}.
+Because gates start below the pruning threshold, search must raise their
+scores to protect them, subject to the parameter cap. Recovery evaluates
+the physically compact network without gates.
+
+\subsection{One-Pass Pruning}
+\label{sec:mbv2-one-shot-implementation}
+The seven settings use the same training, gate, controller and
+initialization protocol as iterative MobileNetV2, with one search
+and one recovery phase. They vary only the selection threshold and cap;
+the seven pairs are listed in Table~\ref{tab:mbv2-tin-all}, with phase
+budgets in Table~\ref{tab:pruning-schedules}.
+This is one cycle of Algorithm~\ref{alg:iterative-pruning}; it does not
+use the ResNet checkpoint selector in Algorithm~\ref{alg:accuracy-guided-pruning}.
+% Phase budgets and protocol equivalence confirmed by the author, 2026-11-11.

@@ -1,59 +1,64 @@
-% Fill the empty cells. Use -- for settings that do not apply.
+% Empty cells remain to be verified. -- means not applicable; dagger means unverified config default.
 % Separate runs/sweeps within a cell when their settings differ.
 % Optional inclusion after filling: \input{method_hyperparameters_template}
 % Requires booktabs (already provided by the manuscript class).
+% Config sources (read from feature/stochastic-depth-mobilenetv2-tinyimagenet):
+% configs/experiment/ablation_mobilenetv2_tinyimagenet200_pretrained/
+%   ours_iterative_channels/mobilenetv2_tinyimagenet200.yaml
+% configs/experiment/ablation/ours_iterative_channels/resnet50_cifar10.yaml
+% configs/method/gumbel_masked_mobilenetv2.yaml
+% configs/method/gumbel_masked_bottleneck.yaml
+% MobileNetV2 config differs from the manuscript in gate placement, beta,
+% warmup, thresholds/caps and phase budgets; confirmed manuscript values win.
+% The ours_non_iterative MobileNetV2 config is block-level AIG, not the
+% reported one-cycle channel-pruning variant, and is not used here.
+% No matching resolved config for the principal R one-shot run was found;
+% its confirmed values are retained from the manuscript. Do not substitute
+% the older resnet50_gumbel_adaptive_lambda_recovery_v1 recipe.
+% Cycle budgets and initialization also follow the author's confirmation.
 \begin{table*}[t]
   \caption{Method-specific hyperparameters and procedural settings.
     M: MobileNetV2; R: ResNet-50. M one-pass uses one cycle of the
     iterative procedure; R one-shot uses checkpoint selection.
     Accuracy tolerances are in percentage points. Search includes warmup.
-    A dash indicates a setting that does not apply.}
+    R one-shot lists the principal configuration; historical sweep variants
+    are described in the implementation details.}
   \label{tab:method-hyperparameters}
   \centering
-  \small
+  \footnotesize
   \setlength{\tabcolsep}{4pt}
   \begin{tabular}{@{}p{0.39\textwidth}*{4}{p{0.135\textwidth}}@{}}
     \toprule
     Hyperparameter / setting & M iterative & M one-pass & R iterative & R one-shot \\
     \midrule
     \multicolumn{5}{l}{\textit{Gates and regularization}} \\
-    Gate placement / groups & & & & \\
-    Training gate mode (sampled / deterministic ST) & & & & \\
-    Initial opening probability $r_0$ & & & & \\
-    Gate-initialization noise (distribution / scale) & & & & \\
-    Relaxation temperature $T$ & & & & \\
-    Evaluation gate threshold & & & & \\
-    Entropy coefficient $\beta$ & & & & \\
-    Sparsity normalization (group means / other) & & & & \\
-    Group denominator (original / remaining channels) & & & & \\
+    Gate placement / groups & Hidden + output & Hidden + output & Output & Internal / 32 \\
+    Training gate mode (sampled / deterministic ST) & Sampled ST & Sampled ST & Sampled ST & Determ. ST \\
+    Initial opening probability $r_0$ & $\approx0.87$ & $\approx0.87$ & $\approx0.87$ & $\approx0.98$ \\
+    Evaluation gate threshold & 0.5 & 0.5 & $0.5^\dagger$ & 0.5 \\
+    Sparsity normalization (group means / other) & Group means & Group means & Group means & Group means \\
+    Group denominator (original / remaining channels) & Remaining & Remaining & Original & Original \\
     \midrule
     \multicolumn{5}{l}{\textit{Adaptive sparsity controller}} \\
-    Initial sparsity coefficient $\lambda_0$ & & & & \\
-    Clipping bounds $[\lambda_{\min},\lambda_{\max}]$ & & & & \\
-    Soft accuracy tolerance $\delta_s$ (pp) & & & & \\
-    Hard accuracy tolerance $\delta_h$ (pp) & & & & \\
-    Warmup $W$ (epochs) & & & & \\
-    Averaging window $w$ (epochs) & & & & \\
-    Gap definition (paired / current reference minus mean) & & & & \\
-    Update interval (epochs) & & & & \\
-    Log-step $\eta$ (fixed value / rule) & & & & \\
-    Automatic-step target $\lambda_{\rm target}$ & & & & \\
-    Step boost (multiplier / maximum level) & & & & \\
-    Closing-probability growth thresholds & & & & \\
+    Initial sparsity coefficient $\lambda_0$ & $10^{-4}$ & $10^{-4}$ & $10^{-4}$ & $10^{-3}$ \\
+    Clipping bounds $[\lambda_{\min},\lambda_{\max}]$ & $[10^{-8},100]$ & $[10^{-8},100]$ & $[10^{-8},100]$ & $[10^{-8},80]$ \\
+    Soft accuracy tolerance $\delta_s$ (pp) & 2 & 2 & 2 & 0.025 \\
+    Hard accuracy tolerance $\delta_h$ (pp) & 4 & 4 & 4 & 0.05 \\
+    Warmup $W$ (epochs) & 3 & 3 & 10 & 10 \\
+    Averaging window $w$ (epochs) & 3 & 3 & 3 & 3 \\
+    Gap definition (paired / current reference minus mean) & Current--mean & Current--mean & Current--mean & Paired \\
+    Update interval (epochs) & 1 & 1 & 1 & 1 \\
+    Log-step $\eta$ (fixed value / rule) & $\log(1.25)2^k$ & $\log(1.25)2^k$ & $\log(1.25)2^k$ & $\approx0.9210$ \\
     \midrule
     \multicolumn{5}{l}{\textit{Search, selection and recovery}} \\
-    Maximum pruning cycles $N$ & & & & \\
-    Search budget $T_s$ (epochs per cycle) & & & & \\
-    Recovery budget $T_r$ (epochs per cycle) & & & & \\
-    Search initialization policy & & & & \\
-    Recovery initialization policy & & & & \\
-    Selection mode (threshold / budget / checkpoint) & & & & \\
-    Pruning probability threshold $\tau$ & & & & \\
-    Parameter-removal cap $\rho$ & & & & \\
-    Minimum retention (fraction / channels per group) & & & & \\
-    Feasible-checkpoint window (search epochs) & & & & \\
-    Fallback-checkpoint window (search epochs) & & & & \\
-    BN recalibration budget (training batches) & & & & \\
+    Maximum pruning cycles $N$ & 10 & 1 & 10 & 1 \\
+    Search budget $T_s$ (epochs per cycle) & 30 & 30 & 120 & 60 \\
+    Recovery budget $T_r$ (epochs per cycle) & 45 & 45 & 150 & 90 \\
+    Search initialization policy & ImageNet & ImageNet & Random & Random \\
+    Recovery initialization policy & ImageNet slices & ImageNet slices & Random & Search weights \\
+    Selection mode (threshold / budget / checkpoint) & Threshold + cap & Threshold + cap & Threshold / budget & Checkpoint \\
+    Selection probability threshold & 0.95 & 0.95 / 0.99 & 0.7 / 0.1 & 0.5 (keep) \\
+    Parameter-removal cap $\rho$ & 0.10 & See main table & 0.05 (budget); $0.20^\dagger$ (threshold) & -- \\
     \bottomrule
   \end{tabular}
 \end{table*}

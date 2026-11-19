@@ -12,6 +12,7 @@ Bib\TeX}}}
 %% Packages for algorithms
 \usepackage{algorithm}
 \usepackage{algorithmic}
+\usepackage{placeins}
 \usepackage{siunitx}
 
 %% Allow page breaks inside equations
@@ -651,6 +652,54 @@ externally controlled prior schedule rather than
 optimization of a single fixed-prior ELBO throughout
 training.
 
+\begin{algorithm*}[!t]
+\caption[Accuracy-guided structural channel pruning]{Accuracy-guided
+structural channel pruning. Default controller settings are warmup
+$W=10$ epochs, averaging window $w=3$ epochs, and initial coefficient
+$\lambda_0=10^{-3}$. The empirically chosen clipping bounds are fixed at
+$\lambda_{\min}=10^{-8}$ and
+$\lambda_{\max}=80$. The default automatic log-step uses the fixed
+target $\lambda_{\rm target}=10$.}
+\label{alg:accuracy-guided-pruning}
+\begin{algorithmic}[1]
+\REQUIRE Network $f_\theta$; training and validation data;
+dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$.
+\REQUIRE Search and recovery budgets $T_s,T_r$;
+accuracy tolerances $\delta_s,\delta_h$.
+\STATE \textit{// Search}
+\STATE Initialize $\phi$ with gate-opening probabilities close to one;
+$\lambda_1\gets\lambda_0$.
+\STATE $\eta\gets\log(\lambda_{\rm target}/\lambda_0)/\lfloor T_s/3-W\rfloor$.
+\FOR{$t=1,\ldots,T_s$}
+\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$; measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
+\IF{$t\leq W$ or $t<w$}
+\STATE $\lambda_{t+1}\gets\lambda_t$.
+\ELSE
+\STATE Update $\lambda_{t+1}$ by Eq.~\eqref{eq:one-shot-controller}.
+\ENDIF
+\ENDFOR
+\STATE \textit{// Checkpoint selection}
+\STATE $\mathcal T\gets\{\lfloor T_s/2\rfloor+1,\ldots,T_s\}$.
+\FOR{$t\in\mathcal T$}
+\STATE $m_t\gets\operatorname{MakeMask}_{\geq1}(\phi_t)$.
+\STATE $A_t^{\rm mask}\gets\operatorname{Eval}_{\rm val}(\theta_t,m_t)$.
+\STATE $P_t\gets\operatorname{Params}(m_t)$.
+\ENDFOR
+\STATE $\mathcal F\gets\{t\in\mathcal T:
+A_t^{\rm mask}\geq A_{T_s}^{\rm ref}-\delta_h\}$.
+\IF{$\mathcal F\neq\varnothing$}
+\STATE $t^*\in\arg\min_{t\in\mathcal F}P_t$.
+\ELSE
+\STATE $t^*\in\arg\max_{t\in\mathcal T}A_t^{\rm mask}$.
+\ENDIF
+\STATE \textit{// Recovery}
+\STATE $g\gets\operatorname{Compact}(\theta_{t^*},m_{t^*})$.
+\STATE $g\gets\operatorname{RecalibrateBN}(g)$; initialize a fresh optimizer and scheduler.
+\STATE Fine-tune $g$ for $T_r$ epochs.
+\RETURN Best validation checkpoint of $g$ during recovery.
+\end{algorithmic}
+\end{algorithm*}
+
 \subsection{Structural Channel Pruning}
 
 Input-dependent gates produce different masks for
@@ -713,6 +762,60 @@ Any efficiency evaluation must also account for the cost
 of the gating modules.
 
 % BEGIN COMPACT PRUNING ALGORITHM
+\begin{algorithm*}[!t]
+\caption[Iterative accuracy-guided structural channel pruning]{Iterative
+accuracy-guided structural channel pruning. Each cycle performs search,
+channel selection and recovery. Gate initialization, warmup, averaging
+window and sparsity updates follow the configured search controller.
+Setting $N=1$ gives the one-pass variant with the same selection rule.}
+\label{alg:iterative-pruning}
+\begin{algorithmic}[1]
+\REQUIRE Network $f_\theta$; training and validation data;
+dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$; initialization policy $\mathcal I$.
+\REQUIRE Search and recovery budgets $T_s,T_r$; maximum cycles $N$;
+accuracy tolerances $\delta_s,\delta_h$; selection mode, threshold
+$\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$.
+\STATE $D\gets\varnothing$; recovery trajectory $\mathcal G\gets[\,]$.
+\FOR{$k=1,\ldots,N$}
+\STATE \textit{// Search}
+\STATE Initialize $\theta$ from $\mathcal I$ and gate logits $\phi$;
+permanently mask channels in $D$.
+\STATE $\lambda_1\gets\lambda_0$; reset the search controller, optimizer and scheduler.
+\FOR{$t=1,\ldots,T_s$}
+\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$;
+measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
+\IF{$t\leq W$ or $t<w$}
+\STATE $\lambda_{t+1}\gets\lambda_t$.
+\ELSE
+\STATE Update $\lambda_{t+1}$ by Eq.~\eqref{eq:one-shot-controller}.
+\ENDIF
+\ENDFOR
+\STATE \textit{// Channel selection}
+\STATE $Q\gets\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$;
+sort $Q$ by increasing $r_{l,c}$.
+\STATE $R\gets\varnothing$;
+$B\gets\rho P_{\mathrm{probe}}$ if a cap is set, otherwise $B\gets\infty$.
+\FOR{channel $(l,c)$ in $Q$}
+\IF{$c(l,c)\leq B$}
+\STATE $R\gets R\cup\{(l,c)\}$; $B\gets B-c(l,c)$.
+\ENDIF
+\ENDFOR
+\STATE $D\gets D\cup R$; $m_{l,c}\gets\mathbf 1[(l,c)\notin D]$.
+\STATE \textit{// Recovery}
+\STATE $g\gets\operatorname{Compact}(\theta_{T_s},m)$.
+\STATE $g\gets\operatorname{Initialize}(g,\mathcal I)$;
+initialize a fresh optimizer and scheduler.
+\STATE Train $g$ for $T_r$ epochs without gates.
+\STATE Append the best validation checkpoint of $g$ during recovery to $\mathcal G$.
+\IF{$R=\varnothing$}
+\STATE \textbf{break}.
+\ENDIF
+\ENDFOR
+\RETURN Recovery trajectory $\mathcal G$; its last element is the final model.
+\end{algorithmic}
+\end{algorithm*}
+
+
 \paragraph{Algorithm overview.}
 Algorithm~\ref{alg:accuracy-guided-pruning} specifies the one-shot
 procedure with input-independent gates used for ResNet-50.
@@ -746,57 +849,10 @@ Next, $\operatorname{RecalibrateBN}(g)$ updates BatchNorm statistics
 on training data. Recovery uses a fresh optimizer and scheduler for $T_r$
 epochs and returns the checkpoint with the highest validation accuracy
 among those epochs.
-
-\begin{algorithm*}[t]
-\caption[Accuracy-guided structural channel pruning]{Accuracy-guided
-structural channel pruning. Default controller settings are warmup
-$W=10$ epochs, averaging window $w=3$ epochs, and initial coefficient
-$\lambda_0=10^{-3}$. The empirically chosen clipping bounds are fixed at
-$\lambda_{\min}=10^{-8}$ and
-$\lambda_{\max}=80$. The default automatic log-step uses the fixed
-target $\lambda_{\rm target}=10$.}
-\label{alg:accuracy-guided-pruning}
-\begin{algorithmic}[1]
-\REQUIRE Network $f_\theta$; training and validation data;
-dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$.
-\REQUIRE Search and recovery budgets $T_s,T_r$;
-accuracy tolerances $\delta_s,\delta_h$.
-\STATE \textit{// Search}
-\STATE Initialize $\phi$ with gate-opening probabilities close to one;
-$\lambda_1\gets\lambda_0$.
-\STATE $\eta\gets\log(\lambda_{\rm target}/\lambda_0)/\lfloor T_s/3-W\rfloor$.
-\FOR{$t=1,\ldots,T_s$}
-\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$; measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
-\IF{$t\leq W$ or $t<w$}
-\STATE $\lambda_{t+1}\gets\lambda_t$.
-\ELSE
-\STATE Update $\lambda_{t+1}$ by Eq.~\eqref{eq:one-shot-controller}.
-\ENDIF
-\ENDFOR
-\STATE \textit{// Checkpoint selection}
-\STATE $\mathcal T\gets\{\lfloor T_s/2\rfloor+1,\ldots,T_s\}$.
-\FOR{$t\in\mathcal T$}
-\STATE $m_t\gets\operatorname{MakeMask}_{\geq1}(\phi_t)$.
-\STATE $A_t^{\rm mask}\gets\operatorname{Eval}_{\rm val}(\theta_t,m_t)$.
-\STATE $P_t\gets\operatorname{Params}(m_t)$.
-\ENDFOR
-\STATE $\mathcal F\gets\{t\in\mathcal T:
-A_t^{\rm mask}\geq A_{T_s}^{\rm ref}-\delta_h\}$.
-\IF{$\mathcal F\neq\varnothing$}
-\STATE $t^*\in\arg\min_{t\in\mathcal F}P_t$.
-\ELSE
-\STATE $t^*\in\arg\max_{t\in\mathcal T}A_t^{\rm mask}$.
-\ENDIF
-\STATE \textit{// Recovery}
-\STATE $g\gets\operatorname{Compact}(\theta_{t^*},m_{t^*})$.
-\STATE $g\gets\operatorname{RecalibrateBN}(g)$; initialize a fresh optimizer and scheduler.
-\STATE Fine-tune $g$ for $T_r$ epochs.
-\RETURN Best validation checkpoint of $g$ during recovery.
-\end{algorithmic}
-\end{algorithm*}
 % END COMPACT PRUNING ALGORITHM
 
 \input{iterative_pruning}
+\FloatBarrier
 
 \section{Experimental Setup}
 
@@ -837,171 +893,37 @@ ResNet-50, one shot & 1 & 60 & 90 & Random weights & Selected search weights \\
 \bottomrule\end{tabular}
 \end{table*}
 
-The iterative MobileNetV2 and one-shot ResNet-50 configurations
-described below use AdamW, batch size 128 and a
+All configurations use AdamW, batch size 128 and a
 separate cosine learning-rate decay to zero in each phase. Weight
 decay is $5\cdot10^{-4}$, except for one-shot ResNet gate logits, which have
 zero weight decay.
 
-%%% >>> BEGIN [MBV2-TIN] MobileNetV2 + TinyImageNet-200 >>>
-\subsubsection{MobileNetV2: iterative pruning}
-\label{sec:mbv2-iterative-implementation}
-The ten-cycle run uses Algorithm~\ref{alg:iterative-pruning}, totaling
-750 search/recovery epochs. Search and recovery restart from ImageNet
-weights; only the removed-channel set passes between phases. Each recovery
-phase contributes one validation-selected model to the trajectory.
+The architecture-specific implementations are described in
+Appendices~\ref{app:implementation-mobilenetv2} and
+\ref{app:implementation-resnet50}; method hyperparameters are listed in
+Table~\ref{tab:method-hyperparameters}.
 
-We use MobileNetV2~\cite{sandler2018mobilenetv2} with its standard
-channel widths (2{,}480{,}072 parameters), using torchvision
-\texttt{IMAGENET1K\_V2} weights and a new 200-way classifier.
-Learning rates are $10^{-4}$ for ImageNet-initialized weights and
-$10^{-3}$ for gates and classifier. The dense Baseline is fine-tuned
-for 45 epochs using the same optimizer settings.
-% Source: mobilenetv2_tinyimagenet200_224_pretrained.yaml; adamw_finetune.yaml.
+MobileNetV2 uses hidden and output channel gates with sampled ST training;
+one-pass pruning is a single cycle of the iterative procedure. Each phase
+reloads ImageNet weights, selecting surviving channel slices for recovery.
+Iterative ResNet-50 uses output channel gates with sampled ST training and
+random initialization in each phase. These procedures select channels
+from the final search checkpoint and carry only the disabled-channel set
+between phases and cycles.
 
-\paragraph{Gate placement.}
-We gate the hidden width of all 16 inverted residual blocks with
-an expansion layer, after depthwise convolution, BatchNorm and
-ReLU6 (ReLU clipped at 6). Each hidden gate couples one expansion filter, one depthwise
-filter, their BatchNorm parameters and the corresponding projection
-input channel. Placing the gate after normalization makes masking
-equivalent to physical removal; placing it before BatchNorm would
-allow a closed channel to become nonzero. The ten blocks with identity
-shortcuts also have output gates after projection BatchNorm:
-\begin{equation}
-\mathbf{x}_l=\mathbf{x}_{l-1}
-+\mathbf{g}^{\mathrm{out}}_l\odot
-b_{\theta,l}(\mathbf{g}_l\odot a_{\theta,l}(\mathbf{x}_{l-1})).
-\end{equation}
-Closing an output gate removes the corresponding projection filter
-and BatchNorm parameters while the shortcut preserves that channel
-and the block output width. Hidden and output gates follow the same
-objective and pruning rule: 7{,}104 hidden gates and 792 output gates,
-7{,}896 in total.
+One-shot ResNet-50 uses internal bottleneck gates with deterministic ST
+training, selects the smallest validation-feasible search checkpoint and
+inherits its surviving weights for recovery. Channel removal respects
+residual dimensions and, for MobileNetV2, couples expansion, depthwise
+and projection channels.
 
-Each gate has an input-independent learnable logit, initialized at
-$r_{l,c}\approx0.87$ with small random perturbations. Training uses
-straight-through sampled masks at temperature $T=1$; evaluation
-uses $r_{l,c}>0.5$. Thus the calibration average in the Methodology
-section is simply $\overline r_{l,c}=r_{l,c}$.
-% Sources: MaskedGumbelLayer; MaskedGumbelInvertedResidual;
-% PrunedGumbelInvertedResidual; ours_iterative_channels configuration.
-
-\paragraph{Objective and normalization.}
-Let $M$ be the number of gate groups and $\mathcal C_j$ the
-$C_j>0$ channels in group $j$ not
-permanently masked in the current search phase. Hidden and output
-gates form separate groups. We average within groups, then across them:
-\begin{equation}
-S(r_\phi)=\frac{1}{M}\sum_{j=1}^{M}\frac{1}{C_j}
-\sum_{c\in\mathcal C_j}r_{j,c}.
-\label{eq:mbv2-regularizer-means}
-\end{equation}
-The implemented objective is
-\begin{equation}
-\mathcal J_{\mathrm{impl}}
-=\mathcal L_{\mathrm{CE}}+\lambda S(r_\phi).
-\label{eq:mbv2-implemented-objective}
-\end{equation}
-Each group has equal weight, giving coefficient $\lambda/(MC_j)$
-to each channel. The reported coefficients use this normalization.
-
-\paragraph{Adaptive sparsity.}
-We initialize $\lambda_0=10^{-4}$ and hold it fixed for three epochs.
-Updates then run every epoch, clipped to $[10^{-8},100]$. The reference is a
-separate dense model trained for 30 epochs, distinct from the
-45-epoch Baseline. Its accuracy at epoch $t$ is compared with the
-gated model's mean accuracy over the last three epochs. We set the soft
-and hard tolerances, $\delta_s$ and $\delta_h$, to 2 and 4 percentage
-points, respectively. We increase $\lambda$ for drops of at most
-$\delta_s$, decrease it for drops above $\delta_h$ and hold it otherwise.
-The log-space step is
-$\eta=\log(1.25)\,2^k$, $k\in\{0,1,2\}$. During increases, $k$
-rises by one (up to 2) if mean closing probability $1-r_{l,c}$ over
-all gates grows by less than 0.02 since the previous update, resets for growth in
-$[0.02,0.07]$ and otherwise stays unchanged; it also resets whenever
-$\lambda$ is not increased.
-% Source: adaptive_lambda configuration; training/adaptive_lambda.py.
-
-\paragraph{Channel selection.}
-Algorithm~\ref{alg:iterative-pruning} uses $\tau=0.95$ and $\rho=0.10$.
-Because gates start below the pruning threshold, search must raise their
-scores to protect them, subject to the parameter cap. Recovery evaluates
-the physically compact network without gates.
-
-\subsubsection{MobileNetV2: one-shot pruning}
-\label{sec:mbv2-one-shot-implementation}
-The seven settings use the same training, gate, controller and
-initialization protocol as iterative MobileNetV2, with one 30-epoch
-search and one 45-epoch recovery phase. They vary only the selection
-threshold and cap: $\tau=0.99$ with $\rho\in\{0.6,0.5,0.4\}$, or
-$\tau=0.95$ with $\rho\in\{0.4,0.3,0.2,0.1\}$.
-This is one cycle of Algorithm~\ref{alg:iterative-pruning}; it does not
-use the ResNet checkpoint selector in Algorithm~\ref{alg:accuracy-guided-pruning}.
-% Phase budgets and protocol equivalence confirmed by the author, 2026-11-11.
-
-%%% <<< END [MBV2-TIN] <<<
-
-%%% >>> BEGIN [RN50-C10] >>>
-\subsubsection{ResNet-50: iterative pruning}
-\label{sec:resnet-iterative-implementation}
-Each of the three trajectories uses ten cycles of Algorithm~\ref{alg:iterative-pruning},
-with 120 search and 150 recovery epochs per cycle (2,700 epochs in total).
-Every search and recovery phase starts with newly initialized random
-weights; search weights are not inherited. The trajectories use threshold
-selection with $\tau=0.7$ or $\tau=0.1$, or budget-only selection with
-$\rho=0.05$. Only the cumulative removed-channel set is carried forward.
-The parameter counts and test accuracies of all ten recovery models in
-each series are listed in Table~\ref{tab:resnet-notebook-trajectories}.
-% Initialization and phase budgets confirmed by the author, 2026-11-11.
-% The source notebook does not establish the remaining historical gate/controller
-% settings or a possible additional cap for the two threshold trajectories.
-
-\subsubsection{ResNet-50: one-shot pruning}
-\label{sec:resnet-cifar-implementation}
-Algorithm~\ref{alg:accuracy-guided-pruning} specifies the 60-epoch
-search and 90-epoch recovery.
-Recovery inherits the surviving search weights, recalibrates BatchNorm
-on 200 training batches and starts a fresh optimizer. We test the
-best validation recovery checkpoint with frozen weights and BatchNorm.
-
-We use a CIFAR-adapted ResNet-50~\cite{he2015residual}
-(23.547M parameters), with a $3\times3$ stride-1 stem and no
-max-pooling. The eight repeated runs share random initialization
-(seed 42); the separately trained dense model supplies only the
-validation reference. All parameter groups start at learning rate
-$10^{-3}$; entropy regularization and label smoothing are disabled.
-
-\paragraph{Gates and regularization.}
-Each of the 16 bottlenecks has two independently gated internal
-widths, after the first and second convolutions' BatchNorm and ReLU:
-32 groups, with no output gates. Unlike iterative MobileNetV2, both training
-and evaluation use deterministic masks $r_{j,c}>0.5$, with
-straight-through training gradients and initial opening probability
-approximately 0.98. In Eq.~\eqref{eq:mbv2-regularizer-means},
-$C_j$ is fixed at the group's original channel count and $M$ at
-32, the total number of gate groups; these denominators remain
-fixed throughout search.
-
-\paragraph{Sparsity control and selection.}
-The controller averages three paired, epoch-matched validation
-gaps. We set the soft and hard tolerances, $\delta_s$ and $\delta_h$,
-to 0.025 and 0.05 percentage points, respectively. We use a ten-epoch
-warmup, $\lambda_0=10^{-3}$, bounds $[10^{-8},80]$ and the default automatic
-log-step, which evaluates to $\eta\approx0.9210$ for this search
-configuration, without the iterative MobileNetV2 closure-rate boost.
-From epochs 31--60 we select the smallest feasible physical model,
-with a 0.001 retention floor, equivalent here to retaining at least
-one channel per group; fallback maximizes validation accuracy.
-Candidates are scored before additional BatchNorm calibration.
-
-Earlier S1/S2 tolerance sweeps used retention floors of
-0.001/0.08. S1 feasible candidates came from epochs 1--60, with
-fallback from 31--60; both S2 windows were 31--60. The additional
-mean represents two selected repeats of the configuration above.
-% Sources and historical-series distinctions: EXPERIMENTS.md;
-% saved resnet-implementation and algorithm-clarification research.
-%%% <<< END [RN50-C10] <<<
+The implemented sparsity penalty averages opening probabilities within
+and across gate groups. MobileNetV2 excludes permanently disabled channels
+from the within-group denominator; ResNet-50 uses original group sizes.
+Iterative controllers compare current reference accuracy with moving-average
+gated accuracy; one-shot ResNet-50 averages paired validation gaps.
+The objective, normalization and controller implementation details are
+specified in the corresponding appendices.
 
 \subsection{Baselines}
 
@@ -1187,6 +1109,9 @@ Acknowledgments text.
 \clearpage
 \appendix
 
+\input{implementation_mobilenetv2}
+\input{implementation_resnet50}
+
 \section{Additional Experiments}
 \subsection{Detailed Results}
 
@@ -1277,7 +1202,12 @@ $\times2.0$ & 1.212 & 48.9 & 48.7 & -22.9 \\
 
 \input{notebook_results_tables}
 
-\subsection{Hyperparameter Sensitivity}
+\subsection{Method Hyperparameters}
+
+Table~\ref{tab:method-hyperparameters} summarizes the available
+method-specific settings. In this table, $\dagger$ marks the remaining
+config defaults that require verification against the reported runs.
+\input{method_hyperparameters_template}
 
 \end{document}
 %% End of file
