@@ -1,0 +1,65 @@
+defaults:
+  - mobilenet_onepass_thr05_gap8_12pp
+  - _self_
+
+seed: 42
+model:
+  lambda_coef: 0.001
+  gumbel_init_mode: paper_resnet50
+  entropy_regularization: disabled
+  entropy_regularization_coef: 0.0
+  criterion:
+    label_smoothing: 0.0
+  backbone:
+    block:
+      gate_internal_width: true
+      gate_threshold: 0.5
+      train_gate_mode: gumbel_hard
+      eval_gate_mode: deterministic_hard
+      beta: 1.0
+      temperature: 1.0
+training_arguments:
+  num_epochs: 30
+  adaptive_lambda:
+    enabled: true
+    baseline_history_dir: outputs/runs/mobilenet_open98_gumbel_ablation_20261120/reference
+    warmup_epochs: 10
+    update_every_epochs: 1
+    acc_window: 3
+    log_step_init: auto
+    auto_log_step_epoch_fraction: 1.0
+    adaptive_log_step_enabled: false
+    soft_drop: 0.06
+    hard_drop: 0.10
+    recovery:
+      enabled: false
+  batchnorm_recalibration:
+    enabled: false
+scheduler:
+  T_max: 30
+cyclic_channel_pruning:
+  max_cycles: 1
+  search_only: false
+  channel_selection: best_checkpoint
+  g_prob_threshold: 0.5
+  threshold_max_param_fraction: null
+  gumbel_epochs: 30
+  recovery_epochs: 15
+  final_epochs: 15
+  weight_handoff:
+    enabled: true
+    checkpoint_name: best.pt
+run_history:
+  root_dir: outputs/runs/mobilenet_open98_gumbel_ablation_20261120
+  monitor: valid_accuracy
+  mode: max
+mlflow:
+  experiment_name: mobilenet_open98_gumbel_ablation_20261120
+  run_name: mobilenet_open98_gumbel_lambda1em3_gap6_10_seed42
+  tags:
+    recipe: mobilenet_open98_gumbel_ablation_20261120
+    method: channel_pruning_30_search_15_recovery
+    source_commit: recorded_by_ablation_launcher
+    source_base_commit: 0c2ed7de5881a970c1742885762b8926e0a70aba
+    initial_open_probability: "0.9801596942659225"
+    noise_arm: gumbel_hard

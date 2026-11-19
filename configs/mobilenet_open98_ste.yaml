@@ -1,0 +1,12 @@
+defaults:
+  - mobilenet_open98_gumbel
+  - _self_
+
+model:
+  backbone:
+    block:
+      train_gate_mode: ste_hard
+mlflow:
+  run_name: mobilenet_open98_ste_lambda1em3_gap6_10_seed42
+  tags:
+    noise_arm: ste_hard

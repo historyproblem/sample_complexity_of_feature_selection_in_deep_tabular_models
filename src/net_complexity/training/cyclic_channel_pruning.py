@@ -86,6 +86,7 @@ backbone (ResNet50/101/152).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -149,12 +150,15 @@ def _channels_to_drop(
     channel_probs: dict[str, dict[int, float]],
     threshold: float,
     already_disabled: dict[str, list[int]],
+    *,
+    include_threshold: bool = False,
 ) -> dict[str, list[int]]:
     result: dict[str, list[int]] = {}
     for layer_name, probs in channel_probs.items():
         disabled_here = set(already_disabled.get(layer_name, []))
         candidates = sorted(
-            ch for ch, prob in probs.items() if prob < threshold and ch not in disabled_here
+            ch for ch, prob in probs.items()
+            if (prob <= threshold if include_threshold else prob < threshold) and ch not in disabled_here
         )
         if not candidates:
             continue
@@ -642,6 +646,33 @@ def _next_search_initializer(
     return initialize
 
 
+def _checkpoint_channel_selection(
+    result: Mapping[str, Any], checkpoint_path: Path,
+) -> tuple[dict[str, dict[int, float]], dict[str, Any]]:
+    """Read the mask observations and held controller from the same saved model."""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    epoch = int(checkpoint["epoch"])
+    if epoch != int(result["best_epoch"]):
+        raise ValueError("Channel-selection checkpoint is not the validation-selected epoch.")
+    metrics = checkpoint.get("metrics", {})
+    probabilities = _extract_channel_probs(metrics)
+    if not probabilities:
+        raise ValueError("Selected checkpoint has no validation per-channel probabilities.")
+    extra = checkpoint.get("extra_state", {})
+    controller = extra.get("adaptive_lambda_state")
+    if not isinstance(controller, dict) or not controller:
+        raise ValueError("Selected checkpoint has no held adaptive-lambda controller state.")
+    selection = {
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+        "epoch": epoch,
+        "validation_accuracy": float(metrics["valid_accuracy"]),
+        "lambda_used": extra.get("model_lambda_coef"),
+        "held_adaptive_lambda_state": controller,
+    }
+    return probabilities, selection
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -712,6 +743,13 @@ def run_cyclic_channel_pruning_training(
     ``recovery_results``, ``final_result``, ``training_cost``.
     """
     cyclic_cfg = config.cyclic_channel_pruning
+    selection_source = str(getattr(cyclic_cfg, "channel_selection", "last_valid_metrics"))
+    if selection_source not in {"last_valid_metrics", "best_checkpoint"}:
+        raise ValueError("channel_selection must be last_valid_metrics or best_checkpoint.")
+    if selection_source == "best_checkpoint" and (
+        _weight_handoff_config(config) is None or _handoff_checkpoint_name(config) != "best.pt"
+    ):
+        raise ValueError("best_checkpoint channel selection requires best.pt weight handoff.")
     search_only = bool(getattr(cyclic_cfg, "search_only", False))
     if search_only:
         if int(cyclic_cfg.max_cycles) != 1:
@@ -747,6 +785,7 @@ def run_cyclic_channel_pruning_training(
     disabled_channels: dict[str, list[int]] = _read_initial_disabled_channels(config)
     cycle_results: list[dict[str, Any]] = []
     recovery_results: list[dict[str, Any]] = []
+    search_selections: list[dict[str, Any]] = []
     handoff_enabled = _weight_handoff_config(config) is not None
     checkpoint_name = _handoff_checkpoint_name(config)
     initial_checkpoint = _resolve_initial_checkpoint(config)
@@ -798,11 +837,21 @@ def run_cyclic_channel_pruning_training(
             else None
         )
 
-        valid_metrics = result.get("last_valid_metrics", {})
-        channel_probs = _extract_channel_probs(valid_metrics)
+        if selection_source == "best_checkpoint":
+            assert search_checkpoint is not None
+            channel_probs, selection = _checkpoint_channel_selection(result, search_checkpoint)
+            search_selections.append(selection)
+        else:
+            valid_metrics = result.get("last_valid_metrics", {})
+            channel_probs = _extract_channel_probs(valid_metrics)
 
         if drop_mode == "threshold":
-            new_drop = _channels_to_drop(channel_probs, threshold, disabled_channels)
+            if selection_source == "best_checkpoint":
+                # Deterministic forward opens iff p > gate_threshold, including
+                # the exactly-equal boundary in the closed set.
+                new_drop = _channels_to_drop(channel_probs, threshold, disabled_channels, include_threshold=True)
+            else:
+                new_drop = _channels_to_drop(channel_probs, threshold, disabled_channels)
             if threshold_max_param_fraction is not None and new_drop:
                 probe_model = hydra_instantiate(cycle_cfg.model)
                 total_params = sum(p.numel() for p in probe_model.parameters())
@@ -912,6 +961,8 @@ def run_cyclic_channel_pruning_training(
 
     cyclic_result = {
         "search_only": search_only,
+        "channel_selection_source": selection_source,
+        "search_selections": search_selections,
         "num_cycles_completed": len(cycle_results),
         "stop_on_convergence": stop_on_convergence,
         "final_disabled_channels": disabled_channels,

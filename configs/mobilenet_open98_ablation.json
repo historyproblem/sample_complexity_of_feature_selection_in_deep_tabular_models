@@ -1,0 +1,10 @@
+{
+  "output_root": "outputs/runs/mobilenet_open98_gumbel_ablation_20261120",
+  "reference_dir": "outputs/runs/mobilenet_open98_gumbel_ablation_20261120/reference",
+  "search_epochs": 30,
+  "recovery_epochs": 15,
+  "arms": [
+    {"config": "mobilenet_open98_gumbel", "mode": "gumbel_hard"},
+    {"config": "mobilenet_open98_ste", "mode": "ste_hard"}
+  ]
+}
