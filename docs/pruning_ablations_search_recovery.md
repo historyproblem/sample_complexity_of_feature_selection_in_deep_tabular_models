@@ -311,3 +311,41 @@ artifacts,test_evaluation/test_summary.json,test_comparison.csv and
 `test_comparisons.json` with inherited-minus-scratch and learned-minus-random(pp).
 For a no-training source check use --stage inspect; for a config-only plan append
 --dry-run. The launcher itself does not connect to or start jobs on another server.
+
+## Plotting preserved internal channels
+
+`scripts/plot_pruning_channels.py` makes PNG, vector PDF/SVG and source-data JSON
+from a results archive, a completed `branch_state.json`, or a final `deployment.pt`.
+It plots all 16 blocks in two panels: mid1 (conv1 output/conv2 input) and mid2
+(conv2 output/conv3 input). Green is preserved, blue is removed, total bar length
+is the original width. The unchanged stem and residual output widths are stated
+separately. Sparse mask entries contain removed indices; absent groups retain
+their full original width.
+
+The 12.373M inherited deployment is a suitable main-method example: learned
+internal-only mask, inherited weights, completed 60+90 budget and a feasible final
+validation result. The 5.871M inherited deployment shows stronger pruning but
+does not satisfy its final validation quality band. Selection of this illustration
+uses compression and validation feasibility, rather than test ranking.
+
+From the repository root on the server, without loading any data or training:
+
+```sh
+.venv/bin/python scripts/plot_pruning_channels.py \
+  outputs/runs/pruning_recovery_selected4_20261119/p12373042/inherited/deployment.pt \
+  --output figures/resnet50_p12373042_inherited_channels
+```
+
+For a downloaded metadata-only archive, weights are unnecessary:
+
+```sh
+.venv/bin/python scripts/plot_pruning_channels.py \
+  pruning_recovery_selected4_interim.tar.gz \
+  --architecture p12373042 --branch inherited \
+  --output figures/resnet50_p12373042_inherited_channels
+```
+
+The checkpoint reader uses CPU/weights-only loading and checks the Conv dimensions
+and retained index buffers against the mask. The archive reader checks saved mask
+identity and epoch accounting; it cannot verify omitted weight tensors. Neither
+reader changes model state or evaluates validation/test data.
