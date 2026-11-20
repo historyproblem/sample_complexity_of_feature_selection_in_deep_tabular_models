@@ -88,6 +88,17 @@ def test_test_cannot_start_before_full_150_epoch_budget(tmp_path, monkeypatch, d
     assert not reporter.output.exists()
 
 
+def test_inherited_only_report_does_not_expect_extra_ablations(tmp_path, monkeypatch, deployment):
+    config, model, branch, root = deployment
+    reporter = testing.DeploymentTests(tmp_path, ["profile"], "cpu", branches=("inherited",))
+    assert reporter.expected == {"profile__inherited"}
+    calls = []
+    fake_loader(monkeypatch, reporter, calls)
+    reporter.evaluate(model, branch, root, config)
+    assert reporter.finish()["status"] == "completed"
+    assert len(reporter.report["runs"]) == 1 and calls == ["loader"]
+
+
 def test_inference_failure_retains_frozen_fit_and_can_retry_without_training(tmp_path, monkeypatch, deployment):
     config, model, branch, root = deployment
     reporter = testing.DeploymentTests(tmp_path, ["profile"])

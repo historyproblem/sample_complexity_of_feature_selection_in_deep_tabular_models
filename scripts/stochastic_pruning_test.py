@@ -16,10 +16,9 @@ PROTOCOL = "stochastic_st_per_deployment_official_test_v1"
 
 
 class DeploymentTests:
-    def __init__(self, output, profile_ids, device=None):
+    def __init__(self, output, profile_ids, device=None, branches=("inherited", "scratch", "random")):
         self.output = Path(output) / "test_evaluation"
-        self.expected = {profile + "__" + branch for profile in profile_ids
-                         for branch in ("inherited", "scratch", "random")}
+        self.expected = {profile + "__" + branch for profile in profile_ids for branch in branches}
         self.device = device
         self.loader = None
         self.dataset = None

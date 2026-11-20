@@ -117,7 +117,10 @@ def validate_config(config):
         if block.get("train_gate_mode") == "gumbel_hard":
             _require(internal and block.get("beta") == 1.0 and block.get("temperature") == 1.0,
                      "stochastic size ablations require internal gates, Gumbel beta=1 and temperature=1")
-        _require(one["branches"] == (["inherited", "scratch", "random"] if internal else ["inherited"]),
+        inherited_stochastic = (internal and block.get("train_gate_mode") == "gumbel_hard"
+                                and one["branches"] == ["inherited"])
+        _require(inherited_stochastic
+                 or one["branches"] == (["inherited", "scratch", "random"] if internal else ["inherited"]),
                  "size-ablation branches differ from the gate placement")
         _require(one["inherited_optimizer_state"] == "fresh", "all size-ablation optimizers must be fresh")
         _require(one["scratch_initialization"] == "pytorch_default_all_trainable_and_bn",

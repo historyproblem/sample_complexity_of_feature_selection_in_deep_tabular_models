@@ -1,5 +1,8 @@
 # Size ablations: search first, recovery later
 
+For the 21 November request (three existing stochastic-search recoveries plus two
+new models, inherited branch only), use [the five-model followup](pruning_stochastic_followup.md).
+
 Branch: `feature/pruning-ablations-search-recovery`.
 All commands run from the repository root using `.venv/bin/python`.
 This launcher never trains a dense reference. Stochastic recovery evaluates each frozen deployment on official test; search never accesses test data.

@@ -1,0 +1,8 @@
+# @package _global_
+# Main method only: no scratch/random recovery forks.
+defaults:
+  - /experiment/pruning_v3/ablations_internal_stochastic_st
+  - _self_
+
+one_shot:
+  branches: [inherited]
