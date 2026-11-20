@@ -2,7 +2,7 @@
 
 Branch: `feature/pruning-ablations-search-recovery`.
 All commands run from the repository root using `.venv/bin/python`.
-This launcher does not start training a dense reference or access official test data.
+This launcher never trains a dense reference. Stochastic recovery evaluates each frozen deployment on official test; search never accesses test data.
 
 Install dependencies using the existing standard file before launching:
 
@@ -349,3 +349,89 @@ The checkpoint reader uses CPU/weights-only loading and checks the Conv dimensio
 and retained index buffers against the mask. The archive reader checks saved mask
 identity and epoch accounting; it cannot verify omitted weight tensors. Neither
 reader changes model state or evaluates validation/test data.
+
+
+## Stochastic ST restart, 20 November
+
+The new `ablations_stochastic_st4.yaml` study reruns the four latest threshold
+pairs with `train_gate_mode: gumbel_hard` from the first search epoch.
+Evaluation remains `deterministic_hard`. Gumbel noise beta=1 and temperature=1
+are inherited unchanged and now used; the entropy regularization coefficient
+remains zero. The old deterministic recipes and results are retained.
+
+The resolved training recipe differs from its deterministic counterpart only in
+`model.backbone.resnet_block.train_gate_mode`; run labels and the output directory
+are distinct. Internal gates only, floor0.08, gate threshold0.5, CE/LS0,
+adaptive lambda init0.001/min1e-8/max80, warmup10, seed/split42, same existing
+reference and zero-epoch initializer, search60, candidate epochs31-60/preBN0,
+recovery90 with train-only BN200 remain fixed. Random/scratch recovery ablations
+use the same three-branch policy as before. No new dense baseline is trained.
+
+| Profile | soft_drop | hard_drop | Prior deterministic size, for context only |
+| --- | ---: | ---: | ---: |
+| internal_probe_6_7m | 0.000225 | 0.00045 | 5.871M |
+| internal_probe_12_13m | 0.0001 | 0.0002 | 12.373M |
+| internal_gap001 | 0.00005 | 0.0001 | 16.261M |
+| internal_gap0025 | 0.000125 | 0.00025 | 23.507M |
+
+New physical sizes are measured after the new search; old sizes are not imposed
+as quotas. No deterministic source checkpoint/mask is reused for this restart.
+A guard rejects cross-mode completed-search handoff. Repeating a command reuses
+only a completed compatible search; partial runs are retained and refused.
+
+Start only the four searches (240 new epochs), from the server repository root:
+
+```sh
+git pull --ff-only
+nohup .venv/bin/python -u scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_stochastic_st4.yaml \
+  --stage search --subset full > pruning_internal_stochastic_st4.log 2>&1 &
+tail -f pruning_internal_stochastic_st4.log
+```
+
+Output: `outputs/runs/pruning_internal_stochastic_st4_20261120`.
+The dry-run plan and each start message report train/eval modes, noise beta and
+temperature. The training engine also records active gate modes. This command
+starts no recovery or official test. Preview with `--dry-run` if needed.
+Existing reference inputs should already be present after the completed series;
+if relocated, use `--dense-source` with that same reference, not a new baseline.
+
+After the searches are complete, review their selected masks before recovery:
+
+```sh
+.venv/bin/python scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_stochastic_st4.yaml \
+  --stage inspect --subset full
+```
+
+The existing separate `--stage recover --subset full` command then runs three
+90-epoch physical branches for each newly learned architecture (1080 new epochs).
+Each deployment remains60+90=150epochs. Physical recovery has no gates or active
+Gumbel noise; adaptive controller state is held. Completed recovery epoch files
+are cleaned by default after finalization, while selected source, initial/best/
+deployment files and histories remain; `--keep-epoch-checkpoints` retains all.
+After each branch completes90recovery epochs (60+90=150),the selected frozen
+checkpoint is immediately evaluated on all10,000 official CIFAR10 test images.
+This happens before the next recovery branch starts. Selection stays validation-only;
+inference does not train,change BatchNorm or advance the following training RNGs.
+Infeasible deployments are also reported. No Gumbel gates remain during inference.
+
+Results accumulate under
+`outputs/runs/pruning_internal_stochastic_st4_20261120/test_evaluation/`:
+`test_summary.json`, `test_comparison.csv`, per-deployment frozen manifests and
+prediction arrays. Each result and the relevant checkpoint hashes are retained.
+The log prints `[official-test]` with test accuracy immediately after each fit.
+Comparisons remain exploratory, because earlier test results informed this study.
+`--skip-test` explicitly disables automatic inference during recovery.
+
+If test inference fails, completed training artifacts are kept and the error is
+reported separately. To run/resume only test later,without new training or original
+reference/search folders:
+
+```sh
+.venv/bin/python scripts/launch_pruning_ablations.py \
+  --config configs/experiment/pruning_v3/ablations_stochastic_st4.yaml \
+  --stage test --subset full
+```
+
+Completed matching test results are verified/reused; only missing evaluations run.

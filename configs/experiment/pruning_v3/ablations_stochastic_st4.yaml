@@ -1,0 +1,24 @@
+# Four NEW searches from the same zero-epoch initializer and dense reference.
+# Same threshold pairs as the four completed deterministic-ST searches.
+# Historical profile names describe the previous probes, not quotas or size promises.
+protocol: pruning_v3_internal_stochastic_st4_v1
+seed: 42
+split_seed: 42
+reference_output: outputs/baseline/one_shot_dense_reference_seed42
+output: outputs/runs/pruning_internal_stochastic_st4_20261120
+configs:
+  internal: experiment/pruning_v3/ablations_internal_stochastic_st
+pilot_profiles: [internal_probe_6_7m, internal_probe_12_13m, internal_gap001, internal_gap0025]
+profiles:
+  - id: internal_probe_6_7m
+    soft_drop: 0.000225
+    hard_drop: 0.00045
+  - id: internal_probe_12_13m
+    soft_drop: 0.0001
+    hard_drop: 0.0002
+  - id: internal_gap001
+    soft_drop: 0.00005
+    hard_drop: 0.0001
+  - id: internal_gap0025
+    soft_drop: 0.000125
+    hard_drop: 0.00025

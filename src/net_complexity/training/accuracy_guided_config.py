@@ -129,8 +129,13 @@ def validate_config_v3(config):
     _require(a["reentry_samples"] >= a["gap_window"], "reentry samples must fill the feedback window")
     block = cfg["model"]["backbone"]["resnet_block"]
     _require(block.get("regularization_normalization") == p["normalization"], "runtime gate normalization differs")
-    _require(block.get("train_gate_mode") == "ste_hard" and block.get("eval_gate_mode") == "deterministic_hard",
+    _require(block.get("train_gate_mode") in {"ste_hard", "gumbel_hard"}
+             and block.get("eval_gate_mode") == "deterministic_hard",
              "real hard forward is required")
+    if block.get("train_gate_mode") == "gumbel_hard":
+        _require(_number(block.get("beta")) and block["beta"] > 0
+                 and _number(block.get("temperature")) and block["temperature"] > 0,
+                 "stochastic ST requires positive finite Gumbel noise beta and temperature")
     _require(not any(block.get(k) for k in ("force_ones_mask", "deterministic_soft_mask", "deterministic_hard_mask")),
              "legacy gate mode overrides conflict with explicit runtime modes")
     _require(_number(block.get("gate_threshold")) and 0 <= block["gate_threshold"] <= 1, "invalid hard threshold")

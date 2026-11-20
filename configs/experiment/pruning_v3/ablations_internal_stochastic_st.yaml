@@ -1,0 +1,18 @@
+# @package _global_
+# Explicitly authorized stochastic-ST rerun. All numeric settings are inherited.
+defaults:
+  - /experiment/pruning_v3/ablations_internal
+  - _self_
+
+model:
+  backbone:
+    resnet_block:
+      train_gate_mode: gumbel_hard
+      eval_gate_mode: deterministic_hard
+      beta: 1.0
+      temperature: 1.0
+
+mlflow:
+  run_name: ablations_internal_stochastic_st
+run_history:
+  run_name: ablations_internal_stochastic_st

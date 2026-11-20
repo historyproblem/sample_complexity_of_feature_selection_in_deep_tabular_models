@@ -1,4 +1,4 @@
-"""Search -> inspect -> recover; never train a reference or evaluate official test."""
+"""Staged pruning studies; stochastic recovery tests each finalized deployment."""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/ablations_grid.yaml"
 PROTOCOL = "pruning_v3_size_ablations_grid_v1"
 INTERNAL_PAIR_PROTOCOL = "pruning_v3_internal_threshold_pair_v1"
+STOCHASTIC_PROTOCOL = "pruning_v3_internal_stochastic_st4_v1"
 
 
 class MissingReferenceError(FileNotFoundError):
@@ -57,16 +58,20 @@ def load_study(path):
     require(set(study) == {"protocol", "seed", "split_seed", "reference_output", "output",
                            "configs", "pilot_profiles", "profiles"}, "Unexpected study fields")
     internal_pair = study["protocol"] == INTERNAL_PAIR_PROTOCOL
-    require(study["protocol"] in {PROTOCOL, INTERNAL_PAIR_PROTOCOL}
+    stochastic = study["protocol"] == STOCHASTIC_PROTOCOL
+    internal_only = internal_pair or stochastic
+    require(study["protocol"] in {PROTOCOL, INTERNAL_PAIR_PROTOCOL, STOCHASTIC_PROTOCOL}
             and study["seed"] == study["split_seed"] == 42,
             "Expected the single-seed42 size-ablation study")
     expected_configs = {"internal": "experiment/pruning_v3/ablations_internal"}
-    if not internal_pair:
+    if stochastic:
+        expected_configs["internal"] = "experiment/pruning_v3/ablations_internal_stochastic_st"
+    if not internal_only:
         expected_configs["output"] = "experiment/pruning_v3/ablations_output"
     require(study["configs"] == expected_configs,
             "Study must use the checked size-ablation recipes")
     ids = []
-    count = 2 if internal_pair else 5
+    count = 4 if stochastic else 2 if internal_pair else 5
     require(len(study["profiles"]) == count, f"This study requires {count} profiles")
     for row in study["profiles"]:
         require(set(row) == {"id", "soft_drop", "hard_drop"},
@@ -76,11 +81,11 @@ def load_study(path):
                 and 0 <= row["soft_drop"] < row["hard_drop"] <= 1, "Invalid accuracy tolerances")
         ids.append(row["id"])
     require(len(set(ids)) == count, "Duplicate profile ids")
-    if internal_pair:
-        require(len({(row["soft_drop"], row["hard_drop"]) for row in study["profiles"]}) == 2,
-                "The pair must use two different quality-threshold pairs")
+    if internal_only:
+        require(len({(row["soft_drop"], row["hard_drop"]) for row in study["profiles"]}) == count,
+                "Internal searches must use distinct quality-threshold pairs")
     pilot = study["pilot_profiles"]
-    pilot_count = 2 if internal_pair else 3
+    pilot_count = count if internal_only else 3
     require(len(pilot) == len(set(pilot)) == pilot_count and set(pilot) <= set(ids),
             f"Pilot must name {pilot_count} profiles")
     return study
@@ -94,6 +99,11 @@ def compose_cell(study, row, placement, reference, device=None):
         overrides.append(f"device={device}")
     cfg = compose_config(study["configs"][placement], overrides, dense_source=reference)
     validate_config(cfg)
+    if study["protocol"] == STOCHASTIC_PROTOCOL:
+        block = cfg.model.backbone.resnet_block
+        require(block.train_gate_mode == "gumbel_hard" and block.eval_gate_mode == "deterministic_hard"
+                and block.beta == block.temperature == 1.0,
+                "Stochastic study requires Gumbel ST training with beta=1, temperature=1 and deterministic evaluation")
     return cfg
 
 
@@ -180,7 +190,8 @@ def execute(study, args):
     if study["protocol"] == "pruning_v3_selected_internal_recovery5_v1":
         from pruning_recovery_matrix import execute_matrix
         return execute_matrix(study, args)
-    require(args.stage != "test", "The test stage requires the selected recovery-matrix config")
+    stochastic = study["protocol"] == STOCHASTIC_PROTOCOL
+    require(args.stage != "test" or stochastic, "The test stage requires a recovery-matrix or stochastic-study config")
     from net_complexity.training.one_shot_pruning_config import validate_inputs
     output = Path(args.output or study["output"]).resolve()
     reference = Path(args.dense_source or study["reference_output"]).resolve()
@@ -190,15 +201,32 @@ def execute(study, args):
              for p in profiles for placement in placements]
     recoveries = len(profiles) * sum(3 if name == "internal" else 1 for name in placements)
     planned = {"stage": args.stage, "subset": args.subset, "seed": 42, "reference": str(reference),
-               "output": str(output), "reference_training_epochs": 0, "official_test": False,
+               "output": str(output), "reference_training_epochs": 0,
+               "official_test": stochastic and args.stage in {"recover", "test"} and not args.skip_test,
                "placements": placements, "searches": len(cells), "recoveries": recoveries,
                "new_training_epochs": {"search": len(cells) * 60, "inspect": 0,
-                                       "recover": recoveries * 90}[args.stage],
+                                       "recover": recoveries * 90, "test": 0}[args.stage],
                "per_model_budget": 150, "profiles": profiles,
+               "gate_modes": {placement: {key: config.model.backbone.resnet_block[key]
+                                          for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature")}
+                              for _, placement, config in cells},
                "reference_archive": str(args.reference_archive) if args.reference_archive else None}
     if args.dry_run:
         print(json.dumps(planned, indent=2))
         return planned
+    tester = None
+    if stochastic and args.stage in {"recover", "test"} and not args.skip_test:
+        from stochastic_pruning_test import DeploymentTests
+        tester = DeploymentTests(output, [p["id"] for p in profiles], args.device)
+    if args.stage == "test":
+        require(tester is not None, "--stage test cannot be combined with --skip-test")
+        targets = [output / row["id"] / placement / "recovery" for row, placement, _ in cells]
+        for target in targets:
+            require(read_json(target / "one_shot_state.json")["status"] == "completed",
+                    "All recoveries must complete before standalone --stage test")
+        for target in targets:
+            tester.existing(target)
+        return tester.finish()
     if args.reference_archive:
         require(args.stage == "search", "Restore a reference only before search")
         if not args.reference_archive.is_file():
@@ -293,10 +321,22 @@ def execute(study, args):
         target = cell / ("search" if args.stage == "search" else "recovery")
         if target.exists():
             print(f"Reusing completed {args.stage}: {target}", flush=True)
+            if tester is not None:
+                tester.existing(target)
             continue
-        print(f"Starting {args.stage}: {name}", flush=True)
+        block = config.model.backbone.resnet_block
+        print(f"Starting {args.stage}: {name}; train_gate_mode={block.train_gate_mode}; "
+              f"eval_gate_mode={block.eval_gate_mode}; Gumbel beta={block.beta}; temperature={block.temperature}",
+              flush=True)
+        recovery_options = ({"keep_epoch_checkpoints": args.keep_epoch_checkpoints}
+                            if study["protocol"] == STOCHASTIC_PROTOCOL and args.stage == "recover" else {})
+        if tester is not None:
+            recovery_options["frozen_deployment_callback"] = tester.callback(config)
         run_one_shot_pruning(config, target, search_only=args.stage == "search",
-                             reuse_search_from=cell / "search" if args.stage == "recover" else None)
+                             reuse_search_from=cell / "search" if args.stage == "recover" else None,
+                             **recovery_options)
+    if tester is not None:
+        tester.finish()
     return planned
 
 
@@ -312,7 +352,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-test", action="store_true", help="Selected matrix: stop after frozen recoveries")
     parser.add_argument("--keep-epoch-checkpoints", action="store_true",
-                        help="Selected matrix: retain completed nested epoch checkpoints")
+                        help="Recovery matrix/stochastic study: retain completed nested epoch checkpoints")
     args = parser.parse_args(argv)
     try:
         return execute(load_study(args.config), args)

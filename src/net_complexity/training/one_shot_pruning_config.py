@@ -114,6 +114,9 @@ def validate_config(config):
         internal = block.get("gate_internal_width") is True and block.get("gate_output") is False
         output = block.get("gate_internal_width") is False and block.get("gate_output") is True
         _require(internal or output, "size ablation requires exactly internal or output gates")
+        if block.get("train_gate_mode") == "gumbel_hard":
+            _require(internal and block.get("beta") == 1.0 and block.get("temperature") == 1.0,
+                     "stochastic size ablations require internal gates, Gumbel beta=1 and temperature=1")
         _require(one["branches"] == (["inherited", "scratch", "random"] if internal else ["inherited"]),
                  "size-ablation branches differ from the gate placement")
         _require(one["inherited_optimizer_state"] == "fresh", "all size-ablation optimizers must be fresh")
@@ -300,6 +303,11 @@ def search_selection_bn_batches(config):
 
 def validate_search_handoff(config, source_config, selected_epoch):
     """Reject an old export whose selection policy or width floor differs."""
+    for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature", "gate_threshold",
+                "gate_internal_width", "gate_output", "regularization_normalization"):
+        field = "model.backbone.resnet_block." + key
+        _require(OmegaConf.select(config, field) == OmegaConf.select(source_config, field),
+                 f"reused search has a different gate setting: {key}")
     _require(search_selection_bn_batches(config) == search_selection_bn_batches(source_config),
              "reused search has a different search_selection_bn_calibration_batches policy")
     if "search_selection_last_epochs" not in config.one_shot:
