@@ -24,15 +24,20 @@ from net_complexity.training.one_shot_pruning_config import compose_config, vali
 
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_followup5.yaml"
 PROTOCOL = "pruning_v3_stochastic_st_followup5_v1"
+FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
 
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
-    require(set(study) == {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
-                           "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}, "Invalid followup fields")
-    require(study["protocol"] == PROTOCOL and study["seed"] == 42
+    fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
+              "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
+    full4 = study.get("protocol") == FULL4_PROTOCOL
+    require(set(study) == fields | ({"checkpoint_retention"} if full4 else set()), "Invalid followup fields")
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL} and study["seed"] == 42
             and study["config"] == "experiment/pruning_v3/stochastic_st_inherited", "Invalid followup recipe")
-    require(len(study["recoveries"]) == 3 and len(study["searches"]) == 2, "Exactly three recoveries and two new models required")
+    require((len(study["recoveries"]), len(study["searches"])) == ((0, 4) if full4 else (3, 2)), "Unexpected number of models")
+    if full4:
+        require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Full4 requires bounded checkpoint storage")
     ids = []
     for row in study["recoveries"] + study["searches"]:
         fields = {"id", "soft_drop", "hard_drop"}
@@ -52,7 +57,7 @@ def load_study(path):
                     and 31 <= row["selected_epoch"] <= 60
                     and re.fullmatch(r"[a-f0-9]{16}", row["selected_checkpoint_sha256_prefix"]), "Invalid measured source pin")
         ids.append(row["id"])
-    require(len(set(ids)) == 5, "Duplicate job IDs")
+    require(len(set(ids)) == len(ids), "Duplicate job IDs")
     require(set(study["reference_sha256"]) == {"history_path", "state_path", "config_path", "initializer_path"}, "Reference files must be pinned")
     for value in [*study["reference_sha256"].values(), study["initializer_model_state_hash"], study["split_indices_hash"]]:
         require(re.fullmatch(r"[a-f0-9]{64}", value), "Invalid reference checksum")
@@ -213,10 +218,14 @@ def queue_lock(output):
 
 def execute(study, args):
     rows = study["recoveries"] + study["searches"]
+    model_count = len(rows)
+    new_epochs = len(study["recoveries"]) * 90 + len(study["searches"]) * 150
+    bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
     configs = [configured(study, row, args) for row in rows]
     block = configs[0].model.backbone.resnet_block
-    plan = {"stage": args.stage, "models": 5, "existing_search_recoveries": 3, "new_searches": 2,
-            "recovery_branches_per_model": ["inherited"], "new_training_epochs": 570 if args.stage == "run" else 0,
+    plan = {"stage": args.stage, "models": model_count, "existing_search_recoveries": len(study["recoveries"]), "new_searches": len(study["searches"]),
+            "recovery_branches_per_model": ["inherited"], "new_training_epochs": new_epochs if args.stage == "run" else 0,
+            "bounded_epoch_checkpoints": bounded,
             "per_model_total_epochs": 150, "test_after_each_model": True, "wait_for_original_search_process": not args.skip_wait,
             "search_gate_modes": {key: block[key] for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature")},
             "models_in_order": [{"id": row["id"], "new_search_epochs": 0 if "source" in row else 60,
@@ -230,7 +239,7 @@ def execute(study, args):
         tester = DeploymentTests(output, [row["id"] for row in rows], args.device, branches=("inherited",))
         targets = [output / row["id"] / "internal/recovery" for row in rows]
         for target in targets:
-            require(read_json(target / "one_shot_state.json")["status"] == "completed", "All five fits must finish before standalone test")
+            require(read_json(target / "one_shot_state.json")["status"] == "completed", "All fits must finish before standalone test")
         for target in targets:
             tester.existing(target)
         return tester.finish()
@@ -253,7 +262,7 @@ def execute(study, args):
         write_json(manifest, study)
         write_json(receipt, source_review)
         tester = DeploymentTests(output, [row["id"] for row in rows], args.device, branches=("inherited",))
-        state = {"status": "running", "completed_models": [], "planned_models": 5, "new_training_epochs_allocated": 570}
+        state = {"status": "running", "completed_models": [], "planned_models": model_count, "new_training_epochs_allocated": new_epochs}
         write_json(output / "followup_state.json", state)
         from net_complexity.training.one_shot_pruning import run_one_shot_pruning
         try:
@@ -265,7 +274,8 @@ def execute(study, args):
                 else:
                     if cell["review"] is None:
                         print(f"[followup] {row['id']}: new stochastic-ST search60", flush=True)
-                        run_one_shot_pruning(config, cell["source"], search_only=True)
+                        run_one_shot_pruning(config, cell["source"], search_only=True,
+                                             **({"bounded_checkpoints": True, "keep_epoch_checkpoints": False} if bounded else {}))
                         cell["review"] = review_source(cell["source"], config, study, row, from_old_queue=False)
                     else:
                         require(review_source(cell["source"], config, study, row, from_old_queue=cell["existing"])
@@ -273,7 +283,8 @@ def execute(study, args):
                     print(f"[followup] {row['id']}: inherited recovery90, parameters={cell['review']['physical_parameters']:,}; no search rerun", flush=True)
                     run_one_shot_pruning(config, cell["output"], reuse_search_from=cell["source"],
                                          keep_epoch_checkpoints=args.keep_epoch_checkpoints,
-                                         frozen_deployment_callback=tester.callback(config))
+                                         frozen_deployment_callback=tester.callback(config),
+                                         **({"bounded_checkpoints": True} if bounded else {}))
                     check_completed(cell["output"], config, cell["review"])
                 state["completed_models"].append(row["id"])
                 write_json(output / "followup_state.json", state)

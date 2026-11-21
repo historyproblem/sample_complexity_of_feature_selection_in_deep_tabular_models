@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import time
@@ -317,10 +318,17 @@ def _paused_search(config, source_root, provenance, search_epochs):
 def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search_from=None,
                          stop_after_search_epoch=None, search_diagnostics=False,
                          resume_search_from=None, keep_epoch_checkpoints=True,
-                         frozen_deployment_callback=None):
+                         frozen_deployment_callback=None, bounded_checkpoints=False):
     """Execute one shared search/export and, unless requested otherwise, compact branches."""
     if search_only and reuse_search_from is not None:
         raise ValueError("search_only and reuse_search_from are mutually exclusive")
+    if bounded_checkpoints:
+        start, end = search_selection_bounds(config)
+        if (str(config.one_shot.protocol) != ABLATION_PROTOCOL or search_selection_bn_batches(config)
+                or end - start + 1 > NO_FEASIBLE_FALLBACK_LAST_EPOCHS):
+            raise ValueError("Bounded checkpoint storage requires pre-BN ablations with at most30 search candidates")
+        if resume_search_from is not None or stop_after_search_epoch is not None or search_diagnostics:
+            raise ValueError("Bounded checkpoint storage does not support the archival search-pause/diagnostic API")
     if reuse_search_from is not None and (resume_search_from is not None or search_diagnostics
                                          or stop_after_search_epoch is not None):
         raise ValueError("Completed-search reuse cannot stop, trace or resume search training")
@@ -440,6 +448,7 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
         scheduler_horizon=None,
         scheduler_eta_min=None,
         training_seed=None,
+        physical_cost=None,
     ):
         stage_started = time.perf_counter()
         stage_cfg = deepcopy(cfg)
@@ -487,6 +496,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             record["resumed_state_hash"] = resumed_model_hash
             record["resumed_from_checkpoint"] = str(resume_checkpoint)
         state["stages"][name] = record
+        streamed_candidates = []
+        removed_checkpoint_count = 0
 
         def initialize(model):
             model.load_state_dict(source_state, strict=True)
@@ -512,9 +523,49 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
             return handoff
 
         def epoch_end(epoch, train, valid, model, optimizer, history):
+            nonlocal removed_checkpoint_count
             record["epoch_events"].append({"epoch": epoch, "ledger": deepcopy(ledger),
                 "validation": {"accuracy": valid["valid_accuracy"], "ce_loss": valid["valid_ce_loss"]},
                 "train_L_gate_mean": train["train_L_gate_mean"]})
+            if bounded_checkpoints:
+                path = history.checkpoints_dir / f"epoch_{epoch:04d}.pt"
+                keep = None
+                start, end = search_selection_bounds(config)
+                if structural or start <= epoch <= end:
+                    if structural:
+                        payload = torch.load(path, map_location="cpu", weights_only=True)
+                        candidate = {"path": str(path), "epoch": int(payload["epoch"]),
+                                     "accuracy": float(payload["metrics"]["valid_accuracy"]),
+                                     "ce_loss": float(payload["metrics"]["valid_ce_loss"]),
+                                     "physical_cost": physical_cost}
+                        del payload
+                    else:
+                        candidate_model, payload = load_model(path, source)
+                        candidate = evaluate_search_candidate(config, candidate_model, payload, path,
+                            data.train_dataloader, data.valid_dataloader, device, seed)
+                        del candidate_model, payload
+                    streamed_candidates.append(candidate)
+                    # Keep all scalar/mask evidence, but only the current winner's weights.
+                    with (history.run_dir / "selection_candidates.jsonl").open("a") as handle:
+                        handle.write(json.dumps(candidate, sort_keys=True) + "\n")
+                    if structural:
+                        winner, _ = select_checkpoint_records(streamed_candidates, reference[total],
+                            float(cfg.training_arguments.adaptive_lambda.hard_drop), search=False)
+                    else:
+                        winner, _ = select_search_checkpoint_records(config, streamed_candidates,
+                            reference[search_epochs], float(cfg.training_arguments.adaptive_lambda.hard_drop))
+                    keep = Path(winner["path"])
+                for old in history.checkpoints_dir.glob("epoch_*.pt"):
+                    if old == keep:
+                        continue
+                    if old.is_symlink() or not re.fullmatch(r"epoch_[0-9]+\.pt", old.name):
+                        raise ValueError(f"Unexpected epoch checkpoint cleanup target: {old}")
+                    old.unlink()
+                    removed_checkpoint_count += 1
+                record["checkpoint_retention"] = {"policy": "online_validation_winner_best_last",
+                    "retained_epoch_files": len(list(history.checkpoints_dir.glob("epoch_*.pt"))),
+                    "removed_epoch_files": removed_checkpoint_count,
+                    "candidate_metrics": str(history.run_dir / "selection_candidates.jsonl")}
             persist()
             epoch_progress(name, epoch, epochs, valid, ledger, time.perf_counter() - stage_started)
 
@@ -544,7 +595,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
         record.update(run_dir=result["run_dir"], status="paused" if paused else "completed",
                       epochs_completed=expected_epochs)
         paths = sorted((Path(result["run_dir"]) / "checkpoints").glob("epoch_*.pt"))
-        if len(paths) != expected_epochs:
+        if bounded_checkpoints:
+            if len(paths) != 1 or not streamed_candidates:
+                raise ValueError("Bounded checkpoint cache is missing the selected epoch")
+            record["streamed_candidates"] = streamed_candidates
+        elif len(paths) != expected_epochs:
             raise ValueError("Missing complete epoch candidates for validation-only selection.")
         if paused:
             boundary = Path(result["pause_checkpoint"])
@@ -589,16 +644,16 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     progress_message("shared_search", f"paused after epoch {stop_after_search_epoch}; "
                         f"original search horizon={search_epochs}; no selection, export, recovery or test")
                     return state
-                candidates = []
+                candidates = search_record.pop("streamed_candidates", [])
                 start, end = search_selection_bounds(config)
                 paths = [path for path in paths if start <= int(path.stem.removeprefix("epoch_")) <= end]
                 selection_bn_batches = search_selection_bn_batches(config)
                 with phase_progress(
                     "selection",
-                    f"checking {len(paths)} search checkpoints in epochs {start}-{end}; "
+                    f"checking {len(candidates) if bounded_checkpoints else len(paths)} search checkpoints in epochs {start}-{end}; "
                     f"train-only BN batches per candidate={selection_bn_batches}",
                 ):
-                    for index, path in enumerate(paths, 1):
+                    for index, path in enumerate([] if bounded_checkpoints else paths, 1):
                         model, checkpoint = load_model(path, carrier)
                         if not start <= int(checkpoint["epoch"]) <= end:
                             raise ValueError("Checkpoint epoch differs from allowed filename window")
@@ -608,6 +663,8 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                         ))
                         if index % 10 == 0 or index == len(paths):
                             progress_message("selection", f"checked {index}/{len(paths)} checkpoints")
+                    if bounded_checkpoints:
+                        progress_message("selection", f"using all {len(candidates)} online-scored candidates; one epoch file retained")
                 selected, selection_trace = select_search_checkpoint_records(
                     config,
                     candidates,
@@ -1048,10 +1105,11 @@ def run_one_shot_pruning(config, output_root, *, search_only=False, reuse_search
                     scheduler_state_policy=branch_spec["scheduler_state"],
                     scheduler_horizon=scheduler_horizon,
                     training_seed=branch_spec["training_seed"],
+                    physical_cost=selected["physical_cost"],
                 )
-                final_candidates = []
-                with phase_progress(name, f"selecting the frozen deployment from {len(paths)} validation checkpoints"):
-                    for path in paths:
+                final_candidates = stage_record.pop("streamed_candidates", [])
+                with phase_progress(name, f"selecting the frozen deployment from {len(final_candidates) if bounded_checkpoints else len(paths)} validation checkpoints"):
+                    for path in ([] if bounded_checkpoints else paths):
                         payload = torch.load(path, map_location="cpu", weights_only=True)
                         final_candidates.append({"path": str(path), "epoch": int(payload["epoch"]),
                             "accuracy": float(payload["metrics"]["valid_accuracy"]),

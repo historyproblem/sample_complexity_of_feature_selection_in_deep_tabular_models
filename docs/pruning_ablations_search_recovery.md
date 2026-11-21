@@ -1,5 +1,8 @@
 # Size ablations: search first, recovery later
 
+For the latest clean-server restart, use [four fresh complete stochastic-ST models](pruning_stochastic_full4.md)
+with bounded checkpoint retention, dependency installation and branch checkout.
+
 For the 21 November request (three existing stochastic-search recoveries plus two
 new models, inherited branch only), use [the five-model followup](pruning_stochastic_followup.md).
 
