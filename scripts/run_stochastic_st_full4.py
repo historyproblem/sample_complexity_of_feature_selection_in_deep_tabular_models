@@ -1,4 +1,4 @@
-"""Four fresh 60+90 stochastic-ST models, bounded weights cache and official test."""
+"""Fresh 60+90 stochastic-ST models, bounded weights cache and official test."""
 import argparse
 from pathlib import Path
 import shutil
@@ -59,15 +59,16 @@ def main(argv=None):
     args.skip_wait, args.keep_epoch_checkpoints = True, False
     try:
         study = queue.load_study(args.config)
-        queue.require(study["protocol"] == queue.FULL4_PROTOCOL, "This launcher requires the four-full-model configuration")
+        queue.require(study["protocol"] in {queue.FULL4_PROTOCOL, queue.FULL2_PROTOCOL},
+                      "This launcher requires a two- or four-full-model configuration")
         if not args.dry_run and args.stage != "test":
             prepare_reference(study, args)
         result = queue.execute(study, args)
         if args.stage == "inspect" and not args.dry_run:
-            print("Four fresh-run recipes and immutable inputs verified; no model training started", flush=True)
+            print(f"{len(study['searches'])} fresh-run recipes and immutable inputs verified; no model training started", flush=True)
         return result
     except (FileNotFoundError, FileExistsError, ValueError) as exc:
-        parser.exit(2, f"Full4 blocked: {exc}\n")
+        parser.exit(2, f"Fresh-run queue blocked: {exc}\n")
 
 
 if __name__ == "__main__":

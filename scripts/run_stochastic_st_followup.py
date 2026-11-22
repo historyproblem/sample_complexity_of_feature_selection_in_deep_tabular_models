@@ -25,19 +25,21 @@ from net_complexity.training.one_shot_pruning_config import compose_config, vali
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_followup5.yaml"
 PROTOCOL = "pruning_v3_stochastic_st_followup5_v1"
 FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
+FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
 
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
     fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
               "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
-    full4 = study.get("protocol") == FULL4_PROTOCOL
-    require(set(study) == fields | ({"checkpoint_retention"} if full4 else set()), "Invalid followup fields")
-    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL} and study["seed"] == 42
+    fresh = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL}
+    require(set(study) == fields | ({"checkpoint_retention"} if fresh else set()), "Invalid followup fields")
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL} and study["seed"] == 42
             and study["config"] == "experiment/pruning_v3/stochastic_st_inherited", "Invalid followup recipe")
-    require((len(study["recoveries"]), len(study["searches"])) == ((0, 4) if full4 else (3, 2)), "Unexpected number of models")
-    if full4:
-        require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Full4 requires bounded checkpoint storage")
+    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2)}
+    require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
+    if fresh:
+        require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Fresh runs require bounded checkpoint storage")
     ids = []
     for row in study["recoveries"] + study["searches"]:
         fields = {"id", "soft_drop", "hard_drop"}

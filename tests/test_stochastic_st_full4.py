@@ -8,12 +8,52 @@ import tarfile
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import run_stochastic_st_full4 as full4
 import run_stochastic_st_followup as queue
 import stochastic_pruning_test
+
+
+STRONGER_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_stronger2.yaml"
+
+
+def test_stronger_pair_is_two_fresh_complete_models_with_only_threshold_changes(tmp_path):
+    result = full4.main(["--config", str(STRONGER_CONFIG), "--dry-run",
+                         "--output", str(tmp_path / "absent"),
+                         "--reference-archive", str(tmp_path / "missing.tar.gz")])
+    assert (result["models"], result["existing_search_recoveries"], result["new_searches"]) == (2, 0, 2)
+    assert result["new_training_epochs"] == 300 and result["bounded_epoch_checkpoints"] is True
+    assert result["wait_for_original_search_process"] is False and result["test_after_each_model"] is True
+    assert [(r["new_search_epochs"], r["recovery_epochs"]) for r in result["models_in_order"]] == [(60, 90)] * 2
+    assert [(r["soft_drop"], r["hard_drop"]) for r in result["models_in_order"]] == [(.00125, .0025), (.0025, .005)]
+    previous = queue.load_study(full4.DEFAULT_CONFIG)
+    study = queue.load_study(STRONGER_CONFIG)
+    assert study["reference_sha256"] == previous["reference_sha256"]
+    assert study["initializer_model_state_hash"] == previous["initializer_model_state_hash"]
+    assert study["split_indices_hash"] == previous["split_indices_hash"]
+    args = SimpleNamespace(dense_source=tmp_path / "same_reference", device=None)
+    baseline = queue.configured(previous, previous["searches"][1], args)
+    for row in study["searches"]:
+        actual = queue.configured(study, row, args)
+        expected = deepcopy(baseline)
+        expected.training_arguments.adaptive_lambda.soft_drop = row["soft_drop"]
+        expected.training_arguments.adaptive_lambda.hard_drop = row["hard_drop"]
+        assert OmegaConf.to_container(actual, resolve=True) == OmegaConf.to_container(expected, resolve=True)
+    assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, 4])
+def test_two_model_manifest_rejects_other_counts(tmp_path, count):
+    import yaml
+    study = queue.load_study(STRONGER_CONFIG)
+    study["searches"] = [{**study["searches"][0], "id": f"run_{i}"} for i in range(count)]
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match="Unexpected number of models"):
+        queue.load_study(path)
 
 
 def test_four_complete_models_dry_run_never_needs_old_searches(tmp_path):
@@ -76,10 +116,11 @@ def test_missing_reference_blocks_before_queue_or_training(tmp_path, monkeypatch
     assert not (tmp_path / "new").exists()
 
 
-def test_each_model_finishes_recovery_and_test_before_next_search(tmp_path, monkeypatch):
+@pytest.mark.parametrize("config_path, count", [(full4.DEFAULT_CONFIG, 4), (STRONGER_CONFIG, 2)])
+def test_each_model_finishes_recovery_and_test_before_next_search(tmp_path, monkeypatch, config_path, count):
     import net_complexity.training.one_shot_pruning as runtime
     from test_stochastic_st_followup import fake_cells
-    study = queue.load_study(full4.DEFAULT_CONFIG)
+    study = queue.load_study(config_path)
     cells = fake_cells(study, tmp_path / "queue")
     monkeypatch.setattr(full4, "prepare_reference", lambda *a: None)
     monkeypatch.setattr(queue, "preflight", lambda *a: (tmp_path / "queue", cells))
@@ -89,7 +130,7 @@ def test_each_model_finishes_recovery_and_test_before_next_search(tmp_path, monk
     events = []
     class Reporter:
         def __init__(self, output, ids, device, branches):
-            assert len(ids) == 4 and branches == ("inherited",)
+            assert len(ids) == count and branches == ("inherited",)
         def callback(self, config):
             return lambda model, branch, root: events.append("test")
         def finish(self): return {"status": "completed"}
@@ -100,10 +141,10 @@ def test_each_model_finishes_recovery_and_test_before_next_search(tmp_path, monk
         if not kwargs.get("search_only"):
             kwargs["frozen_deployment_callback"](None, {}, output)
     monkeypatch.setattr(runtime, "run_one_shot_pruning", run)
-    result = full4.main(["--output", str(tmp_path / "queue")])
-    assert events == ["search60", "recovery90", "test"] * 4
-    assert result["planned_models"] == 4 and len(result["completed_models"]) == 4
-    assert result["new_training_epochs_allocated"] == 600
+    result = full4.main(["--config", str(config_path), "--output", str(tmp_path / "queue")])
+    assert events == ["search60", "recovery90", "test"] * count
+    assert result["planned_models"] == count and len(result["completed_models"]) == count
+    assert result["new_training_epochs_allocated"] == 150 * count
 
 
 def test_test_only_never_restores_reference(monkeypatch):
