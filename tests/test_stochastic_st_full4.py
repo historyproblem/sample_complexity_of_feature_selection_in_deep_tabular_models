@@ -18,6 +18,76 @@ import stochastic_pruning_test
 
 
 STRONGER_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_stronger2.yaml"
+INDEPENDENT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_independent4.yaml"
+
+
+def test_independent_four_search_budget_and_hard_only_recipe_diff(tmp_path):
+    result = full4.main(["--config", str(INDEPENDENT_CONFIG), "--stage", "search", "--dry-run",
+                         "--output", str(tmp_path / "absent"),
+                         "--reference-archive", str(tmp_path / "missing.tar.gz")])
+    assert result["models"] == result["new_searches"] == 4
+    assert result["new_training_epochs"] == 240 and result["per_model_total_epochs"] == 150
+    assert result["existing_search_recoveries"] == 0 and result["recovery_branches_per_model"] == []
+    assert result["test_after_each_model"] is False and result["wait_for_original_search_process"] is False
+    assert result["bounded_epoch_checkpoints"] is True
+    assert [(r["new_search_epochs"], r["recovery_epochs"]) for r in result["models_in_order"]] == [(60, 0)] * 4
+    assert [(r["soft_drop"], r["hard_drop"]) for r in result["models_in_order"]] == [
+        (.00025, .005), (.00025, .01), (.00025, .02), (.00025, .03)]
+    previous = queue.load_study(full4.DEFAULT_CONFIG)
+    study = queue.load_study(INDEPENDENT_CONFIG)
+    assert study["reference_sha256"] == previous["reference_sha256"]
+    assert study["initializer_model_state_hash"] == previous["initializer_model_state_hash"]
+    assert study["split_indices_hash"] == previous["split_indices_hash"]
+    args = SimpleNamespace(dense_source=tmp_path / "same_reference", device=None)
+    baseline = queue.configured(previous, previous["searches"][1], args)
+    for row in study["searches"]:
+        actual = queue.configured(study, row, args)
+        expected = deepcopy(baseline)
+        expected.training_arguments.adaptive_lambda.hard_drop = row["hard_drop"]
+        assert OmegaConf.to_container(actual, resolve=True) == OmegaConf.to_container(expected, resolve=True)
+    assert not (tmp_path / "absent").exists()
+
+
+def test_search_stage_never_recovers_or_tests_and_reuses_finished_sources(tmp_path, monkeypatch, capsys):
+    import net_complexity.training.one_shot_pruning as runtime
+    from test_stochastic_st_followup import fake_cells
+    study = queue.load_study(INDEPENDENT_CONFIG)
+    output = tmp_path / "queue"
+    cells = fake_cells(study, output)
+    monkeypatch.setattr(full4, "prepare_reference", lambda *a: None)
+    monkeypatch.setattr(queue, "preflight", lambda *a: (output, cells))
+    monkeypatch.setattr(queue, "wait_for_original_searches", lambda: pytest.fail("search waited for an old queue"))
+    monkeypatch.setattr(stochastic_pruning_test, "DeploymentTests", lambda *a, **k: pytest.fail("search-only constructed a tester"))
+    def review(source, config, study, row, **kwargs):
+        index = next(i for i, cell in enumerate(cells) if cell["source"] == source)
+        return {"physical_parameters": 123 + index, "selected_epoch": 31 + index,
+                "validation_accuracy": .95, "fallback_used": False}
+    monkeypatch.setattr(queue, "review_source", review)
+    calls = []
+    def run(config, path, **kwargs):
+        assert kwargs == {"search_only": True, "keep_epoch_checkpoints": False, "bounded_checkpoints": True}
+        index = next(i for i, cell in enumerate(cells) if cell["source"] == path)
+        calls.append(index)
+        path.mkdir(parents=True)
+        queue.write_json(path / "selection.json", {"pruning_mask": {
+            "backbone.layer4.2.mid1_gumbel_layer": list(range(index * 128))}})
+    monkeypatch.setattr(runtime, "run_one_shot_pruning", run)
+    command = ["--config", str(INDEPENDENT_CONFIG), "--stage", "search", "--output", str(output)]
+    result = full4.main(command)
+    assert calls == [0, 1, 2, 3]
+    assert result["status"] == "search_completed" and len(result["completed_searches"]) == 4
+    assert result["new_training_epochs_allocated"] == 240 and result["recovery_epochs_executed"] == 0
+    assert result["remaining_training_epochs_per_model"] == 90 and result["test_evaluated"] is False
+    rows = queue.read_json(output / "search_summary.json")["searches"]
+    assert [row["remaining_internal_channels"] for row in rows] == [7552, 7424, 7296, 7168]
+    assert all(row["original_internal_channels"] == 7552 for row in rows)
+    assert "| Channels retained | Search validation |" in capsys.readouterr().out
+    assert len((output / "search_summary.csv").read_text().splitlines()) == 5
+    assert all(not cell["output"].exists() for cell in cells)
+    assert not (output / "test_evaluation").exists()
+    assert not (output / "followup.lock").exists()
+    again = full4.main(command)
+    assert calls == [0, 1, 2, 3] and again["status"] == "search_completed"
 
 
 def test_stronger_pair_is_two_fresh_complete_models_with_only_threshold_changes(tmp_path):

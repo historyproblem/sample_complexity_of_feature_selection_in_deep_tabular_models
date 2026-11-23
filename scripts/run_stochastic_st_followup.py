@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from copy import deepcopy
+import csv
 import json
 import os
 from pathlib import Path
@@ -218,26 +219,87 @@ def queue_lock(output):
         path.unlink()
 
 
+def run_searches(study, cells, output, bounded):
+    """Finish only the new searches; retain each selected source for later recovery."""
+    from net_complexity.training.one_shot_pruning import run_one_shot_pruning
+    from plot_pruning_channels import channel_rows
+    state = {"status": "searching", "completed_searches": [], "planned_searches": len(cells),
+             "new_training_epochs_allocated": len(cells) * 60, "test_evaluated": False,
+             "recovery_epochs_executed": 0, "remaining_training_epochs_per_model": 90}
+    summaries = []
+    try:
+        write_json(output / "search_state.json", state)
+        for cell in cells:
+            row, config = cell["row"], cell["config"]
+            if cell["review"] is None:
+                print(f"[search-only] {row['id']}: new stochastic-ST search60; recovery deferred", flush=True)
+                run_one_shot_pruning(config, cell["source"], search_only=True,
+                                     keep_epoch_checkpoints=False, bounded_checkpoints=bounded)
+            else:
+                print(f"[search-only] {row['id']}: reusing completed search; no training repeated", flush=True)
+            review = review_source(cell["source"], config, study, row, from_old_queue=False)
+            require(cell["review"] is None or review == cell["review"], "Search changed after preflight")
+            cell["review"] = review
+            selection = read_json(cell["source"] / "selection.json")
+            channels = channel_rows(selection["pruning_mask"])
+            summary = {"id": row["id"], "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"],
+                       "selected_epoch": review["selected_epoch"], "physical_parameters": review["physical_parameters"],
+                       "remaining_internal_channels": sum(r["preserved"] for r in channels),
+                       "original_internal_channels": sum(r["original"] for r in channels),
+                       "search_validation_accuracy": review["validation_accuracy"],
+                       "fallback_used": review["fallback_used"]}
+            summaries.append(summary)
+            write_json(output / "search_summary.json", {"test_evaluated": False, "searches": summaries})
+            with (output / "search_summary.csv").open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(summary))
+                writer.writeheader()
+                writer.writerows(summaries)
+            print(f"[search-summary] {row['id']}: parameters={summary['physical_parameters']:,}; "
+                  f"channels_remaining={summary['remaining_internal_channels']}/{summary['original_internal_channels']}; "
+                  f"search_validation={summary['search_validation_accuracy']:.2%}; fallback={summary['fallback_used']}", flush=True)
+            state["completed_searches"].append(row["id"])
+            write_json(output / "search_state.json", state)
+        state["status"] = "search_completed"
+        write_json(output / "search_state.json", state)
+    except BaseException as exc:
+        state.update(status="failed_or_interrupted", error=f"{type(exc).__name__}: {exc}")
+        write_json(output / "search_state.json", state)
+        raise
+    print("\n| ID | soft | hard | Parameters | Channels retained | Search validation | Fallback |", flush=True)
+    print("| --- | ---: | ---: | ---: | ---: | ---: | --- |", flush=True)
+    for row in summaries:
+        print(f"| {row['id']} | {row['soft_drop']} | {row['hard_drop']} | {row['physical_parameters']:,} | "
+              f"{row['remaining_internal_channels']}/{row['original_internal_channels']} | "
+              f"{row['search_validation_accuracy']:.2%} | {row['fallback_used']} |", flush=True)
+    print(f"Search complete: {len(cells)}/{len(cells)}; no recovery or official test started. Summary: {output / 'search_summary.csv'}", flush=True)
+    return state
+
+
 def execute(study, args):
     rows = study["recoveries"] + study["searches"]
     model_count = len(rows)
-    new_epochs = len(study["recoveries"]) * 90 + len(study["searches"]) * 150
+    search_only = args.stage == "search"
+    require(not search_only or (study["protocol"] in {FULL4_PROTOCOL, FULL2_PROTOCOL} and not study["recoveries"]),
+            "Search-only requires a fresh two- or four-model study without existing-source recoveries")
+    new_epochs = len(study["searches"]) * 60 if search_only else len(study["recoveries"]) * 90 + len(study["searches"]) * 150
     bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
     configs = [configured(study, row, args) for row in rows]
     block = configs[0].model.backbone.resnet_block
     plan = {"stage": args.stage, "models": model_count, "existing_search_recoveries": len(study["recoveries"]), "new_searches": len(study["searches"]),
-            "recovery_branches_per_model": ["inherited"], "new_training_epochs": new_epochs if args.stage == "run" else 0,
+            "recovery_branches_per_model": [] if search_only else ["inherited"],
+            "new_training_epochs": new_epochs if args.stage in {"run", "search"} else 0,
             "bounded_epoch_checkpoints": bounded,
-            "per_model_total_epochs": 150, "test_after_each_model": True, "wait_for_original_search_process": not args.skip_wait,
+            "per_model_total_epochs": 150, "test_after_each_model": not search_only, "wait_for_original_search_process": not args.skip_wait,
             "search_gate_modes": {key: block[key] for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature")},
             "models_in_order": [{"id": row["id"], "new_search_epochs": 0 if "source" in row else 60,
-                                  "recovery_epochs": 90, "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"]} for row in rows]}
+                                  "recovery_epochs": 0 if search_only else 90,
+                                  "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"]} for row in rows]}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return plan
-    from stochastic_pruning_test import DeploymentTests
     output = Path(args.output or ROOT / study["output"]).resolve()
     if args.stage == "test":
+        from stochastic_pruning_test import DeploymentTests
         tester = DeploymentTests(output, [row["id"] for row in rows], args.device, branches=("inherited",))
         targets = [output / row["id"] / "internal/recovery" for row in rows]
         for target in targets:
@@ -245,7 +307,7 @@ def execute(study, args):
         for target in targets:
             tester.existing(target)
         return tester.finish()
-    if args.stage == "run" and not args.skip_wait:
+    if args.stage in {"run", "search"} and not args.skip_wait:
         wait_for_original_searches()
     output, cells = preflight(study, args)
     source_review = {cell["row"]["id"]: cell["review"] for cell in cells if cell["existing"]}
@@ -263,6 +325,9 @@ def execute(study, args):
         require(not receipt.exists() or read_json(receipt) == source_review, "Original sources changed after preflight")
         write_json(manifest, study)
         write_json(receipt, source_review)
+        if search_only:
+            return run_searches(study, cells, output, bounded)
+        from stochastic_pruning_test import DeploymentTests
         tester = DeploymentTests(output, [row["id"] for row in rows], args.device, branches=("inherited",))
         state = {"status": "running", "completed_models": [], "planned_models": model_count, "new_training_epochs_allocated": new_epochs}
         write_json(output / "followup_state.json", state)
@@ -303,7 +368,7 @@ def execute(study, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--stage", choices=("run", "inspect", "test"), default="run")
+    parser.add_argument("--stage", choices=("run", "search", "inspect", "test"), default="run")
     parser.add_argument("--dense-source", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device")

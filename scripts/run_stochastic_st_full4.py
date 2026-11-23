@@ -49,7 +49,7 @@ def prepare_reference(study, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--stage", choices=("run", "inspect", "test"), default="run")
+    parser.add_argument("--stage", choices=("run", "search", "inspect", "test"), default="run")
     parser.add_argument("--reference-archive", type=Path, default=queue.ROOT / REFERENCE_ARCHIVE)
     parser.add_argument("--dense-source", type=Path)
     parser.add_argument("--output", type=Path)
