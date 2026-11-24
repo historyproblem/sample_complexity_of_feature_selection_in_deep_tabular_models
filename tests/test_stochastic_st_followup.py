@@ -30,6 +30,97 @@ def arguments(output, stage="run"):
                            dry_run=False, skip_wait=True, keep_epoch_checkpoints=False)
 
 
+RECOVERY3_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_independent_recovery3.yaml"
+
+
+def test_recovery3_manifest_budget_and_identical_search_recipe(tmp_path):
+    study = followup.load_study(RECOVERY3_CONFIG)
+    result = followup.main(["--config", str(RECOVERY3_CONFIG), "--dry-run", "--output", str(tmp_path / "absent")])
+    assert result["models"] == result["existing_search_recoveries"] == 3 and result["new_searches"] == 0
+    assert result["new_training_epochs"] == 270 and result["per_model_total_epochs"] == 150
+    assert result["wait_for_original_search_process"] is False and result["test_after_each_model"] is True
+    assert result["bounded_epoch_checkpoints"] is True
+    assert [(r["new_search_epochs"], r["recovery_epochs"]) for r in result["models_in_order"]] == [(0, 90)] * 3
+    assert [(r["expected_parameters"], r["expected_remaining_channels"]) for r in study["recoveries"]] == [
+        (17076817, 6375), (11282074, 4810), (12566996, 5237)]
+    original = followup.load_study(ROOT / "configs/experiment/pruning_v3/stochastic_st_independent4.yaml")
+    for row in study["recoveries"]:
+        source_row = next(r for r in original["searches"] if r["id"] == row["id"])
+        assert row["source"] == original["output"] + "/" + row["id"] + "/internal/search"
+        assert row["hard_drop"] != .02
+        cfg = followup.configured(study, row, arguments(None))
+        source_cfg = followup.configured(original, source_row, arguments(None))
+        assert OmegaConf.to_container(cfg, resolve=True) == OmegaConf.to_container(source_cfg, resolve=True)
+    assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_recovery3_never_searches_or_waits_and_tests_each_model(tmp_path, monkeypatch, completed):
+    import net_complexity.training.one_shot_pruning as runtime
+    study = followup.load_study(RECOVERY3_CONFIG)
+    args = arguments(tmp_path / "out"); args.skip_wait = False
+    cells = fake_cells(study, args.output, completed)
+    monkeypatch.setattr(followup, "preflight", lambda *a: (args.output, cells))
+    monkeypatch.setattr(followup, "wait_for_original_searches", lambda: pytest.fail("recovery waited for old searches"))
+    def review(source, config, study, row, *, from_old_queue):
+        assert from_old_queue is False
+        return next(cell["review"] for cell in cells if cell["source"] == source)
+    monkeypatch.setattr(followup, "review_source", review)
+    monkeypatch.setattr(followup, "check_completed", lambda *a: {"status": "completed"})
+    events = []
+    class Reporter:
+        def __init__(self, output, ids, device, branches):
+            assert len(ids) == 3 and branches == ("inherited",)
+        def existing(self, path): events.append("existing_test")
+        def callback(self, config): return lambda *a: events.append("test")
+        def finish(self): return {"status": "completed"}
+    monkeypatch.setattr(stochastic_pruning_test, "DeploymentTests", Reporter)
+    def run(config, output, **kwargs):
+        assert "search_only" not in kwargs and "reuse_search_from" in kwargs
+        assert kwargs["bounded_checkpoints"] is True and kwargs["keep_epoch_checkpoints"] is False
+        cell = next(cell for cell in cells if cell["output"] == output)
+        assert kwargs["reuse_search_from"] == cell["source"]
+        events.append("recovery90")
+        kwargs["frozen_deployment_callback"](None, {}, output)
+    monkeypatch.setattr(runtime, "run_one_shot_pruning", run)
+    state = followup.execute(study, args)
+    assert events == (["existing_test"] * 3 if completed else ["recovery90", "test"] * 3)
+    assert state["new_training_epochs_allocated"] == 270 and state["planned_models"] == 3
+    assert len(state["completed_models"]) == 3 and state["status"] == "training_completed"
+    assert not (args.output / "followup.lock").exists()
+
+
+def test_recovery3_missing_third_source_blocks_before_inputs_or_training(tmp_path, monkeypatch):
+    import net_complexity.training.one_shot_pruning as runtime
+    study = followup.load_study(RECOVERY3_CONFIG)
+    monkeypatch.setattr(followup, "ROOT", tmp_path)
+    for row in study["recoveries"][:2]:
+        for filename in followup.SOURCE_FILES:
+            path = tmp_path / row["source"] / filename
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"present")
+    monkeypatch.setattr(followup, "validate_inputs", lambda *a: pytest.fail("inputs read before source presence checked"))
+    monkeypatch.setattr(runtime, "run_one_shot_pruning", lambda *a, **kw: pytest.fail("training entered with missing source"))
+    with pytest.raises(FileNotFoundError, match=study["recoveries"][2]["id"]):
+        followup.execute(study, arguments(tmp_path / "new_output"))
+    assert not (tmp_path / "new_output").exists()
+
+
+def test_recovery3_source_reader_accepts_inherited_recipe_and_checks_channel_pin(tmp_path):
+    study = followup.load_study(RECOVERY3_CONFIG)
+    row = {**study["recoveries"][0], "expected_parameters": 123, "expected_remaining_channels": 7552}
+    cfg = followup.configured(study, row, arguments(None))
+    source = tmp_path / "source"
+    make_source(source, cfg, study, {"id": row["id"]})
+    # The independent search used only inherited, unlike the historical followup5.
+    OmegaConf.save(cfg, source / "resolved_config.yaml")
+    result = followup.review_source(source, cfg, study, row, from_old_queue=False)
+    assert result["physical_parameters"] == 123
+    with pytest.raises(ValueError, match="channels/fallback"):
+        followup.review_source(source, cfg, study, {**row, "expected_remaining_channels": 7551}, from_old_queue=False)
+    with pytest.raises(ValueError, match="Source model/training settings"):
+        followup.review_source(source, cfg, study, row, from_old_queue=True)
+
+
 def test_manifest_budget_and_exact_recipe_diff(tmp_path):
     study = followup.load_study(followup.DEFAULT_CONFIG)
     plan = followup.main(["--dry-run", "--output", str(tmp_path / "absent")])

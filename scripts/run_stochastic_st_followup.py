@@ -1,4 +1,4 @@
-"""Three existing-search recoveries, then two new 60+90 stochastic-ST models."""
+"""Stochastic-ST searches and inherited recoveries with frozen official tests."""
 from __future__ import annotations
 
 import argparse
@@ -27,27 +27,34 @@ DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_followup5.y
 PROTOCOL = "pruning_v3_stochastic_st_followup5_v1"
 FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
 FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
+RECOVERY3_PROTOCOL = "pruning_v3_stochastic_st_recovery3_v1"
 
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
     fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
               "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
-    fresh = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL}
-    require(set(study) == fields | ({"checkpoint_retention"} if fresh else set()), "Invalid followup fields")
-    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL} and study["seed"] == 42
+    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL}
+    require(set(study) == fields | ({"checkpoint_retention"} if bounded else set()), "Invalid followup fields")
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL} and study["seed"] == 42
             and study["config"] == "experiment/pruning_v3/stochastic_st_inherited", "Invalid followup recipe")
-    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2)}
+    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0)}
     require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
-    if fresh:
-        require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Fresh runs require bounded checkpoint storage")
+    if bounded:
+        require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Study requires bounded checkpoint storage")
     ids = []
     for row in study["recoveries"] + study["searches"]:
         fields = {"id", "soft_drop", "hard_drop"}
         if row in study["recoveries"]:
             fields.add("source")
         pins = {"expected_parameters", "selected_epoch", "selected_checkpoint_sha256_prefix"}
-        require(set(row) in (fields, fields | pins) and ("source" in row or not set(row) & pins), "Unknown row settings")
+        if study["protocol"] == RECOVERY3_PROTOCOL:
+            require(set(row) == fields | {"expected_parameters", "expected_remaining_channels"}, "Recovery sources require measured size/channel pins")
+            require(type(row["expected_parameters"]) is int and row["expected_parameters"] > 0
+                    and type(row["expected_remaining_channels"]) is int and 1 <= row["expected_remaining_channels"] <= 7552,
+                    "Invalid measured recovery size/channel pin")
+        else:
+            require(set(row) in (fields, fields | pins) and ("source" in row or not set(row) & pins), "Unknown row settings")
         require(re.fullmatch(r"[A-Za-z0-9_-]+", row["id"]), "Invalid job ID")
         require(type(row["soft_drop"]) in (int, float) and type(row["hard_drop"]) in (int, float)
                 and 0 <= row["soft_drop"] < row["hard_drop"] <= 1, "Invalid accuracy thresholds")
@@ -97,9 +104,17 @@ def review_source(source, config, study, row, *, from_old_queue):
     selection = read_json(source / "selection.json")
     require(mask_hash(selection["pruning_mask"]) == review["mask_hash"], "Saved mask contents differ")
     if "expected_parameters" in row:
-        require(review["physical_parameters"] == row["expected_parameters"] and review["selected_epoch"] == row["selected_epoch"]
+        require(review["physical_parameters"] == row["expected_parameters"],
+                "Measured search identity differs: " + row["id"])
+    if "selected_epoch" in row:
+        require(review["selected_epoch"] == row["selected_epoch"]
                 and review["files"]["selected_checkpoint.pt"].startswith(row["selected_checkpoint_sha256_prefix"]),
                 "Measured search identity differs: " + row["id"])
+    if "expected_remaining_channels" in row:
+        from plot_pruning_channels import channel_rows
+        remaining = sum(r["preserved"] for r in channel_rows(selection["pruning_mask"]))
+        require(remaining == row["expected_remaining_channels"] and not review["fallback_used"],
+                "Measured source channels/fallback differ: " + row["id"])
     payload = torch.load(source / "selected_checkpoint.pt", map_location="cpu", weights_only=True)
     require(payload["epoch"] == review["selected_epoch"]
             and state_hash(payload["model_state_dict"]) == review["selected_model_state_hash"] == payload["model_state_hash"],
@@ -155,7 +170,7 @@ def preflight(study, args):
             and inputs["initializer_model_state_hash"] == study["initializer_model_state_hash"], "Immutable reference inputs changed")
     for cell in cells:
         cell["review"] = review_source(cell["source"], cell["config"], study, cell["row"],
-                                       from_old_queue=cell["existing"]) if cell["source"].exists() else None
+                                       from_old_queue=cell["existing"] and study["protocol"] == PROTOCOL) if cell["source"].exists() else None
         cell["completed"] = check_completed(cell["output"], cell["config"], cell["review"]) if cell["output"].exists() else None
     return output, cells
 
@@ -283,13 +298,14 @@ def execute(study, args):
             "Search-only requires a fresh two- or four-model study without existing-source recoveries")
     new_epochs = len(study["searches"]) * 60 if search_only else len(study["recoveries"]) * 90 + len(study["searches"]) * 150
     bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
+    wait_original = not args.skip_wait and study["protocol"] != RECOVERY3_PROTOCOL
     configs = [configured(study, row, args) for row in rows]
     block = configs[0].model.backbone.resnet_block
     plan = {"stage": args.stage, "models": model_count, "existing_search_recoveries": len(study["recoveries"]), "new_searches": len(study["searches"]),
             "recovery_branches_per_model": [] if search_only else ["inherited"],
             "new_training_epochs": new_epochs if args.stage in {"run", "search"} else 0,
             "bounded_epoch_checkpoints": bounded,
-            "per_model_total_epochs": 150, "test_after_each_model": not search_only, "wait_for_original_search_process": not args.skip_wait,
+            "per_model_total_epochs": 150, "test_after_each_model": not search_only, "wait_for_original_search_process": wait_original,
             "search_gate_modes": {key: block[key] for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature")},
             "models_in_order": [{"id": row["id"], "new_search_epochs": 0 if "source" in row else 60,
                                   "recovery_epochs": 0 if search_only else 90,
@@ -307,9 +323,11 @@ def execute(study, args):
         for target in targets:
             tester.existing(target)
         return tester.finish()
-    if args.stage in {"run", "search"} and not args.skip_wait:
+    if args.stage in {"run", "search"} and wait_original:
         wait_for_original_searches()
     output, cells = preflight(study, args)
+    require(study["protocol"] != RECOVERY3_PROTOCOL or all(cell["existing"] and cell["review"] is not None for cell in cells),
+            "Recovery-only requires all three completed sources; search training is forbidden")
     source_review = {cell["row"]["id"]: cell["review"] for cell in cells if cell["existing"]}
     for name, review in source_review.items():
         print(f"[source] {name}: selected_epoch={review['selected_epoch']}; "
@@ -340,12 +358,14 @@ def execute(study, args):
                     tester.existing(cell["output"])
                 else:
                     if cell["review"] is None:
+                        require(study["protocol"] != RECOVERY3_PROTOCOL, "Recovery-only cannot start a new search")
                         print(f"[followup] {row['id']}: new stochastic-ST search60", flush=True)
                         run_one_shot_pruning(config, cell["source"], search_only=True,
                                              **({"bounded_checkpoints": True, "keep_epoch_checkpoints": False} if bounded else {}))
                         cell["review"] = review_source(cell["source"], config, study, row, from_old_queue=False)
                     else:
-                        require(review_source(cell["source"], config, study, row, from_old_queue=cell["existing"])
+                        require(review_source(cell["source"], config, study, row,
+                                              from_old_queue=cell["existing"] and study["protocol"] == PROTOCOL)
                                 == cell["review"], "Source changed after all-source preflight")
                     print(f"[followup] {row['id']}: inherited recovery90, parameters={cell['review']['physical_parameters']:,}; no search rerun", flush=True)
                     run_one_shot_pruning(config, cell["output"], reuse_search_from=cell["source"],
