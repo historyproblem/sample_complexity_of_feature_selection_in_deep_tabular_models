@@ -31,19 +31,22 @@ FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
 FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
 RECOVERY3_PROTOCOL = "pruning_v3_stochastic_st_recovery3_v1"
 TIMING12_PROTOCOL = "pruning_v3_stochastic_st_timing12_v1"
+TIMING_RECOVERY8_PROTOCOL = "pruning_v3_stochastic_st_timing_recovery8_v1"
+RECOVERY_PROTOCOLS = {RECOVERY3_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}
 
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
     fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
               "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
-    timing = study.get("protocol") == TIMING12_PROTOCOL
-    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL, TIMING12_PROTOCOL}
+    timing = study.get("protocol") in {TIMING12_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}
+    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
     require(set(study) == fields | ({"checkpoint_retention"} if bounded else set()), "Invalid followup fields")
     config_name = "experiment/pruning_v3/stochastic_st_timing" if timing else "experiment/pruning_v3/stochastic_st_inherited"
-    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL, TIMING12_PROTOCOL}
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
             and study["seed"] == 42 and study["config"] == config_name, "Invalid followup recipe")
-    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0), TIMING12_PROTOCOL: (0, 12)}
+    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0),
+              TIMING12_PROTOCOL: (0, 12), TIMING_RECOVERY8_PROTOCOL: (8, 0)}
     require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
     if bounded:
         require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Study requires bounded checkpoint storage")
@@ -59,7 +62,16 @@ def load_study(path):
         if row in study["recoveries"]:
             fields.add("source")
         pins = {"expected_parameters", "selected_epoch", "selected_checkpoint_sha256_prefix"}
-        if study["protocol"] == RECOVERY3_PROTOCOL:
+        if study["protocol"] == TIMING_RECOVERY8_PROTOCOL:
+            require(set(row) == fields | {"expected_parameters", "expected_remaining_channels", "expected_fallback",
+                                         "selected_epoch", "expected_validation_accuracy"}, "Timing recovery sources require measured pins")
+            require(type(row["expected_parameters"]) is int and row["expected_parameters"] > 0
+                    and type(row["expected_remaining_channels"]) is int and 1 <= row["expected_remaining_channels"] <= 7552
+                    and type(row["expected_fallback"]) is bool and type(row["selected_epoch"]) is int
+                    and 31 <= row["selected_epoch"] <= 60
+                    and type(row["expected_validation_accuracy"]) in (int, float)
+                    and 0 <= row["expected_validation_accuracy"] <= 1, "Invalid timing recovery source pins")
+        elif study["protocol"] == RECOVERY3_PROTOCOL:
             require(set(row) == fields | {"expected_parameters", "expected_remaining_channels"}, "Recovery sources require measured size/channel pins")
             require(type(row["expected_parameters"]) is int and row["expected_parameters"] > 0
                     and type(row["expected_remaining_channels"]) is int and 1 <= row["expected_remaining_channels"] <= 7552,
@@ -79,7 +91,7 @@ def load_study(path):
                     and re.fullmatch(r"[a-f0-9]{16}", row["selected_checkpoint_sha256_prefix"]), "Invalid measured source pin")
         ids.append(row["id"])
     require(len(set(ids)) == len(ids), "Duplicate job IDs")
-    if timing:
+    if study["protocol"] == TIMING12_PROTOCOL:
         combinations = {(row["warmup"], row["lambda_init"], row["soft_drop"]) for row in study["searches"]}
         require(combinations == set(product((10, 15), (.001, .01), (.005, .01, .015))), "Timing grid must contain all12 Cartesian combinations")
     require(set(study["reference_sha256"]) == {"history_path", "state_path", "config_path", "initializer_path"}, "Reference files must be pinned")
@@ -94,7 +106,7 @@ def configured(study, row, args):
         f"training_arguments.adaptive_lambda.soft_drop={row['soft_drop']}",
         f"training_arguments.adaptive_lambda.hard_drop={row['hard_drop']}",
     ]
-    if study["protocol"] == TIMING12_PROTOCOL:
+    if study["protocol"] in {TIMING12_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}:
         overrides += [f"model.lambda_coef={row['lambda_init']}",
                       f"training_arguments.adaptive_lambda.alpha_init={row['lambda_init']}",
                       f"training_arguments.adaptive_lambda.initial_search_warmup={row['warmup']}"]
@@ -139,14 +151,20 @@ def review_source(source, config, study, row, *, from_old_queue):
         require(review["physical_parameters"] == row["expected_parameters"],
                 "Measured search identity differs: " + row["id"])
     if "selected_epoch" in row:
-        require(review["selected_epoch"] == row["selected_epoch"]
-                and review["files"]["selected_checkpoint.pt"].startswith(row["selected_checkpoint_sha256_prefix"]),
+        require(review["selected_epoch"] == row["selected_epoch"],
+                "Measured search identity differs: " + row["id"])
+    if "selected_checkpoint_sha256_prefix" in row:
+        require(review["files"]["selected_checkpoint.pt"].startswith(row["selected_checkpoint_sha256_prefix"]),
                 "Measured search identity differs: " + row["id"])
     if "expected_remaining_channels" in row:
         from plot_pruning_channels import channel_rows
         remaining = sum(r["preserved"] for r in channel_rows(selection["pruning_mask"]))
-        require(remaining == row["expected_remaining_channels"] and not review["fallback_used"],
+        require(remaining == row["expected_remaining_channels"]
+                and review["fallback_used"] == row.get("expected_fallback", False),
                 "Measured source channels/fallback differ: " + row["id"])
+    if "expected_validation_accuracy" in row:
+        require(math.isclose(review["validation_accuracy"], row["expected_validation_accuracy"], rel_tol=0, abs_tol=1e-12),
+                "Measured source validation differs: " + row["id"])
     payload = torch.load(source / "selected_checkpoint.pt", map_location="cpu", weights_only=True)
     require(payload["epoch"] == review["selected_epoch"]
             and state_hash(payload["model_state_dict"]) == review["selected_model_state_hash"] == payload["model_state_hash"],
@@ -195,7 +213,7 @@ def preflight(study, args):
         cells.append({"row": row, "existing": existing, "source": source,
                       "output": output / row["id"] / "internal/recovery", "config": configured(study, row, args)})
     if missing:
-        raise FileNotFoundError("Finish all three original searches before followup training:\n" + "\n".join(missing)
+        raise FileNotFoundError("All selected original searches must be complete before recovery:\n" + "\n".join(missing)
                                 + "\nNo new search or recovery has started.")
     inputs = validate_inputs(cells[0]["config"])
     require(inputs["sha256"] == study["reference_sha256"]
@@ -337,7 +355,7 @@ def execute(study, args):
             "Search-only requires a fresh two- or four-model study without existing-source recoveries")
     new_epochs = len(study["searches"]) * 60 if search_only else len(study["recoveries"]) * 90 + len(study["searches"]) * 150
     bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
-    wait_original = not args.skip_wait and study["protocol"] != RECOVERY3_PROTOCOL
+    wait_original = not args.skip_wait and study["protocol"] not in RECOVERY_PROTOCOLS
     configs = [configured(study, row, args) for row in rows]
     block = configs[0].model.backbone.resnet_block
     plan = {"stage": args.stage, "models": model_count, "existing_search_recoveries": len(study["recoveries"]), "new_searches": len(study["searches"]),
@@ -349,7 +367,7 @@ def execute(study, args):
             "models_in_order": [{"id": row["id"], "new_search_epochs": 0 if "source" in row else 60,
                                   "recovery_epochs": 0 if search_only else 90,
                                   "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"],
-                                  **(timing_details(config) if study["protocol"] == TIMING12_PROTOCOL else {})}
+                                  **(timing_details(config) if study["protocol"] in {TIMING12_PROTOCOL, TIMING_RECOVERY8_PROTOCOL} else {})}
                                  for row, config in zip(rows, configs)]}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
@@ -369,8 +387,8 @@ def execute(study, args):
     if args.stage in {"run", "search"} and wait_original:
         wait_for_original_searches()
     output, cells = preflight(study, args)
-    require(study["protocol"] != RECOVERY3_PROTOCOL or all(cell["existing"] and cell["review"] is not None for cell in cells),
-            "Recovery-only requires all three completed sources; search training is forbidden")
+    require(study["protocol"] not in RECOVERY_PROTOCOLS or all(cell["existing"] and cell["review"] is not None for cell in cells),
+            "Recovery-only requires every selected completed source; search training is forbidden")
     source_review = {cell["row"]["id"]: cell["review"] for cell in cells if cell["existing"]}
     for name, review in source_review.items():
         print(f"[source] {name}: selected_epoch={review['selected_epoch']}; "
@@ -401,7 +419,7 @@ def execute(study, args):
                     tester.existing(cell["output"])
                 else:
                     if cell["review"] is None:
-                        require(study["protocol"] != RECOVERY3_PROTOCOL, "Recovery-only cannot start a new search")
+                        require(study["protocol"] not in RECOVERY_PROTOCOLS, "Recovery-only cannot start a new search")
                         print(f"[followup] {row['id']}: new stochastic-ST search60", flush=True)
                         run_one_shot_pruning(config, cell["source"], search_only=True,
                                              **({"bounded_checkpoints": True, "keep_epoch_checkpoints": False} if bounded else {}))

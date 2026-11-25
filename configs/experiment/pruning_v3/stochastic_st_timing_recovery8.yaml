@@ -1,0 +1,104 @@
+# Eight90-epoch inherited recoveries from the completed timing12 searches; no new search.
+protocol: pruning_v3_stochastic_st_timing_recovery8_v1
+config: experiment/pruning_v3/stochastic_st_timing
+reference_output: outputs/runs/pruning_stochastic_full4_20261121/reference_inputs
+output: outputs/runs/pruning_stochastic_timing_recovery8_20261125
+seed: 42
+checkpoint_retention: online_validation_winner_best_last
+reference_sha256:
+  history_path: 8a8f8e3ea6fb593d471cdfa9132ea9771795dae45028d7fc7d35293c6b2eba26
+  state_path: 33cf79a489e77b1d7dfa5c3118e103fc56b9ab86523e6bd67d8b1db8490963b9
+  config_path: a7fba16e46a1cecf792f4fa0330319480c13c44b4e1d0f32a02b7026ffb01b09
+  initializer_path: 17c20512b6fb0822e5b37f7ba3b2bb3bb26705823c65f34ce553c73775f42342
+initializer_model_state_hash: 4cbb6127d128c76362c717bd6c3ea96d248c1ecaf0df90a2b54c0b468cac044e
+split_indices_hash: 0e014034dd7ffb459c07bf57c1b0a8945f9b33208f3ca6c4adb91106b0b5aaf0
+searches: []
+recoveries:
+- id: w10_l010_s010
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l010_s010/internal/search
+  warmup: 10
+  lambda_init: 0.01
+  soft_drop: 0.01
+  hard_drop: 0.03
+  expected_parameters: 5110943
+  expected_remaining_channels: 1688
+  selected_epoch: 60
+  expected_validation_accuracy: 0.907
+  expected_fallback: false
+- id: w10_l010_s015
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l010_s015/internal/search
+  warmup: 10
+  lambda_init: 0.01
+  soft_drop: 0.015
+  hard_drop: 0.03
+  expected_parameters: 5174199
+  expected_remaining_channels: 1700
+  selected_epoch: 47
+  expected_validation_accuracy: 0.8908
+  expected_fallback: false
+- id: w10_l010_s005
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l010_s005/internal/search
+  warmup: 10
+  lambda_init: 0.01
+  soft_drop: 0.005
+  hard_drop: 0.03
+  expected_parameters: 6415681
+  expected_remaining_channels: 2477
+  selected_epoch: 38
+  expected_validation_accuracy: 0.894
+  expected_fallback: false
+- id: w10_l001_s015
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l001_s015/internal/search
+  warmup: 10
+  lambda_init: 0.001
+  soft_drop: 0.015
+  hard_drop: 0.03
+  expected_parameters: 7045869
+  expected_remaining_channels: 2869
+  selected_epoch: 60
+  expected_validation_accuracy: 0.8894
+  expected_fallback: false
+- id: w10_l001_s010
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l001_s010/internal/search
+  warmup: 10
+  lambda_init: 0.001
+  soft_drop: 0.01
+  hard_drop: 0.03
+  expected_parameters: 7398628
+  expected_remaining_channels: 3037
+  selected_epoch: 60
+  expected_validation_accuracy: 0.8868
+  expected_fallback: true
+- id: w10_l001_s005
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w10_l001_s005/internal/search
+  warmup: 10
+  lambda_init: 0.001
+  soft_drop: 0.005
+  hard_drop: 0.03
+  expected_parameters: 7983520
+  expected_remaining_channels: 3292
+  selected_epoch: 60
+  expected_validation_accuracy: 0.887
+  expected_fallback: true
+- id: w15_l010_s005
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w15_l010_s005/internal/search
+  warmup: 15
+  lambda_init: 0.01
+  soft_drop: 0.005
+  hard_drop: 0.03
+  expected_parameters: 9680738
+  expected_remaining_channels: 4172
+  selected_epoch: 47
+  expected_validation_accuracy: 0.8924
+  expected_fallback: false
+- id: w15_l001_s005
+  source: outputs/runs/pruning_stochastic_timing12_20261125/w15_l001_s005/internal/search
+  warmup: 15
+  lambda_init: 0.001
+  soft_drop: 0.005
+  hard_drop: 0.03
+  expected_parameters: 11883222
+  expected_remaining_channels: 5018
+  selected_epoch: 49
+  expected_validation_accuracy: 0.8904
+  expected_fallback: false
