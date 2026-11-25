@@ -19,6 +19,7 @@ from .accuracy_guided_config import (
 
 PROTOCOL = "pruning_v3_one_shot_60_90"
 ABLATION_PROTOCOL = "pruning_v3_size_ablations_60_90"
+TIMING_ABLATION = "warmup_init_grid_v1"
 HANDOFF_PROTOCOL = "pruning_v3_optimizer_scheduler_handoff_60_90"
 MAPPED_REPEATS_PROTOCOL = "pruning_v3_mapped_optimizer_fresh_scheduler_repeats2_60_90"
 QUALITY_RECOVERY_PROTOCOL = "pruning_v3_quality_recovery_single_60_90"
@@ -103,12 +104,17 @@ def validate_config(config):
     _require(isinstance(one, dict), "one_shot mapping is required")
     protocol = one.get("protocol")
     if protocol == ABLATION_PROTOCOL:
+        timing = "lambda_timing_ablation" in one
+        if timing:
+            _require(one["lambda_timing_ablation"] == TIMING_ABLATION, "unknown lambda timing ablation")
         _keys = {
             "protocol", "search_epochs", "final_epochs", "branches",
             "scratch_initialization", "inherited_optimizer_state", "random_mask_seed",
             "search_scheduler_eta_min", "search_selection_last_epochs",
             "search_selection_bn_calibration_batches",
         }
+        if timing:
+            _keys.add("lambda_timing_ablation")
         _require(set(one) == _keys, "size-ablation fields differ")
         block = plain["model"]["backbone"]["resnet_block"]
         internal = block.get("gate_internal_width") is True and block.get("gate_output") is False
@@ -119,6 +125,7 @@ def validate_config(config):
                      "stochastic size ablations require internal gates, Gumbel beta=1 and temperature=1")
         inherited_stochastic = (internal and block.get("train_gate_mode") == "gumbel_hard"
                                 and one["branches"] == ["inherited"])
+        _require(not timing or inherited_stochastic, "timing grid requires inherited-only internal stochastic ST")
         _require(inherited_stochastic
                  or one["branches"] == (["inherited", "scratch", "random"] if internal else ["inherited"]),
                  "size-ablation branches differ from the gate placement")
@@ -144,11 +151,15 @@ def validate_config(config):
                  and plain["optimizer"]["weight_decay"] == 0.0005
                  and plain["scheduler"]["eta_min"] == 0, "size-ablation optimizer recipe changed")
         adaptive = plain["training_arguments"]["adaptive_lambda"]
-        _require(adaptive["alpha_init"] == 0.001 and adaptive["alpha_min"] == 1e-8
+        allowed_initial = (0.001, 0.01) if timing else (0.001,)
+        _require(adaptive["alpha_init"] in allowed_initial and adaptive["alpha_min"] == 1e-8
                  and adaptive["alpha_max"] == 80,
-                 "size-ablation lambda initialization and bounds must remain 0.001 / 1e-8 / 80")
+                 "size-ablation lambda initialization and bounds differ from the authorized study")
+        if timing:
+            _require(plain["model"]["lambda_coef"] == adaptive["alpha_init"], "model/controller initial lambda differ")
         if not plain["accuracy_guided"]["smoke"]:
-            _require(adaptive["initial_search_warmup"] == 10 and adaptive["log_step"] == "auto"
+            allowed_warmup = (10, 15) if timing else (10,)
+            _require(adaptive["initial_search_warmup"] in allowed_warmup and adaptive["log_step"] == "auto"
                      and adaptive["update_every_search_epochs"] == 1,
                      "size-ablation adaptive controller recipe changed")
     elif protocol in SEARCH_PROTOCOLS:

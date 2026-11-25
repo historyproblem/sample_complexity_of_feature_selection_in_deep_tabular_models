@@ -46,10 +46,10 @@ def prepare_reference(study, args):
     return destination
 
 
-def main(argv=None):
+def main(argv=None, *, default_config=DEFAULT_CONFIG, default_stage="run"):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--stage", choices=("run", "search", "inspect", "test"), default="run")
+    parser.add_argument("--config", type=Path, default=default_config)
+    parser.add_argument("--stage", choices=("run", "search", "inspect", "test"), default=default_stage)
     parser.add_argument("--reference-archive", type=Path, default=queue.ROOT / REFERENCE_ARCHIVE)
     parser.add_argument("--dense-source", type=Path)
     parser.add_argument("--output", type=Path)
@@ -59,8 +59,10 @@ def main(argv=None):
     args.skip_wait, args.keep_epoch_checkpoints = True, False
     try:
         study = queue.load_study(args.config)
-        queue.require(study["protocol"] in {queue.FULL4_PROTOCOL, queue.FULL2_PROTOCOL},
-                      "This launcher requires a two- or four-full-model configuration")
+        queue.require(study["protocol"] in {queue.FULL4_PROTOCOL, queue.FULL2_PROTOCOL, queue.TIMING12_PROTOCOL},
+                      "This launcher requires a fresh full-model or timing-grid configuration")
+        queue.require(study["protocol"] != queue.TIMING12_PROTOCOL or args.stage in {"search", "inspect"},
+                      "Timing12 is search-only; recovery/test require a separate explicit launch")
         if not args.dry_run and args.stage != "test":
             prepare_reference(study, args)
         result = queue.execute(study, args)

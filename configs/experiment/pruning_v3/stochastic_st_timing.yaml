@@ -1,0 +1,8 @@
+# @package _global_
+# User-authorized warmup/init ablation; all other numeric settings are inherited.
+defaults:
+  - /experiment/pruning_v3/stochastic_st_inherited
+  - _self_
+
+one_shot:
+  lambda_timing_ablation: warmup_init_grid_v1

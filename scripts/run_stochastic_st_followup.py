@@ -5,7 +5,9 @@ import argparse
 from contextlib import contextmanager
 from copy import deepcopy
 import csv
+from itertools import product
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -28,23 +30,32 @@ PROTOCOL = "pruning_v3_stochastic_st_followup5_v1"
 FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
 FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
 RECOVERY3_PROTOCOL = "pruning_v3_stochastic_st_recovery3_v1"
+TIMING12_PROTOCOL = "pruning_v3_stochastic_st_timing12_v1"
 
 
 def load_study(path):
     study = yaml.safe_load(Path(path).read_text())
     fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
               "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
-    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL}
+    timing = study.get("protocol") == TIMING12_PROTOCOL
+    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL, TIMING12_PROTOCOL}
     require(set(study) == fields | ({"checkpoint_retention"} if bounded else set()), "Invalid followup fields")
-    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL} and study["seed"] == 42
-            and study["config"] == "experiment/pruning_v3/stochastic_st_inherited", "Invalid followup recipe")
-    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0)}
+    config_name = "experiment/pruning_v3/stochastic_st_timing" if timing else "experiment/pruning_v3/stochastic_st_inherited"
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, RECOVERY3_PROTOCOL, TIMING12_PROTOCOL}
+            and study["seed"] == 42 and study["config"] == config_name, "Invalid followup recipe")
+    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0), TIMING12_PROTOCOL: (0, 12)}
     require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
     if bounded:
         require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Study requires bounded checkpoint storage")
     ids = []
     for row in study["recoveries"] + study["searches"]:
         fields = {"id", "soft_drop", "hard_drop"}
+        if timing:
+            fields |= {"lambda_init", "warmup"}
+            require(type(row.get("warmup")) is int and row["warmup"] in (10, 15)
+                    and type(row.get("lambda_init")) in (int, float) and row["lambda_init"] in (.001, .01)
+                    and row["soft_drop"] in (.005, .01, .015) and row["hard_drop"] == .03,
+                    "Timing rows must use the authorized warmup/init/threshold grid")
         if row in study["recoveries"]:
             fields.add("source")
         pins = {"expected_parameters", "selected_epoch", "selected_checkpoint_sha256_prefix"}
@@ -68,6 +79,9 @@ def load_study(path):
                     and re.fullmatch(r"[a-f0-9]{16}", row["selected_checkpoint_sha256_prefix"]), "Invalid measured source pin")
         ids.append(row["id"])
     require(len(set(ids)) == len(ids), "Duplicate job IDs")
+    if timing:
+        combinations = {(row["warmup"], row["lambda_init"], row["soft_drop"]) for row in study["searches"]}
+        require(combinations == set(product((10, 15), (.001, .01), (.005, .01, .015))), "Timing grid must contain all12 Cartesian combinations")
     require(set(study["reference_sha256"]) == {"history_path", "state_path", "config_path", "initializer_path"}, "Reference files must be pinned")
     for value in [*study["reference_sha256"].values(), study["initializer_model_state_hash"], study["split_indices_hash"]]:
         require(re.fullmatch(r"[a-f0-9]{64}", value), "Invalid reference checksum")
@@ -76,15 +90,33 @@ def load_study(path):
 
 def configured(study, row, args):
     reference = Path(args.dense_source or ROOT / study["reference_output"]).resolve()
-    config = compose_config(study["config"], [
+    overrides = [
         f"training_arguments.adaptive_lambda.soft_drop={row['soft_drop']}",
         f"training_arguments.adaptive_lambda.hard_drop={row['hard_drop']}",
-    ], dense_source=reference)
+    ]
+    if study["protocol"] == TIMING12_PROTOCOL:
+        overrides += [f"model.lambda_coef={row['lambda_init']}",
+                      f"training_arguments.adaptive_lambda.alpha_init={row['lambda_init']}",
+                      f"training_arguments.adaptive_lambda.initial_search_warmup={row['warmup']}"]
+    config = compose_config(study["config"], overrides, dense_source=reference)
     if args.device:
         config.device = args.device
     validate_config(config)
     require(list(config.one_shot.branches) == ["inherited"], "Only the inherited main-method branch is allowed")
     return config
+
+
+def timing_details(config):
+    """Resolve the same automatic step used by the 60-epoch training stage."""
+    from net_complexity.training.engine import _resolve_adaptive_lambda_log_step_init
+    arguments = deepcopy(config.training_arguments)
+    arguments.num_epochs = int(config.one_shot.search_epochs)
+    adaptive = arguments.adaptive_lambda
+    step = _resolve_adaptive_lambda_log_step_init(arguments, OmegaConf.create({"log_step_init": "auto"}),
+        initial_lambda_coef=float(config.model.lambda_coef), warmup_epochs=int(adaptive.initial_search_warmup),
+        update_every_epochs=int(adaptive.update_every_search_epochs))
+    return {"lambda_init": float(config.model.lambda_coef), "warmup": int(adaptive.initial_search_warmup),
+            "resolved_log_step": step, "lambda_update_factor": math.exp(step)}
 
 
 def review_source(source, config, study, row, *, from_old_queue):
@@ -246,6 +278,10 @@ def run_searches(study, cells, output, bounded):
         write_json(output / "search_state.json", state)
         for cell in cells:
             row, config = cell["row"], cell["config"]
+            timing = timing_details(config) if study["protocol"] == TIMING12_PROTOCOL else {}
+            if timing:
+                print(f"[timing] {row['id']}: lambda_init={timing['lambda_init']:g}; warmup={timing['warmup']}; "
+                      f"log_step={timing['resolved_log_step']:.9g}; update_factor={timing['lambda_update_factor']:.6g}", flush=True)
             if cell["review"] is None:
                 print(f"[search-only] {row['id']}: new stochastic-ST search60; recovery deferred", flush=True)
                 run_one_shot_pruning(config, cell["source"], search_only=True,
@@ -263,6 +299,7 @@ def run_searches(study, cells, output, bounded):
                        "original_internal_channels": sum(r["original"] for r in channels),
                        "search_validation_accuracy": review["validation_accuracy"],
                        "fallback_used": review["fallback_used"]}
+            summary.update(timing)
             summaries.append(summary)
             write_json(output / "search_summary.json", {"test_evaluated": False, "searches": summaries})
             with (output / "search_summary.csv").open("w", newline="") as stream:
@@ -294,7 +331,9 @@ def execute(study, args):
     rows = study["recoveries"] + study["searches"]
     model_count = len(rows)
     search_only = args.stage == "search"
-    require(not search_only or (study["protocol"] in {FULL4_PROTOCOL, FULL2_PROTOCOL} and not study["recoveries"]),
+    require(study["protocol"] != TIMING12_PROTOCOL or args.stage in {"search", "inspect"},
+            "Timing12 is search-only; recovery/test require a separate explicit launch")
+    require(not search_only or (study["protocol"] in {FULL4_PROTOCOL, FULL2_PROTOCOL, TIMING12_PROTOCOL} and not study["recoveries"]),
             "Search-only requires a fresh two- or four-model study without existing-source recoveries")
     new_epochs = len(study["searches"]) * 60 if search_only else len(study["recoveries"]) * 90 + len(study["searches"]) * 150
     bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
@@ -309,10 +348,14 @@ def execute(study, args):
             "search_gate_modes": {key: block[key] for key in ("train_gate_mode", "eval_gate_mode", "beta", "temperature")},
             "models_in_order": [{"id": row["id"], "new_search_epochs": 0 if "source" in row else 60,
                                   "recovery_epochs": 0 if search_only else 90,
-                                  "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"]} for row in rows]}
+                                  "soft_drop": row["soft_drop"], "hard_drop": row["hard_drop"],
+                                  **(timing_details(config) if study["protocol"] == TIMING12_PROTOCOL else {})}
+                                 for row, config in zip(rows, configs)]}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return plan
+    if study["protocol"] == TIMING12_PROTOCOL and search_only:
+        print(f"[timing-grid] {model_count} searches x60 = {new_epochs} search epochs; recovery=0; official_test=0", flush=True)
     output = Path(args.output or ROOT / study["output"]).resolve()
     if args.stage == "test":
         from stochastic_pruning_test import DeploymentTests
