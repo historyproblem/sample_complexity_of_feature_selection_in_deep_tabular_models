@@ -1,53 +1,36 @@
-\subsection{Iterative Pruning Procedure}
+\subsection{Single-Pass and Iterative Composition}
 \label{sec:iterative-method}
 
-\paragraph{Algorithm overview.}
-Algorithm~\ref{alg:iterative-pruning} specifies the iterative procedure
-with input-independent gates. As in
-Algorithm~\ref{alg:accuracy-guided-pruning}, $T_s,T_r$ are the search
-and recovery budgets. The procedure repeats these phases for at most
-$N$ cycles, carrying a set $D$ of permanently disabled channels.
-The initialization policy $\mathcal I$ specifies the starting weights
-for each phase. Numerical training and controller settings are given in
-Sections~\ref{sec:mbv2-iterative-implementation}--\ref{sec:resnet-iterative-implementation}.
+Both procedures apply Search, Checkpoint Selection and Recovery
+(Algorithms~\ref{alg:search-phase}--\ref{alg:recovery-phase}) in that order.
+The selection and recovery policies are independent of the architecture.
+Table~\ref{tab:method-hyperparameters} and
+Appendices~\ref{app:implementation-mobilenetv2}--\ref{app:implementation-resnet50}
+specify the policies used in each experiment.
 
-Let $(\theta_t,\phi_t)$ denote the saved search checkpoint, with
-$\theta_t$ including weights and BatchNorm statistics and $\phi_t$ the gate
-logits. Each cycle selects channels from the final checkpoint
-$(\theta_{T_s},\phi_{T_s})$. For input-independent gates, the channel
-scores satisfy $\overline r_{l,c}=r_{l,c}$.
-The operator $\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$ considers
-remaining channels with $r_{l,c}<\varepsilon_{\mathrm{prune}}$ in threshold
-mode, or all remaining channels in budget-only mode. If every remaining
-channel of a group qualifies, it excludes one with maximal score,
-retaining at least one channel per group. The experimental tables denote
-$\varepsilon_{\mathrm{prune}}$ by $\tau$.
+\paragraph{Single-pass pruning.}
+Start with $D=\varnothing$ and execute the three phases once.
+The reported one-shot ResNet configuration uses history-feasible
+selection over the second half of search, with fallback over the same
+window, and inherits selected search weights for recovery.
+The reported one-pass MobileNetV2 configuration instead uses final-score
+selection and restarts recovery from surviving ImageNet slices.
+Thus one pass does not prescribe a unique checkpoint-selection policy.
 
-Selection processes candidates in increasing score order. The optional
-budget is $B=\rho P_{\mathrm{probe}}$, where $P_{\mathrm{probe}}$ counts
-parameters in the full-width gated model. The estimated removal cost
-$c(l,c)$ includes associated convolutional and normalization parameters.
-These additive costs are approximate; $\rho$ is a removal cap rather
-than an achieved compression ratio. Candidates exceeding the remaining
-budget are skipped.
+\paragraph{Iterative pruning.}
+Start with $D=\varnothing$ and an empty recovery trajectory. At each cycle,
+run Search with a fresh network, gates, optimizer, scheduler and controller,
+masking $D$ permanently. Apply final-score selection to obtain additional
+removals $R$, update $D\gets D\cup R$, and run Recovery with restart.
+Append its best validation checkpoint to the trajectory. Stop after
+recovery if $R=\varnothing$, or after the maximum $N$ cycles.
+Return the trajectory; its last element is the final model.
+Only the disabled-channel set passes between phases and cycles:
+search weights do not initialize recovery, and recovery weights do not
+initialize the next search. MobileNetV2 reloads ImageNet weights, whereas
+ResNet starts from random weights. Setting $N=1$ gives the one-cycle
+variant of this procedure.
 
-After selection, $\operatorname{Compact}(\theta_{T_s},m)$ physically
-removes discarded channels and gates using the cumulative mask $m$.
-The operator $\operatorname{Initialize}(g,\mathcal I)$ then replaces
-its weights according to $\mathcal I$. Recovery uses a fresh optimizer
-and scheduler for $T_r$ epochs and saves the checkpoint with the highest
-validation accuracy. Only $D$ passes to the next cycle.
-
-
-
-For MobileNetV2, $\mathcal I$ reloads ImageNet weights for every phase,
-using the surviving channel slices for recovery and a fresh classifier.
-For iterative ResNet-50, every search and recovery phase starts with
-random weights. Thus only $D$ passes between phases and cycles; recovery
-does not inherit search weights or initialize the next search.
-Candidates that exceed the remaining budget are skipped. The procedure
-stops after recovery if no new removal was accepted, or after $N$ cycles.
-Validation selects recovery checkpoints, rather than vetoing individual
-channel removals. One-pass MobileNetV2 sets $N=1$ and retains these
-selection and initialization rules.
-
+Validation selects recovery checkpoints in both compositions. Under
+final-score selection it does not veto individual channel removals;
+under history-feasible selection it tests candidate masks before recovery.

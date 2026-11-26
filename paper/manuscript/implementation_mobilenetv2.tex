@@ -3,7 +3,7 @@
 
 \subsection{Iterative Pruning}
 \label{sec:mbv2-iterative-implementation}
-The iterative run uses Algorithm~\ref{alg:iterative-pruning} with
+The iterative run uses the iterative composition in Section~\ref{sec:iterative-method} with
 the phase budgets in Table~\ref{tab:pruning-schedules}. Search and recovery restart from ImageNet
 weights; only the removed-channel set passes between phases. Each recovery
 phase contributes one validation-selected model to the trajectory.
@@ -46,23 +46,9 @@ section is simply $\overline r_{l,c}=r_{l,c}$.
 % PrunedGumbelInvertedResidual; ours_iterative_channels configuration.
 
 \paragraph{Objective and normalization.}
-Let $M$ be the number of gate groups and $\mathcal C_j$ the
-$C_j>0$ channels in group $j$ not
-permanently masked in the current search phase. Hidden and output
-gates form separate groups. We average within groups, then across them:
-\begin{equation}
-S(r_\phi)=\frac{1}{M}\sum_{j=1}^{M}\frac{1}{C_j}
-\sum_{c\in\mathcal C_j}r_{j,c}.
-\label{eq:mbv2-regularizer-means}
-\end{equation}
-The implemented objective is
-\begin{equation}
-\mathcal J_{\mathrm{impl}}
-=\mathcal L_{\mathrm{CE}}+\lambda S(r_\phi).
-\label{eq:mbv2-implemented-objective}
-\end{equation}
-Each group has equal weight, giving coefficient $\lambda/(MC_j)$
-to each channel. The reported coefficients use this normalization.
+Hidden and output gates form separate groups in the shared objective
+of Appendix~\ref{app:shared-loss}. Group means include only channels
+that are not permanently disabled. The final runs use $\beta=0$.
 
 \paragraph{Adaptive sparsity.}
 The controller holds $\lambda$ fixed during warmup, then updates it at
@@ -82,7 +68,7 @@ $\lambda$ is not increased.
 % Source: adaptive_lambda configuration; training/adaptive_lambda.py.
 
 \paragraph{Channel selection.}
-Algorithm~\ref{alg:iterative-pruning} uses the threshold and cap in
+The iterative composition in Section~\ref{sec:iterative-method} uses the threshold and cap in
 Table~\ref{tab:method-hyperparameters}.
 Because gates start below the pruning threshold, search must raise their
 scores to protect them, subject to the parameter cap. Recovery evaluates
@@ -95,6 +81,6 @@ initialization protocol as iterative MobileNetV2, with one search
 and one recovery phase. They vary only the selection threshold and cap;
 the seven pairs are listed in Table~\ref{tab:mbv2-tin-all}, with phase
 budgets in Table~\ref{tab:pruning-schedules}.
-This is one cycle of Algorithm~\ref{alg:iterative-pruning}; it does not
-use the ResNet checkpoint selector in Algorithm~\ref{alg:accuracy-guided-pruning}.
+This is one cycle of the iterative composition in Section~\ref{sec:iterative-method}; it does not
+use the history-feasible checkpoint selector in Algorithm~\ref{alg:selection-phase}.
 % Phase budgets and protocol equivalence confirmed by the author, 2026-11-11.

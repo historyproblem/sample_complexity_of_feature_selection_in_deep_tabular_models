@@ -1,0 +1,41 @@
+\begin{table*}[!t]
+\caption{Meaning of the hyperparameters and procedural settings in
+Table~\ref{tab:method-hyperparameters}. ST: straight-through; pp: percentage points.}
+\label{tab:method-hyperparameter-descriptions}
+\centering\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}p{0.31\textwidth}p{0.65\textwidth}@{}}
+\toprule
+Hyperparameter / setting & Meaning \\
+\midrule
+\multicolumn{2}{l}{\textit{Gates and regularization}} \\
+Gate placement / groups & Positions of gated channel widths and their partition into regularization groups. \\
+Training gate mode & Sampled ST draws binary masks; deterministic ST thresholds scores. Both use surrogate gradients. \\
+Initial opening probability $r_0$ & Starting probability of keeping a channel open, before search updates its gate logit. \\
+Evaluation gate threshold & Opening-score cutoff used to form deterministic validation masks. \\
+Sparsity normalization & Aggregation of opening scores into the sparsity penalty; group means give equal weight to each group. \\
+Group denominator & Number of remaining, non-disabled channels in each group; used by both architectures in the final configurations. \\
+\midrule
+\multicolumn{2}{l}{\textit{Adaptive sparsity controller}} \\
+Initial coefficient $\lambda_0$ & Sparsity strength at the start of each search phase. \\
+Bounds $[\lambda_{\min},\lambda_{\max}]$ & Lower and upper limits applied after controller updates. \\
+Soft tolerance $\delta_s$ (pp) & Largest smoothed accuracy gap for which the controller increases sparsity pressure. \\
+Hard tolerance $\delta_h$ (pp) & Gap above which sparsity pressure decreases; also the feasibility tolerance for history selection. \\
+Warmup $W$ & Initial search epochs during which the sparsity coefficient is held fixed. \\
+Averaging window $w$ & Number of recent validation epochs used to smooth the accuracy signal. \\
+Gap definition & Paired: mean of reference-minus-gated epoch gaps. Current--mean: current reference minus mean gated accuracy. \\
+Update interval & Number of epochs between scheduled controller updates after warmup and window availability. \\
+Log-step $\eta$ & Multiplicative update magnitude: increase by $e^{\eta}$ or decrease by $e^{-\eta}$, subject to clipping. \\
+\midrule
+\multicolumn{2}{l}{\textit{Search, selection and recovery}} \\
+Maximum cycles $N$ & Maximum number of Search--Selection--Recovery repetitions; final-score pruning stops after recovery if no channel was removed. \\
+Search budget $T_s$ & Epochs per gated search phase, including controller warmup. \\
+Recovery budget $T_r$ & Epochs per gate-free training phase after physical channel removal. \\
+Search initialization & Source of network weights loaded at the start of search; gates and controller are initialized afresh. \\
+Recovery initialization & Either inherited search weights, new random weights, or surviving slices of pretrained weights. \\
+Selection mode & Threshold/budget modes use final search scores; checkpoint mode selects a validation-feasible checkpoint from search history. \\
+Selection probability threshold & Pruning mode: scores below $\tau$ are removal candidates. Checkpoint mode: scores above the keep threshold survive, subject to the retention floor. \\
+Removal cap $\rho$ & Maximum approximate additive removal cost as a fraction of full-width gated-model parameters, per selection phase. \\
+\bottomrule
+\end{tabular}
+\end{table*}

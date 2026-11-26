@@ -605,7 +605,7 @@ does not guarantee that all channels remain active.
 \subsection{Adaptive Scheduling of the Sparsity Coefficient}
 \label{sec:adaptive-sparsity}
 
-For the one-shot procedure in Algorithm~\ref{alg:accuracy-guided-pruning},
+For the paired-gap controller in Algorithm~\ref{alg:search-phase},
 let $A_t^{\rm ref}$ and $A_t$ denote the validation accuracies of the
 dense reference and gated model at the same search epoch $t$.
 The controller averages the last $w$ paired gaps:
@@ -652,53 +652,9 @@ externally controlled prior schedule rather than
 optimization of a single fixed-prior ELBO throughout
 training.
 
-\begin{algorithm*}[!t]
-\caption[Accuracy-guided structural channel pruning]{Accuracy-guided
-structural channel pruning. Default controller settings are warmup
-$W=10$ epochs, averaging window $w=3$ epochs, and initial coefficient
-$\lambda_0=10^{-3}$. The empirically chosen clipping bounds are fixed at
-$\lambda_{\min}=10^{-8}$ and
-$\lambda_{\max}=80$. The default automatic log-step uses the fixed
-target $\lambda_{\rm target}=10$.}
-\label{alg:accuracy-guided-pruning}
-\begin{algorithmic}[1]
-\REQUIRE Network $f_\theta$; training and validation data;
-dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$.
-\REQUIRE Search and recovery budgets $T_s,T_r$;
-accuracy tolerances $\delta_s,\delta_h$.
-\STATE \textit{// Search}
-\STATE Initialize $\phi$ with gate-opening probabilities close to one;
-$\lambda_1\gets\lambda_0$.
-\STATE $\eta\gets\log(\lambda_{\rm target}/\lambda_0)/\lfloor T_s/3-W\rfloor$.
-\FOR{$t=1,\ldots,T_s$}
-\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$; measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
-\IF{$t\leq W$ or $t<w$}
-\STATE $\lambda_{t+1}\gets\lambda_t$.
-\ELSE
-\STATE Update $\lambda_{t+1}$ by Eq.~\eqref{eq:one-shot-controller}.
-\ENDIF
-\ENDFOR
-\STATE \textit{// Checkpoint selection}
-\STATE $\mathcal T\gets\{\lfloor T_s/2\rfloor+1,\ldots,T_s\}$.
-\FOR{$t\in\mathcal T$}
-\STATE $m_t\gets\operatorname{MakeMask}_{\geq1}(\phi_t)$.
-\STATE $A_t^{\rm mask}\gets\operatorname{Eval}_{\rm val}(\theta_t,m_t)$.
-\STATE $P_t\gets\operatorname{Params}(m_t)$.
-\ENDFOR
-\STATE $\mathcal F\gets\{t\in\mathcal T:
-A_t^{\rm mask}\geq A_{T_s}^{\rm ref}-\delta_h\}$.
-\IF{$\mathcal F\neq\varnothing$}
-\STATE $t^*\in\arg\min_{t\in\mathcal F}P_t$.
-\ELSE
-\STATE $t^*\in\arg\max_{t\in\mathcal T}A_t^{\rm mask}$.
-\ENDIF
-\STATE \textit{// Recovery}
-\STATE $g\gets\operatorname{Compact}(\theta_{t^*},m_{t^*})$.
-\STATE $g\gets\operatorname{RecalibrateBN}(g)$; initialize a fresh optimizer and scheduler.
-\STATE Fine-tune $g$ for $T_r$ epochs.
-\RETURN Best validation checkpoint of $g$ during recovery.
-\end{algorithmic}
-\end{algorithm*}
+
+
+\input{shared_pruning_phases}
 
 \subsection{Structural Channel Pruning}
 
@@ -761,95 +717,7 @@ or an execution backend that avoids inactive computations.
 Any efficiency evaluation must also account for the cost
 of the gating modules.
 
-% BEGIN COMPACT PRUNING ALGORITHM
-\begin{algorithm*}[!t]
-\caption[Iterative accuracy-guided structural channel pruning]{Iterative
-accuracy-guided structural channel pruning. Each cycle performs search,
-channel selection and recovery. Gate initialization, warmup, averaging
-window and sparsity updates follow the configured search controller.
-Setting $N=1$ gives the one-pass variant with the same selection rule.}
-\label{alg:iterative-pruning}
-\begin{algorithmic}[1]
-\REQUIRE Network $f_\theta$; training and validation data;
-dense reference accuracies $\{A_t^{\rm ref}\}_{t=1}^{T_s}$; initialization policy $\mathcal I$.
-\REQUIRE Search and recovery budgets $T_s,T_r$; maximum cycles $N$;
-accuracy tolerances $\delta_s,\delta_h$; selection mode, threshold
-$\varepsilon_{\mathrm{prune}}$ and optional cap $\rho$.
-\STATE $D\gets\varnothing$; recovery trajectory $\mathcal G\gets[\,]$.
-\FOR{$k=1,\ldots,N$}
-\STATE \textit{// Search}
-\STATE Initialize $\theta$ from $\mathcal I$ and gate logits $\phi$;
-permanently mask channels in $D$.
-\STATE $\lambda_1\gets\lambda_0$; reset the search controller, optimizer and scheduler.
-\FOR{$t=1,\ldots,T_s$}
-\STATE Train $(\theta,\phi)$ for one epoch with $\lambda_t$;
-measure validation accuracy $A_t$; save $(\theta_t,\phi_t)$.
-\IF{$t\leq W$ or $t<w$}
-\STATE $\lambda_{t+1}\gets\lambda_t$.
-\ELSE
-\STATE Update $\lambda_{t+1}$ by Eq.~\eqref{eq:one-shot-controller}.
-\ENDIF
-\ENDFOR
-\STATE \textit{// Channel selection}
-\STATE $Q\gets\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$;
-sort $Q$ by increasing $r_{l,c}$.
-\STATE $R\gets\varnothing$;
-$B\gets\rho P_{\mathrm{probe}}$ if a cap is set, otherwise $B\gets\infty$.
-\FOR{channel $(l,c)$ in $Q$}
-\IF{$c(l,c)\leq B$}
-\STATE $R\gets R\cup\{(l,c)\}$; $B\gets B-c(l,c)$.
-\ENDIF
-\ENDFOR
-\STATE $D\gets D\cup R$; $m_{l,c}\gets\mathbf 1[(l,c)\notin D]$.
-\STATE \textit{// Recovery}
-\STATE $g\gets\operatorname{Compact}(\theta_{T_s},m)$.
-\STATE $g\gets\operatorname{Initialize}(g,\mathcal I)$;
-initialize a fresh optimizer and scheduler.
-\STATE Train $g$ for $T_r$ epochs without gates.
-\STATE Append the best validation checkpoint of $g$ during recovery to $\mathcal G$.
-\IF{$R=\varnothing$}
-\STATE \textbf{break}.
-\ENDIF
-\ENDFOR
-\RETURN Recovery trajectory $\mathcal G$; its last element is the final model.
-\end{algorithmic}
-\end{algorithm*}
 
-
-\paragraph{Algorithm overview.}
-Algorithm~\ref{alg:accuracy-guided-pruning} specifies the one-shot
-procedure with input-independent gates used for ResNet-50.
-Here $T_s,T_r$ are the search and recovery budgets.
-Section~\ref{sec:adaptive-sparsity} defines the controller, including
-warmup, the paired averaging window, the fixed log-step and clipping.
-The default automatic log-step is computed once and requires
-$\lfloor T_s/3-W\rfloor\geq1$ and
-$\lambda_{\min}\leq\lambda_0<\lambda_{\rm target}\leq\lambda_{\max}$.
-Numerical training settings are given in
-Section~\ref{sec:resnet-cifar-implementation}.
-
-Let $(\theta_t,\phi_t)$ denote the saved search checkpoint, with
-$\theta_t$ including the weights and corresponding BatchNorm statistics,
-and $\phi_t$ the gate logits. The operator
-$\operatorname{MakeMask}_{\geq1}(\phi_t)$ keeps all channels with $r>0.5$
-in each group; if none qualify, it keeps one channel with maximal $r$.
-This minimum can activate a channel closed in the original gated
-validation. For each second-half checkpoint,
-$\operatorname{Eval}_{\rm val}(\theta_t,m_t)$ measures validation accuracy
-with the fixed mask, without updating weights or BatchNorm statistics;
-no training or BatchNorm recalibration occurs during selection.
-$\operatorname{Params}(m_t)$ counts the parameters of the architecture
-with the retained layer widths, excluding gates, without constructing
-each compact network; it is not an expected active-parameter count.
-
-After selection, $\operatorname{Compact}(\theta_{t^*},m_{t^*})$ physically
-removes the discarded channels and gates, transferring surviving weights
-and their BatchNorm state to the fixed architecture $g$.
-Next, $\operatorname{RecalibrateBN}(g)$ updates BatchNorm statistics
-on training data. Recovery uses a fresh optimizer and scheduler for $T_r$
-epochs and returns the checkpoint with the highest validation accuracy
-among those epochs.
-% END COMPACT PRUNING ALGORITHM
 
 \input{iterative_pruning}
 \FloatBarrier
@@ -872,9 +740,9 @@ center crop; CIFAR-10 evaluation only converts and normalizes tensors.
 
 \subsection{Implementation Details}\label{sec:implementation}
 
-Algorithms~\ref{alg:accuracy-guided-pruning} and
-\ref{alg:iterative-pruning} differ in channel/checkpoint selection and
-weight initialization, as well as the number of cycles.
+Algorithms~\ref{alg:search-phase}--\ref{alg:recovery-phase} define the
+shared phases. The procedures in Section~\ref{sec:iterative-method}
+differ in selection policy, recovery initialization and cycle count.
 Table~\ref{tab:pruning-schedules} summarizes the phase budgets; warmup is
 included in search, and reference-model training is additional.
 
@@ -911,19 +779,20 @@ random initialization in each phase. These procedures select channels
 from the final search checkpoint and carry only the disabled-channel set
 between phases and cycles.
 
-One-shot ResNet-50 uses internal bottleneck gates with deterministic ST
+One-shot ResNet-50 uses internal bottleneck gates with sampled ST
 training, selects the smallest validation-feasible search checkpoint and
 inherits its surviving weights for recovery. Channel removal respects
 residual dimensions and, for MobileNetV2, couples expansion, depthwise
 and projection channels.
 
 The implemented sparsity penalty averages opening probabilities within
-and across gate groups. MobileNetV2 excludes permanently disabled channels
-from the within-group denominator; ResNet-50 uses original group sizes.
+and across gate groups. Both architectures exclude permanently disabled
+channels from the within-group denominator.
 Iterative controllers compare current reference accuracy with moving-average
 gated accuracy; one-shot ResNet-50 averages paired validation gaps.
-The objective, normalization and controller implementation details are
-specified in the corresponding appendices.
+The shared objective and normalization are specified in
+Appendix~\ref{app:shared-loss}; controller implementation details remain
+in the architecture-specific appendices.
 
 \subsection{Baselines}
 
@@ -1111,6 +980,7 @@ Acknowledgments text.
 
 \input{implementation_mobilenetv2}
 \input{implementation_resnet50}
+\input{shared_loss}
 
 \section{Additional Experiments}
 \subsection{Detailed Results}
@@ -1208,6 +1078,7 @@ Table~\ref{tab:method-hyperparameters} summarizes the available
 method-specific settings. In this table, $\dagger$ marks the remaining
 config defaults that require verification against the reported runs.
 \input{method_hyperparameters_template}
+\input{method_hyperparameter_descriptions}
 
 \end{document}
 %% End of file

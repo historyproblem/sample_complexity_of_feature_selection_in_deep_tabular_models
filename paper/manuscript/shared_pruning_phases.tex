@@ -1,0 +1,142 @@
+\subsection{Shared Pruning Phases}
+\label{sec:shared-phases}
+
+Algorithms~\ref{alg:search-phase}--\ref{alg:recovery-phase} separate
+search, checkpoint/mask selection and recovery. Their inputs specify
+gate mode, normalization, controller and initialization policies;
+the phase logic is shared across architectures. The loss is defined in
+Appendix~\ref{app:shared-loss}; architecture-specific gate positions are
+given in Appendices~\ref{app:implementation-mobilenetv2} and
+\ref{app:implementation-resnet50}.
+
+Let $D$ contain permanently disabled channels and let
+$\mathcal H=\{(\theta_t,\phi_t)\}_{t=1}^{T_s}$ be the search history,
+including each checkpoint's BatchNorm (BN) state. With group-normalized
+opening scores $S$ and optional negative entropy $-\beta\overline H$,
+search minimizes $\mathcal L_{\rm CE}+\lambda_t S-\beta\overline H$.
+All final runs use sampled straight-through (ST) training masks;
+deterministic ST remains an alternative supported mode.
+Validation uses deterministic masks. The sparse-prior derivation above
+applies under its stated sampling and normalization assumptions.
+
+\begin{algorithm*}[!t]
+\caption{Search: learn gate scores and save search checkpoints.}
+\label{alg:search-phase}
+\begin{algorithmic}[1]
+\REQUIRE Network $f_\theta$; training/validation data; disabled set $D$;
+search initialization $\mathcal I_s$; reference accuracies $A_t^{\rm ref}$;
+budget $T_s$; gate, objective and controller settings.
+\STATE Initialize $\theta$ from $\mathcal I_s$ and fresh gate logits $\phi$;
+permanently mask $D$; initialize a fresh optimizer and scheduler.
+\STATE $\lambda_1\gets\lambda_0$; $\mathcal H\gets[\,]$; reset controller state.
+\FOR{$t=1,\ldots,T_s$}
+\STATE Set the epoch loss to $\mathcal L_{\rm CE}+\lambda_t S-\beta\overline H$.
+\STATE Train one epoch with sampled/deterministic binary forward masks and ST gradients.
+\STATE Measure deterministic validation accuracy $A_t$;
+append $(\theta_t,\phi_t)$ to $\mathcal H$.
+\IF{$t\leq W$ or $t<w$ or no controller update is scheduled}
+\STATE $\lambda_{t+1}\gets\lambda_t$.
+\ELSE
+\IF{gap mode is paired}
+\STATE $\overline\Delta_t\gets w^{-1}\sum_{i=t-w+1}^{t}(A_i^{\rm ref}-A_i)$.
+\ELSE
+\STATE $\overline\Delta_t\gets A_t^{\rm ref}-w^{-1}\sum_{i=t-w+1}^{t}A_i$.
+\ENDIF
+\STATE Compute the configured log-step $\eta_t$; update $\lambda_{t+1}$
+by Eq.~\eqref{eq:one-shot-controller}, using $\eta_t$ in place of $\eta$.
+\ENDIF
+\ENDFOR
+\RETURN Search history $\mathcal H$ and final reference accuracy $A_{T_s}^{\rm ref}$.
+\end{algorithmic}
+\end{algorithm*}
+
+The fixed-step controller uses its configured $\eta$; the automatic
+one-shot setting computes
+$\eta=\log(\lambda_{\rm target}/\lambda_0)/\lfloor T_s/3-W\rfloor$,
+requiring a positive denominator. Adaptive step boosting follows the
+closure-growth rule in Appendix~\ref{app:implementation-mobilenetv2}.
+Warmup is included in $T_s$.
+
+\paragraph{Checkpoint and mask selection.}
+The selection policy $s$ is either history-feasible or final-score.
+For history selection, $\operatorname{MakeMask}_{\geq1}$ keeps scores
+above the configured evaluation threshold and enforces the retention
+floor, retaining highest-score channels if necessary. The principal
+floor keeps at least one channel per group. Each fixed mask is evaluated
+with frozen weights and BN; selection performs no training or BN
+recalibration. $\operatorname{Params}(m)$ counts the physical gate-free
+architecture. Historical selection windows and floors are specified in
+Appendix~\ref{app:implementation-resnet50}.
+
+For final-score selection, $\operatorname{Candidates}_{\geq1}$ considers
+remaining channels below $\tau$ in threshold mode, or all remaining
+channels in budget-only mode. It reserves a highest-score channel if a
+group would otherwise become empty. Candidates are processed in increasing
+score order. The cap is $\rho P_{\rm probe}$, where $P_{\rm probe}$ counts
+the full-width gated model and $c(u)$ is the approximate additive removal
+cost of channel $u$. Overlapping channel dependencies make these costs
+approximate; the cap is not an achieved compression ratio.
+
+\begin{algorithm*}[!t]
+\caption{Checkpoint Selection: choose the search checkpoint and fixed mask.}
+\label{alg:selection-phase}
+\begin{algorithmic}[1]
+\REQUIRE Search history $\mathcal H$; disabled set $D$; selection policy $s$;
+validation data; final reference accuracy $A_{T_s}^{\rm ref}$;
+tolerance $\delta_h$; selection windows, retention floor, threshold $\tau$ and optional cap $\rho$.
+\IF{$s=\text{history-feasible}$}
+\FOR{$t$ in the feasible-candidate or fallback search window}
+\STATE $m_t\gets\operatorname{MakeMask}_{\geq1}(\phi_t)$;
+$A_t^{\rm mask}\gets\operatorname{Eval}_{\rm val}(\theta_t,m_t)$;
+$P_t\gets\operatorname{Params}(m_t)$.
+\ENDFOR
+\STATE $\mathcal F\gets\{t\text{ in feasible window}:A_t^{\rm mask}\geq A_{T_s}^{\rm ref}-\delta_h\}$.
+\IF{$\mathcal F\neq\varnothing$}
+\STATE $t^*\in\arg\min_{t\in\mathcal F}P_t$.
+\ELSE
+\STATE $t^*\in\arg\max_{t\text{ in fallback window}}A_t^{\rm mask}$.
+\ENDIF
+\STATE $m\gets m_{t^*}$; $R\gets\{u\notin D:m_u=0\}$.
+\ELSE
+\STATE $t^*\gets T_s$; $Q\gets\operatorname{Candidates}_{\geq1}(\phi_{T_s},D)$;
+sort $Q$ by increasing opening score.
+\STATE $R\gets\varnothing$;
+$B\gets\rho P_{\rm probe}$ if a cap is set, otherwise $B\gets\infty$.
+\FOR{channel $u$ in $Q$}
+\IF{$c(u)\leq B$}
+\STATE $R\gets R\cup\{u\}$; $B\gets B-c(u)$.
+\ENDIF
+\ENDFOR
+\STATE $m_u\gets\mathbf1[u\notin D\cup R]$.
+\ENDIF
+\RETURN Selected checkpoint $(\theta_{t^*},\phi_{t^*})$, mask $m$, disabled set $D\cup R$ and new removals $R$.
+\end{algorithmic}
+\end{algorithm*}
+
+\paragraph{Recovery.}
+$\operatorname{Compact}(\theta_{t^*},m)$ physically removes discarded
+channels and gates, copying surviving weights and BN state. Recovery
+either inherits that state or replaces it according to $\mathcal I_r$.
+Reinitialization may draw new random weights or reload surviving slices
+of pretrained weights. BN recalibration is an optional, separately
+configured step, performed after the recovery weights are initialized.
+
+\begin{algorithm*}[!t]
+\caption{Recovery: train and validate the compact, gate-free network.}
+\label{alg:recovery-phase}
+\begin{algorithmic}[1]
+\REQUIRE Selected checkpoint $\theta_{t^*}$ and mask $m$; training/validation data;
+recovery policy (inherit / restart), initialization $\mathcal I_r$;
+BN recalibration budget; recovery budget $T_r$.
+\STATE $g\gets\operatorname{Compact}(\theta_{t^*},m)$.
+\IF{recovery policy is restart}
+\STATE $g\gets\operatorname{Initialize}(g,\mathcal I_r)$.
+\ENDIF
+\IF{BN recalibration is enabled}
+\STATE Recalibrate BN on the configured number of training batches.
+\ENDIF
+\STATE Initialize a fresh optimizer and scheduler.
+\STATE Train $g$ for $T_r$ epochs using cross-entropy without gates.
+\RETURN Best validation checkpoint of $g$ during recovery.
+\end{algorithmic}
+\end{algorithm*}

@@ -1,9 +1,13 @@
 \section{Implementation for ResNet-50}
 \label{app:implementation-resnet50}
 
+Both pruning variants use the shared objective in
+Appendix~\ref{app:shared-loss}, with normalization over remaining channels
+and sampled ST training masks.
+
 \subsection{Iterative Pruning}
 \label{sec:resnet-iterative-implementation}
-Each trajectory uses Algorithm~\ref{alg:iterative-pruning}, with cycle
+Each trajectory uses the iterative composition in Section~\ref{sec:iterative-method}, with cycle
 and phase budgets in Table~\ref{tab:pruning-schedules}.
 Every search and recovery phase starts with newly initialized random
 weights; search weights are not inherited. The trajectories use threshold or budget-only selection, as listed
@@ -16,8 +20,8 @@ each series are listed in Table~\ref{tab:resnet-notebook-trajectories}.
 
 \subsection{One-Shot Pruning}
 \label{sec:resnet-cifar-implementation}
-Algorithm~\ref{alg:accuracy-guided-pruning} specifies search and recovery,
-with budgets in Table~\ref{tab:pruning-schedules}.
+The single-pass composition uses Algorithms~\ref{alg:search-phase}--\ref{alg:recovery-phase},
+with history-feasible selection and budgets in Table~\ref{tab:pruning-schedules}.
 Recovery inherits the surviving search weights, recalibrates BatchNorm
 on 200 training batches and starts a fresh optimizer. We test the
 best validation recovery checkpoint with frozen weights and BatchNorm.
@@ -32,13 +36,11 @@ $10^{-3}$; entropy regularization and label smoothing are disabled.
 \paragraph{Gates and regularization.}
 Each of the 16 bottlenecks has two independently gated internal
 widths, after the first and second convolutions' BatchNorm and ReLU:
-32 groups, with no output gates. Training and evaluation use deterministic
-masks, with straight-through training gradients. The initial opening
+32 groups, with no output gates. Search uses sampled ST masks;
+evaluation thresholds opening probabilities. The initial opening
 probability and evaluation threshold are listed in
-Table~\ref{tab:method-hyperparameters}. In Eq.~\eqref{eq:mbv2-regularizer-means},
-$C_j$ is fixed at the group's original channel count and $M$ at
-32, the total number of gate groups; these denominators remain
-fixed throughout search.
+Table~\ref{tab:method-hyperparameters}. Loss components and normalization
+are defined in Appendix~\ref{app:shared-loss}.
 
 \paragraph{Sparsity control and selection.}
 The controller averages paired, epoch-matched validation gaps.

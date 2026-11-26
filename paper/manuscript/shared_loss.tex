@@ -1,0 +1,111 @@
+\section{Shared Training Objective}
+\label{app:shared-loss}
+
+The same objective is used for MobileNetV2 and ResNet-50. Architecture
+determines which channel widths form gate groups, not the form of the
+loss. All final configurations use sampled straight-through (ST) masks
+for search and normalize gate regularizers by remaining channel counts.
+Deterministic ST is an alternative training mode, described below.
+
+\subsection{Loss Components and Normalization}
+
+For gate group $j$, let $\mathcal C_j$ contain the channels not permanently
+disabled before the current search phase, and let $C_j=|\mathcal C_j|$.
+Each group retains at least one channel, so $C_j>0$. The number of gate
+groups is $M$, and opening probabilities are
+$r_{j,c}=\sigma(a_{j,c})$ for learnable logits $a_{j,c}$.
+A channel whose current sampled mask is zero still belongs to
+$\mathcal C_j$; only permanent removal excludes it from the denominator.
+
+For a minibatch $\mathcal B$, the classification term is
+\begin{equation}
+\mathcal L_{\rm CE}
+=-\frac1{|\mathcal B|}\sum_{(\mathbf x,y)\in\mathcal B}
+\log p_\theta(y\mid\mathbf x,\mathbf g^{\rm ST}).
+\label{eq:shared-classification-loss}
+\end{equation}
+The sparsity and entropy terms use the same mean-of-group-means
+normalization:
+\begin{equation}
+\begin{aligned}
+S(r)&=\frac1M\sum_{j=1}^{M}\frac1{C_j}
+\sum_{c\in\mathcal C_j}r_{j,c},\\
+\overline H(r)&=\frac1M\sum_{j=1}^{M}\frac1{C_j}
+\sum_{c\in\mathcal C_j}H(r_{j,c}),
+\end{aligned}
+\label{eq:shared-gate-regularizers}
+\end{equation}
+where $H(r)=-r\log r-(1-r)\log(1-r)$, with its continuous extension at
+zero and one. The search objective at epoch $t$ is
+\begin{equation}
+\boxed{\mathcal J_t=\mathcal L_{\rm CE}+\lambda_t S(r)-\beta\overline H(r).}
+\label{eq:shared-search-loss}
+\end{equation}
+Regularizers are computed from opening probabilities, not from sampled
+binary masks. Each group has equal weight; each channel in group $j$
+has sparsity coefficient $\lambda_t/(MC_j)$. Thus $S$ measures normalized
+opening activity rather than physical parameters or FLOPs.
+Within a search phase the permanently disabled set is fixed. Across
+pruning cycles, group sizes decrease as additional channels are removed;
+both architectures recompute the means over the surviving channels.
+
+\subsection{Effect of the Loss Parameters}
+
+The nonnegative coefficient $\lambda_t$ controls the pressure to close
+gates. Increasing it strengthens the linear penalty on opening scores;
+the validation-gap controller adjusts it during search using warmup,
+averaging, tolerances, log-steps and clipping. These controller settings
+change the trajectory of $\lambda_t$, rather than adding loss terms.
+
+For $\beta>0$, minimizing $-\beta\overline H$ favors uncertain opening
+probabilities and opposes premature polarization. At $\beta=0$, the
+entropy term vanishes and
+$\mathcal J_t=\mathcal L_{\rm CE}+\lambda_t S$.
+The final MobileNetV2 runs use this setting; the one-shot ResNet
+configuration also disables entropy regularization. The value of
+$\beta$ for other runs must be specified separately and cannot be
+inferred from the architecture. The prediction loss acts jointly with
+both regularizers, so their coefficients alone do not determine which
+channels survive.
+
+The sparse-prior derivation in the Methodology uses unnormalized sums.
+For $\beta>0$ and fixed $\lambda_t$, the normalized regularizer here
+corresponds instead to a weighted sum of per-gate Bernoulli KL terms,
+with weights $1/(MC_j)$ and prior opening probability
+$\pi_t=\sigma(-\lambda_t/\beta)$, up to a gate-independent constant.
+It is not the unweighted joint KL. This parameterization of the prior
+does not apply at $\beta=0$; adaptive $\lambda_t$ changes the prior over
+training rather than optimizing a single fixed-prior ELBO.
+
+\subsection{Sampled and Deterministic ST Masks}
+
+For sampled ST, independently draw
+$\epsilon_0,\epsilon_1\sim\operatorname{Gumbel}(0,1)$ and define
+\begin{equation}
+\begin{aligned}
+u&=a_{j,c}+\epsilon_1-\epsilon_0,\\
+g^{\rm hard}&=\mathbf1[u>0],\qquad \widetilde g=\sigma(u/T),\\
+g^{\rm ST}&=\operatorname{stopgrad}(g^{\rm hard}-\widetilde g)+\widetilde g.
+\end{aligned}
+\end{equation}
+The forward mask is Bernoulli with opening probability $r_{j,c}$.
+The temperature $T>0$ changes the smooth backward surrogate; it does
+not change this hard sampling probability. Sampled classification loss
+estimates the expected loss over masks, while ST supplies biased
+gradients. Initial probability $r_0$ sets the starting logits and hence
+the initial mask distribution; it does not add a regularizer.
+
+An alternative deterministic ST mode uses a hard score threshold $q$,
+for example $g^{\rm hard}=\mathbf1[r_{j,c}>q]$, with surrogate
+$g^{\rm ST}=\operatorname{stopgrad}(g^{\rm hard}-r_{j,c})+r_{j,c}$.
+It removes sampling noise from the forward mask and evaluates the
+classification loss on that mask. The algebraic objective remains the
+same, but this classification term is not a Monte Carlo estimate of
+the Bernoulli expected loss. This alternative is not the training mode
+used in the final experiments. Deterministic validation masks remain
+compatible with sampled training.
+
+Pruning thresholds, parameter caps and checkpoint windows affect the
+selection phase, not the search loss directly. During recovery the
+physically compact network has no gates: training minimizes ordinary
+cross-entropy, with neither gate sparsity nor gate entropy penalties.

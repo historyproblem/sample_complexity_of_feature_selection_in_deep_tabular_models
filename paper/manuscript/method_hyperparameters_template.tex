@@ -33,11 +33,11 @@
     \midrule
     \multicolumn{5}{l}{\textit{Gates and regularization}} \\
     Gate placement / groups & Hidden + output & Hidden + output & Output & Internal / 32 \\
-    Training gate mode (sampled / deterministic ST) & Sampled ST & Sampled ST & Sampled ST & Determ. ST \\
+    Training gate mode (sampled / deterministic ST) & Sampled ST & Sampled ST & Sampled ST & Sampled ST \\
     Initial opening probability $r_0$ & $\approx0.87$ & $\approx0.87$ & $\approx0.87$ & $\approx0.98$ \\
-    Evaluation gate threshold & 0.5 & 0.5 & $0.5^\dagger$ & 0.5 \\
+    Evaluation gate threshold & 0.5 & 0.5 & 0.5 & 0.5 \\
     Sparsity normalization (group means / other) & Group means & Group means & Group means & Group means \\
-    Group denominator (original / remaining channels) & Remaining & Remaining & Original & Original \\
+    Group denominator (remaining channels) & Remaining & Remaining & Remaining & Remaining \\
     \midrule
     \multicolumn{5}{l}{\textit{Adaptive sparsity controller}} \\
     Initial sparsity coefficient $\lambda_0$ & $10^{-4}$ & $10^{-4}$ & $10^{-4}$ & $10^{-3}$ \\
@@ -58,7 +58,7 @@
     Recovery initialization policy & ImageNet slices & ImageNet slices & Random & Search weights \\
     Selection mode (threshold / budget / checkpoint) & Threshold + cap & Threshold + cap & Threshold / budget & Checkpoint \\
     Selection probability threshold & 0.95 & 0.95 / 0.99 & 0.7 / 0.1 & 0.5 (keep) \\
-    Parameter-removal cap $\rho$ & 0.10 & See main table & 0.05 (budget); $0.20^\dagger$ (threshold) & -- \\
+    Parameter-removal cap $\rho$ & 0.10 & See main table & 0.05 (budget); $0.20$ (threshold) & -- \\
     \bottomrule
   \end{tabular}
 \end{table*}
