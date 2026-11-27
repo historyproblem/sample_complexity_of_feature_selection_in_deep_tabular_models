@@ -31,9 +31,10 @@ FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
 FULL3_PROTOCOL = "pruning_v3_stochastic_st_full3_v1"
 FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
 RECOVERY3_PROTOCOL = "pruning_v3_stochastic_st_recovery3_v1"
+QUALITY_RECOVERY2_PROTOCOL = "pruning_v3_stochastic_st_quality17m_recovery2_v1"
 TIMING12_PROTOCOL = "pruning_v3_stochastic_st_timing12_v1"
 TIMING_RECOVERY8_PROTOCOL = "pruning_v3_stochastic_st_timing_recovery8_v1"
-RECOVERY_PROTOCOLS = {RECOVERY3_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}
+RECOVERY_PROTOCOLS = {RECOVERY3_PROTOCOL, QUALITY_RECOVERY2_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}
 
 
 def load_study(path):
@@ -47,7 +48,7 @@ def load_study(path):
     require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL3_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
             and study["seed"] == 42 and study["config"] == config_name, "Invalid followup recipe")
     counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL3_PROTOCOL: (0, 3), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0),
-              TIMING12_PROTOCOL: (0, 12), TIMING_RECOVERY8_PROTOCOL: (8, 0)}
+              QUALITY_RECOVERY2_PROTOCOL: (2, 0), TIMING12_PROTOCOL: (0, 12), TIMING_RECOVERY8_PROTOCOL: (8, 0)}
     require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
     if bounded:
         require(study["checkpoint_retention"] == "online_validation_winner_best_last", "Study requires bounded checkpoint storage")
@@ -72,6 +73,16 @@ def load_study(path):
                     and 31 <= row["selected_epoch"] <= 60
                     and type(row["expected_validation_accuracy"]) in (int, float)
                     and 0 <= row["expected_validation_accuracy"] <= 1, "Invalid timing recovery source pins")
+        elif study["protocol"] == QUALITY_RECOVERY2_PROTOCOL:
+            require(set(row) == fields | {"expected_parameters", "expected_remaining_channels", "expected_fallback",
+                                         "selected_epoch", "selected_checkpoint_sha256_prefix", "expected_validation_accuracy"},
+                    "Quality recovery sources require measured checkpoint pins")
+            require(type(row["expected_parameters"]) is int and row["expected_parameters"] > 0
+                    and type(row["expected_remaining_channels"]) is int and 1 <= row["expected_remaining_channels"] <= 7552
+                    and row["expected_fallback"] is False
+                    and type(row["selected_epoch"]) is int and 31 <= row["selected_epoch"] <= 60
+                    and type(row["expected_validation_accuracy"]) in (int, float)
+                    and 0 <= row["expected_validation_accuracy"] <= 1, "Invalid quality recovery source pins")
         elif study["protocol"] == RECOVERY3_PROTOCOL:
             require(set(row) == fields | {"expected_parameters", "expected_remaining_channels"}, "Recovery sources require measured size/channel pins")
             require(type(row["expected_parameters"]) is int and row["expected_parameters"] > 0

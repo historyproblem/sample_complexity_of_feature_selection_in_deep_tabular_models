@@ -1,0 +1,37 @@
+# Recover exactly the first two completed quality17m3 searches; no new search.
+# Each source consumed60 search epochs, even though selected checkpoints are33/34.
+protocol: pruning_v3_stochastic_st_quality17m_recovery2_v1
+config: experiment/pruning_v3/stochastic_st_inherited
+reference_output: outputs/runs/pruning_stochastic_full4_20261121/reference_inputs
+output: outputs/runs/pruning_stochastic_quality17m_recovery2_20261127
+seed: 42
+checkpoint_retention: online_validation_winner_best_last
+searches: []
+recoveries:
+  - id: tighter_hard
+    source: outputs/runs/pruning_stochastic_quality17m3_20261127/tighter_hard/internal/search
+    soft_drop: 0.00025
+    hard_drop: 0.004
+    expected_parameters: 18344554
+    expected_remaining_channels: 6566
+    expected_fallback: false
+    selected_epoch: 33
+    selected_checkpoint_sha256_prefix: 1b0675bfa18d76b3
+    expected_validation_accuracy: 0.9158
+  - id: earlier_pressure
+    source: outputs/runs/pruning_stochastic_quality17m3_20261127/earlier_pressure/internal/search
+    soft_drop: 0.001
+    hard_drop: 0.005
+    expected_parameters: 17462511
+    expected_remaining_channels: 6462
+    expected_fallback: false
+    selected_epoch: 34
+    selected_checkpoint_sha256_prefix: d7de195ed4766674
+    expected_validation_accuracy: 0.9146
+reference_sha256:
+  history_path: 8a8f8e3ea6fb593d471cdfa9132ea9771795dae45028d7fc7d35293c6b2eba26
+  state_path: 33cf79a489e77b1d7dfa5c3118e103fc56b9ab86523e6bd67d8b1db8490963b9
+  config_path: a7fba16e46a1cecf792f4fa0330319480c13c44b4e1d0f32a02b7026ffb01b09
+  initializer_path: 17c20512b6fb0822e5b37f7ba3b2bb3bb26705823c65f34ce553c73775f42342
+initializer_model_state_hash: 4cbb6127d128c76362c717bd6c3ea96d248c1ecaf0df90a2b54c0b468cac044e
+split_indices_hash: 0e014034dd7ffb459c07bf57c1b0a8945f9b33208f3ca6c4adb91106b0b5aaf0
