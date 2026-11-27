@@ -28,6 +28,7 @@ from net_complexity.training.one_shot_pruning_config import compose_config, vali
 DEFAULT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_followup5.yaml"
 PROTOCOL = "pruning_v3_stochastic_st_followup5_v1"
 FULL4_PROTOCOL = "pruning_v3_stochastic_st_full4_v1"
+FULL3_PROTOCOL = "pruning_v3_stochastic_st_full3_v1"
 FULL2_PROTOCOL = "pruning_v3_stochastic_st_full2_v1"
 RECOVERY3_PROTOCOL = "pruning_v3_stochastic_st_recovery3_v1"
 TIMING12_PROTOCOL = "pruning_v3_stochastic_st_timing12_v1"
@@ -40,12 +41,12 @@ def load_study(path):
     fields = {"protocol", "config", "reference_output", "output", "seed", "recoveries", "searches",
               "reference_sha256", "initializer_model_state_hash", "split_indices_hash"}
     timing = study.get("protocol") in {TIMING12_PROTOCOL, TIMING_RECOVERY8_PROTOCOL}
-    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
+    bounded = study.get("protocol") in {FULL4_PROTOCOL, FULL3_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
     require(set(study) == fields | ({"checkpoint_retention"} if bounded else set()), "Invalid followup fields")
     config_name = "experiment/pruning_v3/stochastic_st_timing" if timing else "experiment/pruning_v3/stochastic_st_inherited"
-    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
+    require(study["protocol"] in {PROTOCOL, FULL4_PROTOCOL, FULL3_PROTOCOL, FULL2_PROTOCOL, *RECOVERY_PROTOCOLS, TIMING12_PROTOCOL}
             and study["seed"] == 42 and study["config"] == config_name, "Invalid followup recipe")
-    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0),
+    counts = {PROTOCOL: (3, 2), FULL4_PROTOCOL: (0, 4), FULL3_PROTOCOL: (0, 3), FULL2_PROTOCOL: (0, 2), RECOVERY3_PROTOCOL: (3, 0),
               TIMING12_PROTOCOL: (0, 12), TIMING_RECOVERY8_PROTOCOL: (8, 0)}
     require((len(study["recoveries"]), len(study["searches"])) == counts[study["protocol"]], "Unexpected number of models")
     if bounded:
@@ -351,8 +352,8 @@ def execute(study, args):
     search_only = args.stage == "search"
     require(study["protocol"] != TIMING12_PROTOCOL or args.stage in {"search", "inspect"},
             "Timing12 is search-only; recovery/test require a separate explicit launch")
-    require(not search_only or (study["protocol"] in {FULL4_PROTOCOL, FULL2_PROTOCOL, TIMING12_PROTOCOL} and not study["recoveries"]),
-            "Search-only requires a fresh two- or four-model study without existing-source recoveries")
+    require(not search_only or (study["protocol"] in {FULL4_PROTOCOL, FULL3_PROTOCOL, FULL2_PROTOCOL, TIMING12_PROTOCOL} and not study["recoveries"]),
+            "Search-only requires a fresh full-model study without existing-source recoveries")
     new_epochs = len(study["searches"]) * 60 if search_only else len(study["recoveries"]) * 90 + len(study["searches"]) * 150
     bounded = study.get("checkpoint_retention") == "online_validation_winner_best_last"
     wait_original = not args.skip_wait and study["protocol"] not in RECOVERY_PROTOCOLS

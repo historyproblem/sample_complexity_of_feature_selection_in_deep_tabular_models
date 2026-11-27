@@ -19,6 +19,44 @@ import stochastic_pruning_test
 
 STRONGER_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_stronger2.yaml"
 INDEPENDENT_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_independent4.yaml"
+QUALITY17M_CONFIG = ROOT / "configs/experiment/pruning_v3/stochastic_st_quality17m3.yaml"
+
+
+def test_quality17m_three_complete_models_change_only_reference_thresholds(tmp_path):
+    result = full4.main(["--config", str(QUALITY17M_CONFIG), "--stage", "run", "--dry-run",
+                         "--output", str(tmp_path / "absent"),
+                         "--reference-archive", str(tmp_path / "missing.tar.gz")])
+    assert (result["models"], result["existing_search_recoveries"], result["new_searches"]) == (3, 0, 3)
+    assert result["new_training_epochs"] == 450 and result["per_model_total_epochs"] == 150
+    assert result["test_after_each_model"] and result["bounded_epoch_checkpoints"]
+    assert result["wait_for_original_search_process"] is False
+    assert [(r["new_search_epochs"], r["recovery_epochs"]) for r in result["models_in_order"]] == [(60, 90)] * 3
+    assert [(r["soft_drop"], r["hard_drop"]) for r in result["models_in_order"]] == [
+        (.00025, .004), (.001, .005), (.001, .004)]
+    reference = queue.load_study(INDEPENDENT_CONFIG)
+    study = queue.load_study(QUALITY17M_CONFIG)
+    for key in ("reference_sha256", "initializer_model_state_hash", "split_indices_hash"):
+        assert study[key] == reference[key]
+    args = SimpleNamespace(dense_source=tmp_path / "same_reference", device=None)
+    baseline = queue.configured(reference, reference["searches"][0], args)
+    for row in study["searches"]:
+        actual = queue.configured(study, row, args)
+        expected = deepcopy(baseline)
+        expected.training_arguments.adaptive_lambda.soft_drop = row["soft_drop"]
+        expected.training_arguments.adaptive_lambda.hard_drop = row["hard_drop"]
+        assert OmegaConf.to_container(actual, resolve=True) == OmegaConf.to_container(expected, resolve=True)
+    assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("count", [0, 1, 2, 4])
+def test_three_model_manifest_rejects_other_counts(tmp_path, count):
+    import yaml
+    study = queue.load_study(QUALITY17M_CONFIG)
+    study["searches"] = [{**study["searches"][0], "id": f"run_{i}"} for i in range(count)]
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(study))
+    with pytest.raises(ValueError, match="Unexpected number of models"):
+        queue.load_study(path)
 
 
 def test_independent_four_search_budget_and_hard_only_recipe_diff(tmp_path):
@@ -186,7 +224,7 @@ def test_missing_reference_blocks_before_queue_or_training(tmp_path, monkeypatch
     assert not (tmp_path / "new").exists()
 
 
-@pytest.mark.parametrize("config_path, count", [(full4.DEFAULT_CONFIG, 4), (STRONGER_CONFIG, 2)])
+@pytest.mark.parametrize("config_path, count", [(full4.DEFAULT_CONFIG, 4), (STRONGER_CONFIG, 2), (QUALITY17M_CONFIG, 3)])
 def test_each_model_finishes_recovery_and_test_before_next_search(tmp_path, monkeypatch, config_path, count):
     import net_complexity.training.one_shot_pruning as runtime
     from test_stochastic_st_followup import fake_cells

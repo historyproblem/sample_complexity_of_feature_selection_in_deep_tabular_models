@@ -59,7 +59,7 @@ def main(argv=None, *, default_config=DEFAULT_CONFIG, default_stage="run"):
     args.skip_wait, args.keep_epoch_checkpoints = True, False
     try:
         study = queue.load_study(args.config)
-        queue.require(study["protocol"] in {queue.FULL4_PROTOCOL, queue.FULL2_PROTOCOL, queue.TIMING12_PROTOCOL},
+        queue.require(study["protocol"] in {queue.FULL4_PROTOCOL, queue.FULL3_PROTOCOL, queue.FULL2_PROTOCOL, queue.TIMING12_PROTOCOL},
                       "This launcher requires a fresh full-model or timing-grid configuration")
         queue.require(study["protocol"] != queue.TIMING12_PROTOCOL or args.stage in {"search", "inspect"},
                       "Timing12 is search-only; recovery/test require a separate explicit launch")
