@@ -1,0 +1,21 @@
+{
+  "protocol": "mobilenet_strong10_v1",
+  "base_config": "mobilenet_strong10",
+  "output_root": "outputs/runs/mobilenet_strong10_20261128",
+  "reference_dir": "outputs/runs/mobilenet_strong10_20261128/reference",
+  "epochs_per_model": 45,
+  "removal_threshold": 0.9,
+  "seed": 42,
+  "runs": [
+    {"id": "r01_p87_l1em2", "lambda_init": 0.01, "mask_init": "paper", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r02_p98_l1em2", "lambda_init": 0.01, "mask_init": "paper_resnet50", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r03_p87_l1em1", "lambda_init": 0.1, "mask_init": "paper", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r04_p98_l1em1", "lambda_init": 0.1, "mask_init": "paper_resnet50", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r05_p87_l1", "lambda_init": 1.0, "mask_init": "paper", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r06_p98_l1", "lambda_init": 1.0, "mask_init": "paper_resnet50", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r07_quality_band", "lambda_init": 0.1, "mask_init": "paper", "soft_drop": 0.04, "hard_drop": 0.10, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r08_wide_band", "lambda_init": 0.1, "mask_init": "paper", "soft_drop": 0.15, "hard_drop": 0.25, "warmup_epochs": 5, "search_epochs": 30, "recovery_epochs": 15},
+    {"id": "r09_search35", "lambda_init": 0.1, "mask_init": "paper", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 3, "search_epochs": 35, "recovery_epochs": 10},
+    {"id": "r10_recovery20", "lambda_init": 0.1, "mask_init": "paper", "soft_drop": 0.10, "hard_drop": 0.20, "warmup_epochs": 8, "search_epochs": 25, "recovery_epochs": 20}
+  ]
+}

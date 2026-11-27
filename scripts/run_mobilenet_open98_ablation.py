@@ -131,7 +131,7 @@ def validate_configs(repo: Path) -> dict:
             "initial_p_open": 1 / (1 + math.exp(-3.9)), "soft_drop": .06, "hard_drop": .10}
 
 
-def validate_stage(stage: single.Stage) -> bool:
+def validate_stage(stage: single.Stage, *, search_epochs: int = 30, recovery_epochs: int = 15) -> bool:
     if not stage.directory.exists():
         return False
     try:
@@ -148,14 +148,16 @@ def validate_stage(stage: single.Stage) -> bool:
         if len(summary["cycle_results"]) != 1 or len(summary["recovery_results"]) != 1:
             raise ValueError("Unexpected extra search/recovery passes.")
         search, recovery = summary["cycle_results"][0], summary["recovery_results"][0]
-        if search["num_epochs_executed"] != 30 or recovery["num_epochs_executed"] != 15:
-            raise ValueError("Expected30search+15recovery.")
+        if search_epochs + recovery_epochs != 45:
+            raise ValueError("The requested MobileNet phases must total45epochs.")
+        if search["num_epochs_executed"] != search_epochs or recovery["num_epochs_executed"] != recovery_epochs:
+            raise ValueError(f"Expected{search_epochs}search+{recovery_epochs}recovery.")
         if summary["final_result"] != recovery:
             raise ValueError("Final model differs from the recovery result.")
         handoff = summary["weight_handoff"]
         if not handoff["enabled"] or not handoff["surviving_weights_transferred"]:
             raise ValueError("Trained search weights were not inherited by recovery.")
-        for result, epochs in [(search, 30), (recovery, 15)]:
+        for result, epochs in [(search, search_epochs), (recovery, recovery_epochs)]:
             root = Path(result["run_dir"])
             if not root.resolve().is_relative_to(stage.directory.resolve()):
                 raise ValueError("Result belongs to another output directory.")
@@ -185,8 +187,8 @@ def validate_stage(stage: single.Stage) -> bool:
     return True
 
 
-def comparison_record(stage: single.Stage) -> dict:
-    if not validate_stage(stage):
+def comparison_record(stage: single.Stage, *, search_epochs: int = 30, recovery_epochs: int = 15) -> dict:
+    if not validate_stage(stage, search_epochs=search_epochs, recovery_epochs=recovery_epochs):
         raise RuntimeError("Cannot summarize an uncompleted arm.")
     summary = json.loads((stage.directory / "cyclic_summary.json").read_text())
     final = summary["final_result"]

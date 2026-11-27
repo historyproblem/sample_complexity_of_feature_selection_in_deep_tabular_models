@@ -1,0 +1,28 @@
+# Ten stronger stochastic-ST probes; per-run method parameters come from JSON.
+# Keep the established MobileNet, data, optimizer and trained-survivor handoff.
+defaults:
+  - mobilenet_open98_gumbel
+  - _self_
+
+model:
+  lambda_coef: 0.01
+  gumbel_init_mode: paper
+
+training_arguments:
+  adaptive_lambda:
+    baseline_history_dir: outputs/runs/mobilenet_strong10_20261128/reference
+    warmup_epochs: 5
+    soft_drop: 0.10
+    hard_drop: 0.20
+
+cyclic_channel_pruning:
+  g_prob_threshold: 0.9
+
+run_history:
+  root_dir: outputs/runs/mobilenet_strong10_20261128
+
+mlflow:
+  experiment_name: mobilenet_strong10_20261128
+  run_name: mobilenet_strong10
+  tags:
+    recipe: mobilenet_strong10_20261128
