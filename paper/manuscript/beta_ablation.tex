@@ -1,0 +1,18 @@
+% Beta ablation: MobileNetV2 / TinyImageNet-200.
+% Included in the manuscript's Ablation Studies section.
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.8\textwidth]{figures/beta_opening_scores.pdf}
+  \caption{Entropy-coefficient analysis for one-cycle MobileNetV2 pruning
+    on TinyImageNet-200.}
+  \label{fig:beta-channel-ablation}
+  \Description{Opening-score distributions compare beta values zero,
+    one half, one and two. Larger beta shifts more scores toward one half.}
+\end{figure*}
+
+\paragraph{Effect of entropy regularization.}
+With all other settings held fixed, changing $\beta$ is accompanied by
+a redistribution of opening scores
+(Figure~\ref{fig:beta-channel-ablation}) and retained channels.
+In the examined runs, positive $\beta$ values yield a smaller fraction
+of retained output channels than $\beta=0$.
